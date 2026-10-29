@@ -173,13 +173,15 @@ PROFILES: dict[RobotType, RobotProfile] = {
         # is republished from rt/lf/sportmodestate like the AS2's.
         "sportmodestate",
         gait_assertion="classic_walk", needs_gait_worker=True,
-        stand_steps=("StandUp", "BalanceStand", "ClassicWalk", "SwitchGait"),
+        # The walk gait is not a row: the driver appends it to every stand (a
+        # SwitchGait(1) here is what a b2 stand got wrong -- 2444767).
+        stand_steps=("StandUp", "BalanceStand"),
         sit_steps=("StandDown",)),
     RobotType.B2W: RobotProfile(
         RobotType.B2W, Family.QUADRUPED_WHEELED, "sport",
         _sport_client("b2"), "unitree_go", _battery_go(), "robot_odom",
         gait_assertion="classic_walk", needs_gait_worker=True,
-        stand_steps=("StandUp", "BalanceStand", "ClassicWalk", "SwitchGait"),
+        stand_steps=("StandUp", "BalanceStand"),
         sit_steps=("StandDown",)),
     RobotType.G1: RobotProfile(
         RobotType.G1, Family.HUMANOID, "loco", _g1_client,

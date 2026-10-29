@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -149,13 +151,15 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
   // Convert a position in the outer GestureDetector's local coordinates
   // (= InteractiveViewer viewport coords) to image-pixel coordinates.
   // InteractiveViewer applies _txCtrl.value to its child (Center(SizedBox)).
-  // Inverse transform gives us child coords; subtract the Center offset.
+  // Undo pan/zoom, then undo the fitted image scale and centered padding.
   Offset _viewportToImagePixel(Offset viewportPos, Size viewportSize) {
     final inv = Matrix4.inverted(_txCtrl.value);
     final childPoint = MatrixUtils.transformPoint(inv, viewportPos);
-    final cx = (viewportSize.width - widget.info.width) / 2;
-    final cy = (viewportSize.height - widget.info.height) / 2;
-    return childPoint - Offset(cx, cy);
+    final scale = math.min(viewportSize.width / widget.info.width,
+        viewportSize.height / widget.info.height);
+    final cx = (viewportSize.width - widget.info.width * scale) / 2;
+    final cy = (viewportSize.height - widget.info.height * scale) / 2;
+    return (childPoint - Offset(cx, cy)) / scale;
   }
 
   Future<void> _addPoi(Offset imagePixel) async {
@@ -257,6 +261,7 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
         LayoutBuilder(
           builder: (_, constraints) {
             final vp = Size(constraints.maxWidth, constraints.maxHeight);
+            final scale = math.min(vp.width / imageW, vp.height / imageH);
             return GestureDetector(
               behavior: HitTestBehavior.opaque,
               // Long-press → add POI
@@ -282,16 +287,16 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
                 boundaryMargin: const EdgeInsets.all(80),
                 child: Center(
                   child: SizedBox(
-                    width: imageW,
-                    height: imageH,
+                    width: imageW * scale,
+                    height: imageH * scale,
                     child: Stack(
                       clipBehavior: Clip.none,
                       children: [
                         // ── Occupancy map ─────────────────────────────────────
                         Image.network(
                           imageUrl,
-                          width: imageW,
-                          height: imageH,
+                          width: imageW * scale,
+                          height: imageH * scale,
                           fit: BoxFit.fill,
                           loadingBuilder: (_, child, progress) => progress == null
                               ? child
@@ -314,8 +319,8 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
                         ...widget.info.pois.map((poi) {
                           final px = _worldToPixel(poi.x, poi.y);
                           return Positioned(
-                            left: px.dx - 10,
-                            top: px.dy - 10,
+                            left: px.dx * scale - 4,
+                            top: px.dy * scale - 4,
                             child: _PoiMarker(label: poi.name),
                           );
                         }),
@@ -368,18 +373,18 @@ class _PoiMarker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 20,
-          height: 20,
+          width: 8,
+          height: 8,
           decoration: BoxDecoration(
             color: const Color(0xFF4A90D9),
             shape: BoxShape.circle,
             border: Border.all(color: Colors.white, width: 1.5),
             boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 3)],
           ),
-          child: const Icon(Icons.place, color: Colors.white, size: 12),
         ),
         const SizedBox(height: 2),
         Container(

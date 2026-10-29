@@ -8,33 +8,30 @@ and a reverse gate. With no route available it falls back to distance-to-goal.
 """
 
 
-import array
+import heapq
 import json
 import rclpy
 from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
-from sensor_msgs.msg import Image, CameraInfo, PointField
+from sensor_msgs.msg import Image, CameraInfo
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
 from dataclasses import replace
 from numba import njit
-import cv2
 import rclpy
 import message_filters
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
-from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
+from sensor_msgs.msg import Image, CameraInfo, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
-from geometry_msgs.msg import PoseStamped, Point32
-from std_msgs.msg import Header, Float32, String
+from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Bool, Header, Float32, String
 from cv_bridge import CvBridge
-import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
-from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
+from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
-from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
 
 # === Helper functions ===
 @njit(cache=True)
@@ -177,13 +174,23 @@ def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
-    max_lat_acc=1e9, min_linear_vel=0.0,
+    max_lat_acc=1e9, min_linear_vel=0.0, turn_slowdown=0.0, min_angular_vel=0.0,
 ):
-    """Regular sampled lattice (forward-only).
+    """Regular sampled lattice (forward-only), plus one standstill row.
+
+    No turn-in-place rows: turning is generate_rotate_then_go's, which only offers a
+    turn that ends in a way forward. No row turns slower than `min_angular_vel`
+    either, the least the chassis executes: cmd_vel_control raises any slower turn
+    to it, so such a row would be scored as a curve the robot does not drive.
 
     `max_lat_acc` caps vx*omega, so the same steering that is fine at a crawl is not
     offered at speed. It binds only above max_lat_acc/max_angular_vel; below that the
     omega range is unchanged, and at a standstill it does not bind at all.
+
+    `turn_slowdown` takes speed off a row in proportion to how hard it turns:
+    `vx * (1 - turn_slowdown * |omega| / max_angular_vel)`, never under the floor. A
+    row that turns at the full rate drives at `1 - turn_slowdown` of its speed. The
+    standstill rows are left alone, and so is a row already at the floor.
     """
     num_steps = int(duration / dt) + 1
 
@@ -194,7 +201,7 @@ def generate_trajectory_library_3d(
     # Sampling from 0 offered a creep band under the floor -- at vx_max 0.20 the
     # speeds were 0, 0.033, 0.067, ... and the cost minimum sat on 0.033, which
     # cmd_vel_control reads as a stop while `n_fwd_ok` counted it a way forward.
-    # vx=0 stays: the turn-in-place vocabulary the heading term ranks is built on it.
+    # vx=0 stays for the standstill row.
     vx_lo = min_linear_vel if min_linear_vel < vx_max else vx_max
     vx_samples = np.empty(n_vx)
     vx_samples[0] = 0.0
@@ -215,8 +222,13 @@ def generate_trajectory_library_3d(
             omega_lim = max_lat_acc / vx
         omega_y_samples = np.linspace(-omega_lim, omega_lim, n_omega)
         for i_omega in range(n_omega):
-            k += 1
             omega_y = omega_y_samples[i_omega]
+            if abs(omega_y) > 1e-9 and (vx < 1e-6 or abs(omega_y) < min_angular_vel):
+                continue
+            k += 1
+            vx = vx_samples[i_vx]
+            if vx > 1e-6 and turn_slowdown > 0.0:
+                vx = max(vx_lo, vx * (1.0 - turn_slowdown * abs(omega_y) / max_angular_vel))
             p = init_p.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
@@ -233,37 +245,104 @@ def generate_trajectory_library_3d(
             trajectories[k] = traj
             params[k, 0] = vx
             params[k, 1] = omega_y
-    return trajectories, params
+    return trajectories[:k + 1], params[:k + 1]
+
+
+#: Turns rotate-then-go offers: every 15 deg either way, 180 once.
+ROTATE_DEG = np.array([d for d in range(-165, 181, 15) if d != 0], dtype=np.float64)
+#: How far a turn in place has to be able to drive afterwards for it to be offered.
+ROTATE_THEN_GO_M = 0.5
+
+
+@njit(cache=True)
+def generate_rotate_then_go(init_p, init_q, deltas_rad, turn_rate, go_speed, go_m, dt, num_steps):
+    """Per delta: turn in place by it at `turn_rate`, then straight ahead `go_m` at
+    `go_speed`, then hold. Returns (trajectories, params, durations); params are
+    (go_speed, signed turn_rate) in the lattice's omega convention, durations the
+    seconds the motion takes before the hold."""
+    n = len(deltas_rad)
+    trajectories = np.empty((n, num_steps, 7))
+    params = np.empty((n, 2))
+    durations = np.empty(n)
+    for k in range(n):
+        d = deltas_rad[k]
+        sign = 1.0 if d > 0.0 else -1.0
+        p = init_p.copy()
+        q = quat_to_matrix(init_q)
+        turned, gone = 0.0, 0.0
+        for i in range(num_steps):
+            step = min(turn_rate * dt, abs(d) - turned)
+            if step > 1e-9:
+                q = q @ rotvec_to_matrix(np.array([0.0, sign * step, 0.0]))
+                turned += step
+            elif gone < go_m:
+                ds = min(go_speed * dt, go_m - gone)
+                p += q @ np.array([0.0, 0.0, ds])
+                gone += ds
+            trajectories[k, i, :3] = p
+            trajectories[k, i, 3:] = matrix_to_quat(q)
+            trajectories[k, i, 2] = init_p[2]
+        params[k, 0] = go_speed
+        params[k, 1] = sign * turn_rate
+        durations[k] = abs(d) / turn_rate + go_m / go_speed
+    return trajectories, params, durations
+
+
+def _hold_to(trajectories, num_steps):
+    """Pad each trajectory to `num_steps` by holding its last pose."""
+    extra = num_steps - trajectories.shape[1]
+    if extra <= 0:
+        return trajectories
+    return np.concatenate([trajectories, np.repeat(trajectories[:, -1:], extra, axis=1)], axis=1)
+
+
+#: The reverse rows: straight back at REVERSE_SPEED for the rollout, and, for when that
+#: is in collision, straight back at REVERSE_CAREFUL_SPEED for REVERSE_CAREFUL_M and
+#: then holding. cmd_vel_control drives a reverse at the planned speed, capped at its
+#: max_reverse_speed.
+REVERSE_SPEED = 0.3
+REVERSE_CAREFUL_SPEED = 0.15
+REVERSE_CAREFUL_M = 0.3
+
+
+def _straight_back(init_p, init_q, speed, length_m, dt, num_steps):
+    q = quat_to_matrix(init_q)
+    back = q @ np.array([0.0, 0.0, -1.0])
+    gone = np.minimum(speed * dt * np.arange(1, num_steps + 1), length_m)
+    traj = np.empty((num_steps, 7), dtype=np.float64)
+    traj[:, :3] = init_p + gone[:, None] * back
+    traj[:, 2] = init_p[2]
+    traj[:, 3:] = matrix_to_quat(q)
+    return traj
 
 
 def generate_predefined_trajectory_vocabularies(
     duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
-    """
-    Predefined trajectory vocabularies.
-    """
+    """The reverse rows (REVERSE_SPEED, REVERSE_CAREFUL_SPEED): (trajectories, params)."""
     num_steps = int(duration / dt) + 1
-    trajectories = []
-    params = []
+    trajectories = np.stack([
+        _straight_back(init_p, init_q, REVERSE_SPEED, REVERSE_SPEED * duration, dt, num_steps),
+        _straight_back(init_p, init_q, REVERSE_CAREFUL_SPEED, REVERSE_CAREFUL_M, dt, num_steps),
+    ])
+    params = np.array([[-REVERSE_SPEED, 0.0], [-REVERSE_CAREFUL_SPEED, 0.0]])
+    return trajectories, params
 
-    # constant reverse trajectory
-    # vx = -0.3 m/s, omega = 0
-    reverse_speed = 0.3
-    p = init_p.copy()
-    q = quat_to_matrix(init_q)
-    traj = np.empty((num_steps, 7), dtype=np.float64)
-    for i in range(num_steps):
-        v_world = q @ np.array([0.0, 0.0, -reverse_speed])
-        p += v_world * dt
-        traj[i, :3] = p
-        traj[i, 3:] = matrix_to_quat(q)
-    for i in range(num_steps):
-        traj[i, 2] = traj[0, 2]
-    trajectories.append(traj)
-    params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
 
-    return np.asarray(trajectories), np.asarray(params)
+def admit_reverse(scores, params, should_reverse):
+    """`scores` with exactly one reverse row open while the gate is armed, and none
+    while it is not: the full reverse when it is clear, else the careful one, which
+    is open whatever it hits -- a robot armed to back off with its nose on an obstacle
+    cell otherwise has every row in collision and stands there (122, 2026-10-12)."""
+    scores = np.array(scores, dtype=float)
+    full = np.flatnonzero(np.isclose(params[:, 0], -REVERSE_SPEED))
+    careful = np.flatnonzero(np.isclose(params[:, 0], -REVERSE_CAREFUL_SPEED))
+    if not should_reverse or np.isfinite(scores[full]).all():
+        scores[careful] = np.inf
+    else:
+        scores[careful] = 0.0
+    return scores
 
 
 @njit(cache=True)
@@ -287,29 +366,17 @@ def angle_between(a, b):
 
 
 #: How short the way forward has to be for the reverse family to be armed, and how
-#: far it has to open back up before it disengages (1.5x, so the band is a band).
-#: Upstream main's pair; a tighter entry (0.10) nosed the robot into the wall.
-REVERSE_ENTER_M = 0.30
-REVERSE_EXIT_M = 0.45
-
-#: Per unit of ESDF clearance score, nonzero only inside safety_radius (a collision
-#: is inf and no weight reaches it). Restores upstream main's 100000-vs-100/m
-#: balance on the zeroed score: the shallowest graze the grid can read, one cell
-#: inside the band (1/0.15 - 1/0.2 at 0.05 m ≈ 3e4), beats every other cost term
-#: of a rollout combined.
-W_CLEARANCE = 20000.0
+#: far it has to open back up before it disengages. Upstream's pair is 0.30/0.45;
+#: the entry is 0.10 here, and the exit keeps upstream's 1.5x so the band is a band.
+REVERSE_ENTER_M = 0.10
+REVERSE_EXIT_M = 0.15
 
 
 def reverse_armed(front_clearance, resolution, engaged=False):
     """The reverse family is armed by the wall being close enough to back off.
 
-    It also used to arm on `n_fwd_ok == 0` -- no forward trajectory clear of
-    collision -- added for 21 s of standstill on 122 on 2026-09-09. That arm is gone:
-    the standstill it answered came from the gate banning EVERY non-reverse row, vx=0
-    included, so backing out was the only motion left. `reverse_gate_penalty` now
-    leaves the vx=0 rows alone, and on 122 2026-09-18 eight of the ten `fwd_ok == 0`
-    readings had turn-in-place rows clear -- the robot can turn out instead of
-    reversing out.
+    Never on "no forward row is clear": with turn-in-place rows clear the robot turns
+    out instead of backing out.
 
     Half a cell of slack because `front_clearance` counts grid steps: it lands on
     multiples of `resolution` and so never exactly on a threshold in metres. 6 * 0.05
@@ -320,17 +387,6 @@ def reverse_armed(front_clearance, resolution, engaged=False):
     """
     threshold = REVERSE_EXIT_M if engaged else REVERSE_ENTER_M
     return front_clearance <= threshold + resolution / 2
-
-
-def reverse_gate_penalty(vx, should_reverse):
-    """Keeps the armed family and bans the other one, as upstream's gate does.
-
-    The vx=0 rows are banned with the rest while reverse is armed. A fork-only
-    exemption for them was tried on 2026-09-18 and taken back out with this return
-    to upstream's shape; arming is rare enough at a 0.10 m entry (3.2% of frames
-    measured on 122) that the rows are available almost whenever they are wanted.
-    """
-    return 0.0 if (vx < 0.0) == should_reverse else 1e9
 
 
 @njit(cache=True)
@@ -377,7 +433,10 @@ def footprint_lattice(front_len, rear_len, half_w, safety_radius):
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_map,
                                 route_heading_map, origin, resolution, safety_radius=0.1,
-                                front_len=0.35, rear_len=0.35, half_w=0.15):
+                                front_len=0.35, rear_len=0.35, half_w=0.15,
+                                target_x=0.0, target_y=0.0, cam_x=0.0, cam_y=0.0, cam_z=0.0,
+                                arrive_m=0.0, arrive_ticks=2, tick_steps=5, band=0.5,
+                                has_route=True, dt=0.1):
     """
     Score trajectories by ESDF clearance over the footprint, sampled on a lattice fine
     enough that no obstacle can hide between the samples (see below), plus two lookups
@@ -386,13 +445,23 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
     :return: per trajectory, the obstacle score (inf on collision), the step index of the
              minimum clearance, the worst (max) distance from the trajectory center to the
              route over the whole trajectory, the route arc length still ahead of its end
-             cell, and how far its end heading is from the route's own direction there.
+             cell, and how far its end heading is from the route's own direction there;
+             then for the time cost: when map_node's arrival would fire (inf if it does
+             not), and at the end the distance from the route, the heading off the bearing
+             to the target, and the xy distance to it. Arrival is the target inside
+             `arrive_m` of the camera (`cam_*`, the body offset of
+             camera_to_robot_center) or of the control centre, where the route has run
+             out, for `arrive_ticks` samples `tick_steps` apart.
     """
     scores = []
     occ_points = []
     path_costs = []
     end_heading_errs = []
     end_remainings = []
+    arrive_ts = []
+    end_devs = []
+    end_goal_errs = []
+    end_goal_dxys = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
 
     off_fwd, off_lat = footprint_lattice(front_len, rear_len, half_w, safety_radius)
@@ -405,6 +474,13 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
         path_cost_max = 0.0
         path_cost_n = 0
         traveled_arc = 0.0
+        start_remaining = 1e3
+        start_x_img = int((traj[0, 0] - origin[0]) / resolution)
+        start_y_img = int((traj[0, 1] - origin[1]) / resolution)
+        if 0 <= start_x_img < ESDF_rows and 0 <= start_y_img < ESDF_cols:
+            start_remaining = float(remaining_map[start_x_img, start_y_img])
+        arrive_t = np.inf
+        inside_n = 0
 
         for i in range(len(traj)):
             x_world, y_world = traj[i, 0], traj[i, 1]
@@ -442,6 +518,30 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
                             path_cost_max = center_path_dist
                         path_cost_n += 1
 
+            if arrive_m > 0.0 and i > 0 and i % tick_steps == 0 and arrive_t == np.inf:
+                xi = int((x_world - origin[0]) / resolution)
+                yi = int((y_world - origin[1]) / resolution)
+                rem = 1e3
+                if 0 <= xi < ESDF_rows and 0 <= yi < ESDF_cols:
+                    rem = float(remaining_map[xi, yi])
+                if start_remaining < 1e3:
+                    rem = max(rem, start_remaining - traveled_arc)
+                cam_dx = (x_world + (1.0 - 2.0 * (qy * qy + qz * qz)) * cam_x
+                          + 2.0 * (qx * qy - qz * qw) * cam_y + 2.0 * (qx * qz + qy * qw) * cam_z
+                          - target_x)
+                cam_dy = (y_world + 2.0 * (qx * qy + qz * qw) * cam_x
+                          + (1.0 - 2.0 * (qx * qx + qz * qz)) * cam_y + 2.0 * (qy * qz - qx * qw) * cam_z
+                          - target_y)
+                r2 = arrive_m * arrive_m
+                if ((cam_dx * cam_dx + cam_dy * cam_dy < r2
+                     or (x_world - target_x) ** 2 + (y_world - target_y) ** 2 < r2)
+                        and (not has_route or rem <= band)):
+                    inside_n += 1
+                    if inside_n >= arrive_ticks:
+                        arrive_t = i * dt
+                else:
+                    inside_n = 0
+
         if path_cost_n > 0:
             path_costs.append(path_cost_max)
         else:
@@ -464,14 +564,18 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
             end_heading_err = angle_between(heading_of_pose7(traj[-1]),
                                             route_heading_map[end_x_img, end_y_img])
         end_heading_errs.append(end_heading_err)
-
-        start_x_img = int((traj[0, 0] - origin[0]) / resolution)
-        start_y_img = int((traj[0, 1] - origin[1]) / resolution)
-        if 0 <= start_x_img < ESDF_rows and 0 <= start_y_img < ESDF_cols:
-            start_remaining = float(remaining_map[start_x_img, start_y_img])
-            if start_remaining < 1e3:
-                end_remaining = max(end_remaining, start_remaining - traveled_arc)
+        if start_remaining < 1e3:
+            end_remaining = max(end_remaining, start_remaining - traveled_arc)
         end_remainings.append(end_remaining)
+        arrive_ts.append(arrive_t)
+        end_dev = 1e3
+        if 0 <= end_x_img < ESDF_rows and 0 <= end_y_img < ESDF_cols:
+            end_dev = float(path_dist_map[end_x_img, end_y_img])
+        end_devs.append(end_dev)
+        to_x = target_x - traj[-1, 0]
+        to_y = target_y - traj[-1, 1]
+        end_goal_errs.append(angle_between(np.arctan2(to_y, to_x), heading_of_pose7(traj[-1])))
+        end_goal_dxys.append((to_x * to_x + to_y * to_y) ** 0.5)
 
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
@@ -482,32 +586,16 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
                 max_steps = len(traj)
                 decay_factor = (max_steps - closest_step_for_traj) / max_steps
                 # Zeroed at safety_radius so the term is CONTINUOUS across the margin.
-                # A bare 1/d steps from 0 to ~1/safety_radius there, and at w_clearance
-                # that step is larger than every other term in the cost combined -- so a
-                # single grid cell flickering at the margin decides the selection.
+                # A bare 1/d steps from 0 to ~1/safety_radius there, and that step outweighs
+                # every other term -- a cell flickering at the margin decides the pick.
                 base_score = (1.0 / (min_dist_for_traj + 1e-3)
                               - 1.0 / (safety_radius + 1e-3))
                 scores.append(decay_factor * base_score)
         else:
             scores.append(0.0)
         occ_points.append(closest_step_for_traj)
-    return scores, occ_points, path_costs, end_remainings, end_heading_errs
-
-
-def cap_selected_arc(sel_traj, sel_vx, v_allow):
-    """Execution half of the sampling/execution decoupling: the lattice is sampled
-    at the class ceiling (_vx_max), so an arc whose vx exceeds the clearance
-    schedule's cap is scaled toward its start by v_allow/sel_vx -- cmd_vel_control
-    derives its speed off the path geometry, so the shrink IS the cap, and headings
-    do not move, so neither does omega. Reverse keeps the fixed-speed vocabulary
-    cmd_vel_control rewrites. Mutates sel_traj in place; returns the vx actually
-    executed (what the next clearance schedule must discount its reaction window
-    by -- a capped arc still reserves braking distance at the capped speed)."""
-    if sel_vx > v_allow:
-        k = v_allow / sel_vx
-        sel_traj[:, :3] = sel_traj[0, :3] + (sel_traj[:, :3] - sel_traj[0, :3]) * k
-        return v_allow
-    return sel_vx
+    return (scores, occ_points, path_costs, end_remainings, end_heading_errs,
+            arrive_ts, end_devs, end_goal_errs, end_goal_dxys)
 
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
@@ -543,44 +631,253 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
     return (along >= -rear_len) & (along <= front_len) & (np.abs(across) <= half_w)
 
 
-def route_band_fade(end_remaining_m, terminal_band_m):
-    """How much of the route is still ahead, as 0..1 over the last `terminal_band_m`.
-
-    One encoding of the band, because two terms hand over across it: outside it the
-    route says which way to point and how much progress is left, inside it the route
-    has run out (remaining_map saturates at 0 and can rank nothing) and the goal --
-    its position and its bearing -- takes over. Written twice, the two would drift and
-    the robot would be pulled toward two different headings on arrival.
-    """
-    return min(1.0, end_remaining_m / max(terminal_band_m, 1e-6))
-
-
-def route_heading_penalty(weight, heading_err_rad, end_remaining_m, terminal_band_m):
-    """What a candidate pays for not pointing the way the route runs.
-
-    A separate function because it is the whole fix and it has to be assertable: the
-    cost it feeds is a closure inside a 200-line callback, so a test that only checked
-    the heading FIELD would go green with this term deleted from the cost.
-    """
-    return weight * heading_err_rad * route_band_fade(end_remaining_m, terminal_band_m)
+#: map_node's arrival circles at a tighter radius, and its _ARRIVE_TICKS at its 0.1 s
+#: nav tick: a row counts as arriving only well inside where map_node ends the leg.
+ARRIVE_M = ROBOT_CONFIG.planned_arrival_radius
+ARRIVE_TICKS = 1
+ARRIVE_TICK_S = 0.1
+#: Route metres one unit of clearance score is worth.
+CLEARANCE_M = 2.0
+#: Rows this close to the fastest count as equally fast; the least motion among them wins.
+TIE_S = 0.15
 
 
-def turn_in_place_penalty(vx, yaw_rate, last_yaw_rate, w_turn, w_reversal):
-    """What a vx=0 row pays per rad/s of rotation, and more if it turns against the
-    last selected rotation. Moving rows pay nothing here.
+def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_gerr,
+                   end_gdxy, here_arrived, has_route, should_reverse, v, w, carrot_rem, t_end,
+                   carry=-1, last_yaw=0.0, stand_still=False):
+    """Index of the row with the least time to go: when map_node's arrival fires, or the
+    row's own duration `t_end` plus the distance left to the carrot at `v` and the
+    heading left at `w` (a row past the carrot along the route gains what it went beyond
+    it). The reverse gate
+    filters, and so does standing still while another row is open, unless the robot is
+    already inside the arrival radius. Arrays are per row; `scores` inf is a collision.
 
-    Yaw rates are world-frame (rad/s), from the trajectory poses, not the lattice's
-    omega param -- the reverse vocabulary and the lattice do not share its sign.
-    `w_turn + w_reversal` has to stay under the heading term's reach per rad/s
-    (w_route_heading * rollout duration), or a standstill outranks the turn that
-    would clear a large heading error.
-    """
-    if abs(vx) > 1e-3:
-        return 0.0
-    cost = w_turn * abs(yaw_rate)
-    if yaw_rate * last_yaw_rate < 0.0:
-        cost += w_reversal * abs(yaw_rate)
-    return cost
+    Among the rows within TIE_S of the fastest, the `carry` row (last frame's choice
+    carried forward, -1 for none) wins outright; otherwise the least motion, then a
+    yaw that does not reverse `last_yaw`, then the time.
+
+    `stand_still` (strict follow, the route is blocked) overrides all of it: the
+    standstill row, which the lattice always carries."""
+    still = (np.abs(vx) <= 1e-3) & (np.abs(yaw) < 1e-3)
+    if stand_still:
+        return int(np.flatnonzero(still)[0])
+    free = np.isfinite(scores)
+    ok = free & ((vx < 0.0) == should_reverse)
+    if (ok & ~still).any() and not here_arrived:
+        ok &= ~still
+    if not ok.any():
+        ok = free
+    if has_route:
+        # Time to the carrot: to it and facing it, until a row has gone past it
+        # along the route -- then what it has gained beyond it, along the route and
+        # facing the way the route runs. `carrot_rem` is the route left at the carrot.
+        past = end_rem < carrot_rem
+        d = np.where(past, end_rem - carrot_rem, end_gdxy) + end_dev
+        h = np.where(past, end_rerr, end_gerr)
+    else:
+        d, h = end_gdxy, end_gerr
+    t = np.where(np.isfinite(arrive_t), arrive_t, t_end + d / v + h / w)
+    t = np.where(ok, t + CLEARANCE_M * np.where(free, scores, 0.0) / v, np.inf)
+    tied = np.flatnonzero(t <= t.min() + TIE_S)
+    if carry in tied and np.isfinite(t[carry]):
+        return carry
+    motion = np.abs(vx[tied]) / v + np.abs(yaw[tied]) / w
+    flips = yaw[tied] * last_yaw < 0.0
+    return int(tied[np.lexsort((t[tied], flips, motion))[0]])
+
+
+def carried_row(params, is_turn, vx, omega):
+    """Index of this frame's lattice or reverse row that is last frame's (vx, omega)
+    choice, or -1. A constant (vx, omega) row is the same motion from any pose, so
+    it is matched, not rebuilt: same direction of travel and of turn, then the
+    nearest omega, then the nearest vx (the speed cap moves the vx samples)."""
+    same = (~is_turn & (np.sign(params[:, 0]) == np.sign(vx))
+            & (np.sign(params[:, 1]) == np.sign(omega)))
+    idx = np.flatnonzero(same)
+    if not len(idx):
+        return -1
+    order = np.lexsort((np.abs(params[idx, 0] - vx), np.abs(params[idx, 1] - omega)))
+    return int(idx[order[0]])
+
+
+def turn_remainder(init_q, heading, step):
+    """The turn still left from `init_q` to the world `heading` a turn row was turning
+    to, as a generate_rotate_then_go delta; None once within `step` of it. A delta
+    turns about camera +y, which is world yaw the other way, hence the sign."""
+    rem = wrap_angle(heading - heading_of_pose7(np.concatenate([np.zeros(3), init_q])))
+    return None if abs(rem) <= step else -rem
+
+
+def route_left_at(route_xy, xy):
+    """Route arc length left from the route point nearest `xy` to the route's end."""
+    route_xy = np.asarray(route_xy, dtype=float)
+    k = int(np.argmin(np.linalg.norm(route_xy - np.asarray(xy, dtype=float), axis=1)))
+    return float(np.linalg.norm(np.diff(route_xy[k:], axis=0), axis=1).sum())
+
+
+def route_blocked_ahead(ESDF_map, path_dist_map, remaining_map, rem_here, stop_rem, half_w):
+    """Whether an obstacle is on the route between the robot and the stop pose: a route
+    cell whose remaining arc lies in [stop_rem, rem_here] has ESDF under `half_w`, so the
+    body would not fit driving the route itself. `half_w`, not plus the safety radius: the
+    route is where the capture drove, often closer to a wall than that. Route cells are
+    the zeros of `path_dist_map` (build_route_fields); cells off the grid are not seen."""
+    ahead = ((path_dist_map == 0.0) & (remaining_map <= rem_here)
+             & (remaining_map >= stop_rem))
+    return bool((ESDF_map[ahead] < half_w).any())
+
+
+@njit(cache=True)
+def _grid_dijkstra(free, seed_i, seed_j, seed_m, need_i, need_j, resolution):
+    """Metres from the seeds (cells, each at its own starting distance) to each cell
+    through `free` cells, 8-connected. Stops once every `need` cell is settled: only
+    those are exact, the rest may be inf."""
+    H, W = free.shape
+    dist = np.full((H, W), np.inf)
+    want = np.zeros((H, W), dtype=np.bool_)
+    left = 0
+    for k in range(len(need_i)):
+        if not want[need_i[k], need_j[k]]:
+            want[need_i[k], need_j[k]] = True
+            left += 1
+    heap = [(0.0, 0, 0)]                # numba types the list from its first item
+    heap.pop()
+    for k in range(len(seed_i)):
+        dist[seed_i[k], seed_j[k]] = seed_m[k]
+        heapq.heappush(heap, (seed_m[k], seed_i[k], seed_j[k]))
+    diag = resolution * 2.0 ** 0.5
+    while len(heap) > 0 and left > 0:
+        d, i, j = heapq.heappop(heap)
+        if d > dist[i, j]:
+            continue
+        if want[i, j]:
+            want[i, j] = False
+            left -= 1
+        for di in range(-1, 2):
+            for dj in range(-1, 2):
+                if di == 0 and dj == 0:
+                    continue
+                a, b = i + di, j + dj
+                if a < 0 or a >= H or b < 0 or b >= W or not free[a, b]:
+                    continue
+                nd = d + (diag if di != 0 and dj != 0 else resolution)
+                if nd < dist[a, b]:
+                    dist[a, b] = nd
+                    heapq.heappush(heap, (nd, a, b))
+    return dist
+
+
+@njit(cache=True)
+def _first_leg(dist, free, i, j, resolution):
+    """The farthest cell down `dist`'s steepest descent from (i, j) that (i, j) still
+    sees in a straight line over `free` cells: where the way round first turns. (i, j)
+    itself when it is where the descent ends."""
+    H, W = free.shape
+    diag = resolution * 2.0 ** 0.5
+    li, lj = i, j
+    ci, cj = i, j
+    while True:
+        bi, bj, best = -1, -1, dist[ci, cj]
+        for di in range(-1, 2):
+            for dj in range(-1, 2):
+                a, b = ci + di, cj + dj
+                if (di == 0 and dj == 0) or a < 0 or a >= H or b < 0 or b >= W:
+                    continue
+                nd = dist[a, b] + (diag if di != 0 and dj != 0 else resolution)
+                if dist[a, b] < dist[ci, cj] and nd <= best + 1e-9:
+                    bi, bj, best = a, b, nd
+        if bi < 0:
+            return li, lj
+        ci, cj = bi, bj
+        n = 2 * max(abs(ci - i), abs(cj - j))
+        for k in range(1, n):
+            a = int(i + 0.5 + (ci - i) * k / n)
+            b = int(j + 0.5 + (cj - j) * k / n)
+            if not free[a, b]:
+                return li, lj
+        li, lj = ci, cj
+
+
+def distance_to_target(free, origin, resolution, target_xy, nearest, need_i, need_j):
+    """A grid of metres to `target_xy` through `free` cells, 8-connected, exact at the
+    `need` cells (inf where they cannot reach it; other cells may be inf). A target off the grid is
+    reached through the grid's free edge cells, each seeded with its straight distance to
+    it; a target on a cell that is not free, through the free cell nearest it --
+    `nearest`, the (rows, cols) index arrays `distance_transform_edt(~free,
+    return_indices=True)` gives."""
+    H, W = free.shape
+    ti, tj = int((target_xy[0] - origin[0]) / resolution), int((target_xy[1] - origin[1]) / resolution)
+    if 0 <= ti < H and 0 <= tj < W:
+        fi, fj = nearest[0][ti, tj], nearest[1][ti, tj]
+        seeds = np.array([[fi, fj]])
+        seed_m = np.array([np.hypot(fi - ti, fj - tj) * resolution])
+    else:
+        edge = np.zeros_like(free)
+        edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
+        seeds = np.argwhere(edge & free)
+        xy = np.asarray(origin[:2]) + (seeds + 0.5) * resolution
+        seed_m = np.linalg.norm(xy - np.asarray(target_xy[:2]), axis=1)
+    return _grid_dijkstra(np.ascontiguousarray(free), seeds[:, 0].astype(np.int64),
+                          seeds[:, 1].astype(np.int64), seed_m.astype(np.float64),
+                          np.asarray(need_i, dtype=np.int64), np.asarray(need_j, dtype=np.int64),
+                          float(resolution))
+
+
+def sees_target(ends_xy, target_xy, free, origin, resolution, band):
+    """Per row, whether the straight line from its end to the target stays on `free`
+    cells but for its last `band` (a target beside an obstacle sits in that band).
+    Off-grid stretches of the line count as clear."""
+    ends_xy = np.asarray(ends_xy, dtype=float)
+    target = np.asarray(target_xy[:2], dtype=float)
+    shape = np.array(free.shape)
+    org = np.asarray(origin[:2], dtype=float)
+    reach = np.max(np.linalg.norm(target - ends_xy, axis=1), initial=0.0)
+    n = max(2, int(np.ceil(reach / (resolution / 2))) + 1)
+    pts = ends_xy[:, None, :] + np.linspace(0.0, 1.0, n)[None, :, None] * (target - ends_xy)[:, None, :]
+    on_grid = np.all((pts >= org) & (pts < org + shape * resolution), axis=2)
+    near_target = np.linalg.norm(pts - target, axis=2) <= band
+    c = np.clip(((pts - org) / resolution).astype(int), 0, shape - 1)
+    return ~(~free[c[..., 0], c[..., 1]] & on_grid & ~near_target).any(axis=1)
+
+
+def around_obstacles(ends_xy, end_headings, straight, bearing_err, scores, target_xy, free,
+                     origin, resolution, band):
+    """Per row, the distance from its end to the target through `free` cells -- those the
+    body fits by its narrowest (`band` clear of an obstacle), so turning room is left to
+    the rows' own footprint check -- and the heading error to the way there. A row that
+    sees the target (`sees_target`) keeps `straight` and `bearing_err`; one that does not
+    reads the field, never under `straight`, and is measured against the bearing to where
+    that way first turns (`_first_leg`). The field is
+    built only when a collision-free row is out of sight. A field that reaches no
+    collision-free row leaves every row `straight`: a target walled off on this grid is
+    more often noise or a way round off it than a dead end; otherwise a row the field
+    does not reach gets 1e3."""
+    ends_xy = np.asarray(ends_xy, dtype=float)
+    straight = np.asarray(straight, dtype=float)
+    target = np.asarray(target_xy[:2], dtype=float)
+    ok = np.isfinite(scores)
+    sight = sees_target(ends_xy, target, free, origin, resolution, band)
+    blind = ok & ~sight
+    if not blind.any():
+        return straight, bearing_err
+    _, (ni, nj) = distance_transform_edt(~free, return_indices=True)
+    e = np.clip(((ends_xy - np.asarray(origin[:2])) / resolution).astype(int), 0,
+                np.array(free.shape) - 1)
+    fi, fj = ni[e[:, 0], e[:, 1]], nj[e[:, 0], e[:, 1]]
+    field = distance_to_target(free, origin, resolution, target, (ni, nj), fi[blind], fj[blind])
+    out = straight.copy()
+    out[blind] = np.maximum(field[fi[blind], fj[blind]]
+                            + np.hypot(fi - e[:, 0], fj - e[:, 1])[blind] * resolution,
+                            straight[blind])
+    if not np.isfinite(out[ok]).any():
+        return straight, bearing_err
+    err = np.array(bearing_err, dtype=float)
+    org = np.asarray(origin[:2], dtype=float)
+    for k in np.flatnonzero(blind & np.isfinite(out)):
+        li, lj = _first_leg(field, free, fi[k], fj[k], resolution)
+        if (li, lj) != (fi[k], fj[k]):
+            to = org + (np.array([li, lj]) + 0.5) * resolution - ends_xy[k]
+            err[k] = angle_between(np.arctan2(to[1], to[0]), end_headings[k])
+    return np.where(np.isfinite(out), out, 1e3), err
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -670,15 +967,12 @@ class PlanningNode(Node):
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         # Instantaneous (vx, omega) feedforward of the selected trajectory. cmd_vel_control
         # consumes this directly instead of reverse-engineering it from path poses.
-        # angular.x is a backward-segment flag (fixed-speed reverse vocabulary).
+        # angular.x is a backward-segment flag (the reverse vocabulary).
         # Open-space forward-speed target (capture-speed prior or vx_max fallback), so
         # cmd_vel_control caps to the same prior-driven ceiling instead of a static one.
-        self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
-        self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
-        self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
-        self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
-        self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
+        # the raw grid, for planning_vis_node's views
+        self.occupancy_3d_pub = self.create_publisher(Image, '/planning/occupancy_3d', 10)
         # What the reverse gate decided, and what it cost. Published rather than only
         # logged so a tracer can keep it: container logs do not survive the round.
         self.gate_pub = self.create_publisher(String, '/planning/gate', 10)
@@ -686,8 +980,10 @@ class PlanningNode(Node):
         #: corridor opens past REVERSE_EXIT_M. It was lost in merge `3a69dbc`, whose
         #: subject says it brings in #247's reverse gate.
         self.reverse_engaged = False
+        # Two, not one: the Looper sends depth in pairs ~10ms apart, and a queue of one
+        # drops the first of each pair while a frame (~70ms) is being planned.
         latest_depth_only = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE
+            history=HistoryPolicy.KEEP_LAST, depth=2, reliability=ReliabilityPolicy.RELIABLE
         )
         poses_covering_one_depth_frame = QoSProfile(
             history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE
@@ -738,12 +1034,20 @@ class PlanningNode(Node):
         self.declare_parameter('vx_hard_max', 1.0)   # absolute forward-speed ceiling (hardware)
         self.declare_parameter('vx_min', 0.2)        # creep speed in tight space (m/s)
         self.declare_parameter('clear_c0_m', 0.35)   # net clearance <= this -> only vx_min
-        self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full open target
-        self.declare_parameter('clear_scan_m', 2.0)  # forward clearance scan cap (m)
+        # cmd_vel_control brakes at 0.6 m/s^2, so the ramp has to be long enough for it:
+        # from 1.0 m/s down to vx_min the linear schedule needs clear_open_m >= ~1.7.
+        self.declare_parameter('clear_open_m', 1.8)  # net clearance >= this -> full open target
+        # The front face sits ~2.5 m behind the grid's forward edge.
+        self.declare_parameter('clear_scan_m', 2.4)  # forward clearance scan cap (m)
         self.declare_parameter('t_react_s', 0.2)     # perception+plan latency (s)
         # Lateral-acceleration cap, vx*omega (m/s^2). Binds only above
-        # max_lat_acc/max_angular_vel; below that the omega range is unchanged.
-        self.declare_parameter('traj_max_lat_acc', 0.5)
+        # max_lat_acc/max_angular_vel; below that the omega range is unchanged. 1e9 is
+        # no cap: a fast row may turn at the full rate, so a turn costs no speed.
+        self.declare_parameter('traj_max_lat_acc', 1e9)
+        # Speed a turning row gives up, at the full turn rate: it drives at
+        # (1 - this) of its speed there, and proportionally less off it. A turn taken
+        # at the straight-line speed swings the footprint wide of the arc it plans.
+        self.declare_parameter('traj_turn_slowdown', 0.0)
         # Extra per-frame decay on cells under the footprint, on top of the global 0.99.
         self.declare_parameter('footprint_decay', 0.9)
         self._vx_max = float(self.get_parameter('vx_max').value)
@@ -754,6 +1058,7 @@ class PlanningNode(Node):
         self._clear_scan_m = float(self.get_parameter('clear_scan_m').value)
         self._t_react_s = float(self.get_parameter('t_react_s').value)
         self._traj_max_lat_acc = float(self.get_parameter('traj_max_lat_acc').value)
+        self._traj_turn_slowdown = float(self.get_parameter('traj_turn_slowdown').value)
         self._footprint_decay = float(self.get_parameter('footprint_decay').value)
 
         # Collision is checked over the WHOLE 3 s rollout, as upstream does. A
@@ -762,17 +1067,12 @@ class PlanningNode(Node):
         # but it let the planner commit to trajectories it had not fully vetted, and the
         # freeze it was meant to prevent turned out to have other causes.
 
-        # Fixed-speed reverse fallback: driven when every trajectory is in collision
-        # but the blockage is ahead (not already under the footprint).
-
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
         self.baseline = None
         self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
-        # Forward speed the published path actually carries, post-cap: the
-        # clearance schedule discounts by the speed being traveled, not the
-        # lattice param.
-        self._executed_vx = 0.0
+        self._last_yaw = 0.0  # its first step's world yaw rate
+        self._turn_heading = None  # world heading the last choice turns to, if a turn row
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -787,30 +1087,8 @@ class PlanningNode(Node):
             Path, '/mapping/global_plan', self._on_global_route, 1
         )
         self._global_route_map_xy = None
-        self.w_clearance = W_CLEARANCE
-        # among survivors, progress drives speed and follow keeps the robot from
-        # cutting across to a closer route point
-        self.w_route_progress = 100.0
-        self.w_path_follow = 80.0
-        # pulls the last stretch onto the exact goal, since remaining_map alone
-        # saturates at 0 before reaching it
-        self.w_goal_terminal = 100.0
-        # The last metres of route, over which the goal takes over from the route: the
-        # goal's position arms w_goal_terminal and its bearing replaces the route's
-        # direction in the heading term (route_band_fade).
+        # The last metres of route, where the target is the goal rather than a carrot.
         self.route_terminal_band = 0.5
-        # Per radian the trajectory's end heading is off the route's own direction.
-        # Held to half the progress term's reach: at 60 a standstill row that rotates
-        # a radian saved as much as a forward row advancing 0.6 m earned, so the two
-        # tied and noise picked the winner -- 4.5 m of path for 0.02 m of progress on
-        # 122 2026-09-18, standing still with a median 36 clear forward rows.
-        self.w_route_heading = 30.0
-        # Per rad/s of a turn-in-place row, and on top of that per rad/s when it turns
-        # against the last selected rotation. The sum stays under w_route_heading's
-        # 90 per rad/s over a 3 s rollout (turn_in_place_penalty).
-        self.w_turn_in_place = 10.0
-        self.w_turn_reversal = 30.0
-        self.last_yaw_rate = 0.0  # world yaw rate (rad/s) of the last selected trajectory
 
         # Climb region: the capture-path points, in this grid's frame, that the map
         # says were climbed through. Cells near them relax the obstacle z-span filter
@@ -836,18 +1114,34 @@ class PlanningNode(Node):
                                  self.climb_region_callback, 10)
 
         # Capture-speed prior from map_node's /planning/speed_cap: the operator's
-        # local speed (m/s) near the robot. It IS the open-space target speed (scaled
-        # by capture_speed_gain), clamped to [vx_min, vx_hard_max] -- so it may raise
-        # the target above vx_max where the operator went fast, never past the hardware
-        # ceiling. NaN (off-path / unknown) or a stale stream -> fall back to vx_max.
-        # The gain is shared with map_node's carrot horizon -- see path_speed.
-        self.declare_parameter('capture_speed_gain', CAPTURE_SPEED_GAIN)
-        self._capture_speed_gain = float(self.get_parameter('capture_speed_gain').value)
+        # local speed (m/s) near the robot, already times the capture-speed gain (see
+        # path_speed). It IS the open-space target speed, clamped to [vx_min,
+        # vx_hard_max] -- so it may raise the target above vx_max where the operator
+        # went fast, never past the hardware ceiling. NaN (off-path / unknown) or a
+        # stale stream -> fall back to vx_max.
         self.declare_parameter('speed_cap_ttl_s', 2.0)
         self._speed_cap_ttl_ns = int(float(self.get_parameter('speed_cap_ttl_s').value) * 1e9)
         self._speed_cap = None
         self._speed_cap_stamp_ns = None
         self.create_subscription(Float32, '/planning/speed_cap', self.speed_cap_callback, 10)
+
+        # Strict follow, a per-map flag the agent side sends (tinynav-pilot sends it at
+        # 1 Hz for the loaded map): when the route to the carrot is blocked the robot
+        # stands still instead of going around. Off when the stream is stale.
+        self.declare_parameter('strict_follow_ttl_s', 3.0)
+        self._strict_follow_ttl_ns = int(float(self.get_parameter('strict_follow_ttl_s').value) * 1e9)
+        self._strict_follow = False
+        self._strict_follow_stamp_ns = None
+        self.create_subscription(Bool, '/planning/strict_follow', self.strict_follow_callback, 10)
+        # Whether strict follow stands when the route before the stop pose is blocked.
+        # Stale or never sent means it does; False keeps aiming at the stop pose.
+        self._strict_stand = True
+        self._strict_stand_stamp_ns = None
+        self.create_subscription(Bool, '/planning/strict_stand', self.strict_stand_callback, 10)
+        # map_node's stop pose: where the strict-follow check ends (route_blocked_ahead).
+        self._stop_xy = None
+        self._stop_stamp_ns = None
+        self.create_subscription(Odometry, '/control/stop_pose', self.stop_pose_callback, 10)
 
     # --- callbacks ---------------------------------------------------------
     def climb_region_callback(self, msg):
@@ -886,16 +1180,28 @@ class PlanningNode(Node):
         self._speed_cap = float(msg.data)
         self._speed_cap_stamp_ns = self.get_clock().now().nanoseconds
 
+    def stop_pose_callback(self, msg):
+        self._stop_xy = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y])
+        self._stop_stamp_ns = self.get_clock().now().nanoseconds
+
+    def strict_follow_callback(self, msg):
+        self._strict_follow = bool(msg.data)
+        self._strict_follow_stamp_ns = self.get_clock().now().nanoseconds
+
+    def strict_stand_callback(self, msg):
+        self._strict_stand = bool(msg.data)
+        self._strict_stand_stamp_ns = self.get_clock().now().nanoseconds
+
     def _open_target_speed(self):
-        """Open-space target forward speed: the capture-speed prior (scaled by
-        capture_speed_gain) when a fresh, finite value is available, else vx_max
+        """Open-space target forward speed: the gained capture-speed prior when a
+        fresh, finite value is available, else vx_max
         (the no-capture fallback). Clamped to [vx_min, vx_hard_max] -- the prior may
         raise the target above vx_max but never past the hardware ceiling."""
         # _signal_fresh short-circuits on a never-received (None) stamp, so a fresh
         # stamp implies _speed_cap was set -> the isfinite guard is safe.
         if (self._signal_fresh(self._speed_cap_stamp_ns, self._speed_cap_ttl_ns)
                 and np.isfinite(self._speed_cap)):
-            return float(np.clip(self._speed_cap * self._capture_speed_gain,
+            return float(np.clip(self._speed_cap,
                                  self._vx_min, self._vx_hard_max))
         return self._vx_max
 
@@ -981,32 +1287,6 @@ class PlanningNode(Node):
         """World control-center position derived from camera pose T_cam->world."""
         return T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
 
-    def publish_footprint(self, T, stamp):
-        """Publish robot footprint rectangle as a PointCloud for RViz."""
-        forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-        left    = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
-        center  = self.camera_to_robot_center(T)
-        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
-        corners = [
-            center + forward * fl + left * hw,
-            center + forward * fl - left * hw,
-            center - forward * rl - left * hw,
-            center - forward * rl + left * hw,
-        ]
-        points = []
-        for i in range(4):
-            a, b = corners[i], corners[(i + 1) % 4]
-            for k in range(21):
-                t = k / 20
-                p = (1.0 - t) * a + t * b
-                points.append(Point32(x=float(p[0]), y=float(p[1]), z=float(p[2])))
-        msg = PointCloud()
-        msg.header = Header()
-        msg.header.stamp = stamp
-        msg.header.frame_id = "world"
-        msg.points = points
-        self.footprint_pub.publish(msg)
-
     def _footprint_hits(self, T, obstacle_mask):
         """Which footprint samples are standing on obstacle cells, as body-frame
         (forward, left) offsets. Sampled on the same lattice
@@ -1081,76 +1361,9 @@ class PlanningNode(Node):
         msg.info.origin.position.y = self.origin[1]
         msg.info.origin.position.z = self.origin[2] + self.grid_shape[2] * self.resolution / 2
         msg.info.origin.orientation.w = 1.0
-        msg.data = array.array('b', np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tobytes())
+        msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
         self.obstacle_mask_pub.publish(msg)
 
-    def publish_height_map(self, origin, esdf_map, header):
-        height_normalized = np.clip(esdf_map / 2.0 * 255, 0, 255).astype(np.uint8)
-        color_image = cv2.applyColorMap(height_normalized, cv2.COLORMAP_JET)
-        img_msg = self.bridge.cv2_to_imgmsg(color_image, encoding="bgr8")
-        img_msg.header = header
-        self.height_map_pub.publish(img_msg)
-
-    def publish_2d_occupancy_grid(self, ESDF_map, origin, resolution, stamp, z_offset=0.0):
-        occupancy_grid_msg = OccupancyGrid()
-        occupancy_grid_msg.header = Header()
-        occupancy_grid_msg.header.stamp = stamp
-        occupancy_grid_msg.header.frame_id = "world"
-        occupancy_grid_msg.info.resolution = resolution
-        occupancy_grid_msg.info.width = ESDF_map.shape[1]
-        occupancy_grid_msg.info.height = ESDF_map.shape[0]
-        occupancy_grid_msg.info.origin.position.x = origin[0]
-        occupancy_grid_msg.info.origin.position.y = origin[1]
-        occupancy_grid_msg.info.origin.position.z = origin[2] + z_offset
-        occupancy_grid_msg.info.origin.orientation.w = 1.0
-        flat_data = np.where(ESDF_map <= 0.00, 100, np.clip(((1-ESDF_map/0.5) * 120).astype(int), 0, 120)).astype(np.int8).ravel(order="F")
-        occupancy_grid_msg.data = array.array('b', flat_data.tobytes())
-        self.occupancy_grid_pub.publish(occupancy_grid_msg)
-
-    def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
-        occupied = np.argwhere(grid3d > 0.1)
-        # vectorized operation to avoid for loop
-        if len(occupied) == 0:
-            points = []
-        else:
-            origin_np = np.array(origin)
-            world_coords = origin_np + occupied * resolution
-            points = world_coords.tolist()
-
-        header = Header()
-        header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = "world"
-        pc2_msg = pc2.create_cloud_xyz32(header, points)
-        self.occupancy_cloud_pub.publish(pc2_msg)
-
-    def publish_3d_occupancy_cloud_with_esdf(self, grid3d, ESDF_map, resolution=0.1, origin=(0, 0, 0), max_dist=1.0):
-        X, Y, Z = grid3d.shape
-        # ground
-        gx, gy = np.meshgrid(np.arange(X), np.arange(Y), indexing='ij')
-        ground = np.stack([gx.ravel(), gy.ravel(), np.zeros_like(gx).ravel()+2], axis=-1)
-        coords = ground * resolution + np.asarray(origin)
-        # query ESDF
-        ix, iy = ground[:, 0].astype(int), ground[:, 1].astype(int)
-        valid = (0 <= ix) & (ix < ESDF_map.shape[0]) & (0 <= iy) & (iy < ESDF_map.shape[1])
-        dist = np.full(len(ground), max_dist, dtype=np.float32)
-        dist[valid] = np.clip(ESDF_map[ix[valid], iy[valid]], 0, max_dist)
-        # map color
-        v = np.uint8((1 - dist / max_dist) * 255)
-        colors = cv2.applyColorMap(v.reshape(-1, 1), cv2.COLORMAP_JET).reshape(-1, 3)
-        rgb = (colors[:, 2].astype(np.uint32) << 16) | (colors[:, 1].astype(np.uint32) << 8) | colors[:, 0].astype(np.uint32)
-        # build point cloud
-        dtype = np.dtype([('x', np.float32), ('y', np.float32), ('z', np.float32), ('rgb', np.uint32)])
-        points = np.zeros(coords.shape[0], dtype=dtype)
-        points['x'], points['y'], points['z'] = coords[:, 0], coords[:, 1], coords[:, 2]
-        points['rgb'] = rgb
-        header = Header(stamp=self.get_clock().now().to_msg(), frame_id="world")
-        fields = [
-            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name="rgb", offset=12, datatype=PointField.UINT32, count=1),
-        ]
-        self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
     def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
         center = self.origin + np.array(self.grid_shape) * self.resolution / 2
@@ -1185,31 +1398,52 @@ class PlanningNode(Node):
         ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
         return min_span_map, obstacle_mask, ESDF_map
 
-    def generate_trajectories(self, init_p, init_q):
-        trajectories, params = generate_trajectory_library_3d(
+    def generate_trajectories(self, init_p, init_q, v_allow, extra_turn=None):
+        """(trajectories, params, durations, is_turn): the lattice, rotate-then-go and
+        the reverse vocabulary, all held to the longest so they stack. `extra_turn`
+        (rad) is one more rotate-then-go delta, the last of the turn rows."""
+        dt, w = self._traj_dt, ROBOT_CONFIG.max_angular_vel
+        lattice, lattice_params = generate_trajectory_library_3d(
             init_p=init_p, init_q=init_q,
-            max_linear_vel=self._vx_max,
-            max_angular_vel=ROBOT_CONFIG.max_angular_vel,
+            max_linear_vel=v_allow,
+            max_angular_vel=w,
             max_lat_acc=self._traj_max_lat_acc,
             min_linear_vel=self._vx_min,
+            turn_slowdown=self._traj_turn_slowdown,
+            min_angular_vel=ROBOT_CONFIG.min_angular_vel,
         )
-        vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
-        trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
-        params = np.concatenate([params, vocab_params], axis=0)
-        return trajectories, params
+        longest = np.pi / w + ROTATE_THEN_GO_M / self._vx_min
+        turns, turn_params, turn_durations = generate_rotate_then_go(
+            init_p, init_q, np.append(np.deg2rad(ROTATE_DEG), [] if extra_turn is None else [extra_turn]), w, self._vx_min, ROTATE_THEN_GO_M, dt,
+            int(np.ceil(longest / dt)) + 1)
+        vocab, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
+        rollout = (lattice.shape[1] - 1) * dt
+        n = turns.shape[1]
+        trajectories = np.concatenate([_hold_to(lattice, n), turns, _hold_to(vocab, n)])
+        params = np.concatenate([lattice_params, turn_params, vocab_params])
+        durations = np.concatenate([np.full(len(lattice), rollout), turn_durations,
+                                    np.full(len(vocab), rollout)])
+        is_turn = np.zeros(len(trajectories), dtype=bool)
+        is_turn[len(lattice):len(lattice) + len(turns)] = True
+        return trajectories, params, durations, is_turn
 
     def score_trajectories(self, trajectories, params, ESDF_map, path_dist_map, remaining_map,
-                           route_heading_map):
+                           route_heading_map, target, has_route):
+        """score_trajectories_by_ESDF's columns, as arrays."""
         front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
+        cam = ROBOT_CONFIG.cam_offset_3d
 
         def score(trajs):
             return score_trajectories_by_ESDF(
                 np.ascontiguousarray(trajs), ESDF_map, path_dist_map, remaining_map,
                 route_heading_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius,
-                front_len, rear_len, half_w,
+                front_len, rear_len, half_w, float(target[0]), float(target[1]),
+                float(cam[0]), float(cam[1]), float(cam[2]), ARRIVE_M, ARRIVE_TICKS,
+                int(round(ARRIVE_TICK_S / self._traj_dt)), self.route_terminal_band,
+                bool(has_route), self._traj_dt,
             )
 
-        scores, occ_points, path_costs, end_remainings, end_heading_errs = score(trajectories)
+        cols = [np.array(c, dtype=float) for c in score(trajectories)]
         # **The pose every candidate starts from is not a choice any of them made.** One
         # footprint sample on an obstacle cell there makes every row inf, reverse included,
         # so the scores stop saying which way is out exactly when that is the question. The
@@ -1217,11 +1451,9 @@ class PlanningNode(Node):
         # checked as ever, so a rear that really is blocked is still inf and still refused.
         back = np.flatnonzero(params[:, 0] < 0.0)
         if len(back) and trajectories.shape[1] > 1:
-            moved = score(trajectories[back][:, 1:])
-            for j, i in enumerate(back):
-                (scores[i], occ_points[i], path_costs[i],
-                 end_remainings[i], end_heading_errs[i]) = (col[j] for col in moved)
-        return scores, occ_points, path_costs, end_remainings, end_heading_errs
+            for col, moved in zip(cols, score(trajectories[back][:, 1:])):
+                col[back] = moved
+        return cols
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
@@ -1236,20 +1468,15 @@ class PlanningNode(Node):
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
-            # Building the cloud costs more than the raycasting that produced it,
-            # and its only consumer is a view that is usually closed.
-            if self.occupancy_cloud_pub.get_subscription_count() > 0:
-                self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
-
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             min_span_map, obstacle_mask, ESDF_map = self.build_obstacle_and_esdf(T)
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
-            self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
-            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
-            self.publish_footprint(T, depth_msg.header.stamp)
+            if self.occupancy_3d_pub.get_subscription_count() > 0:
+                # float32 halves the ~1 MB a frame; its readers only threshold it at 0.1.
+                self.occupancy_3d_pub.publish(self.bridge.cv2_to_imgmsg(
+                    self.occupancy_grid.astype(np.float32), header=depth_msg.header))
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
@@ -1257,23 +1484,63 @@ class PlanningNode(Node):
             # Forward clearance drives both the peak-speed schedule and the reverse gate.
             front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
             v_open = self._open_target_speed()
-            v_allow = self._speed_from_clearance(front_clearance, abs(self._executed_vx), v_open)
+            v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
             # The library exists only to pick a trajectory toward a goal, so without
             # one there is nothing to generate or score. The occupancy grid, the ESDF
             # and the speed cap above are maintained either way.
             if self.target_pose is None:
                 return
-            trajectories, params = self.generate_trajectories(init_p, init_q)
+            # Last frame's choice is offered again, rebuilt from here: a turn in place by
+            # what is left of it (the 15 deg grid has no row for a half-done turn), a
+            # lattice row as itself, and a finished turn as its straight go.
+            rem = None if self._turn_heading is None else turn_remainder(
+                init_q, self._turn_heading, ROBOT_CONFIG.max_angular_vel * self._traj_dt)
+            trajectories, params, durations, is_turn = self.generate_trajectories(
+                init_p, init_q, v_allow, rem)
+            if rem is not None:
+                carry = int(np.flatnonzero(is_turn)[-1])
+            else:
+                row = self.last_param if self._turn_heading is None else (self._vx_min, 0.0)
+                carry = carried_row(params, is_turn, row[0], row[1])
 
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
             path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
                 route_xy if route_xy is not None else [], ESDF_map.shape, self.origin, self.resolution,
             )
+            target = self.target_pose
+            carrot_rem = route_left_at(route_xy, target[:2]) if has_route else 0.0
+            xi, yi = ((init_p[:2] - self.origin[:2]) / self.resolution).astype(int)
+            rem_here = (remaining_map[xi, yi] if 0 <= xi < remaining_map.shape[0]
+                        and 0 <= yi < remaining_map.shape[1] else 1e3)
+            _, _, half_w = ROBOT_CONFIG.footprint_from_control()
+            # Strict follow: an obstacle on the route as far as the carrot aims DWA at
+            # map_node's stop pose instead, so it does not start round it early; one as far
+            # as the stop pose stands the robot. Off when either stream is stale.
+            strict = (self._strict_follow and has_route
+                      and self._signal_fresh(self._strict_follow_stamp_ns, self._strict_follow_ttl_ns)
+                      and self._signal_fresh(self._stop_stamp_ns, self._strict_follow_ttl_ns))
+            aim_stop = strict and route_blocked_ahead(ESDF_map, path_dist_map, remaining_map,
+                                                      rem_here, carrot_rem, half_w)
+            route_blocked = False
+            if aim_stop:
+                stop_rem = route_left_at(route_xy, self._stop_xy)
+                stands = (self._strict_stand
+                          or not self._signal_fresh(self._strict_stand_stamp_ns,
+                                                    self._strict_follow_ttl_ns))
+                route_blocked = stands and route_blocked_ahead(
+                    ESDF_map, path_dist_map, remaining_map, rem_here, stop_rem, half_w)
+                target = np.array([self._stop_xy[0], self._stop_xy[1], target[2]])
+                carrot_rem = stop_rem
+            # One value for the log and the gate topic: 0 the carrot, 1 the stop pose,
+            # 2 standing.
+            follow = 2 if route_blocked else int(aim_stop)
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            scores, occ_points, path_costs, end_remainings, end_heading_errs = self.score_trajectories(
-                trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map)
+            (scores, occ_points, path_costs, end_remainings, end_heading_errs, arrive_ts,
+             end_devs, end_goal_errs, end_goal_dxys) = self.score_trajectories(
+                trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map,
+                target, has_route)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             n_fwd_ok = sum(1 for i in range(len(trajectories))
@@ -1281,8 +1548,7 @@ class PlanningNode(Node):
             should_reverse = reverse_armed(front_clearance, self.resolution,
                                            self.reverse_engaged)
             self.reverse_engaged = should_reverse
-
-            target = self.target_pose
+            scores = admit_reverse(scores, params, should_reverse)
 
             _world_heading = heading_of_pose7
 
@@ -1307,11 +1573,10 @@ class PlanningNode(Node):
                     f'{self._hits_report(hits, n_samples)}'
                 )
                 # **Nothing is published, and that is the honest answer here.**
-                # Reaching this branch now means the reverse row is inf too, and it
-                # is scored from the pose after the current one (score_trajectories)
-                # -- so this is no longer a footprint sample underfoot vetoing every
-                # candidate alike, it is the way out being blocked as well. The
-                # report above names which part of the body is on an obstacle cell.
+                # Only with the reverse gate closed: armed, the careful reverse is
+                # always open (admit_reverse). So the front is not close enough to back
+                # off and every forward and turning row is blocked. The report above
+                # names which part of the body is on an obstacle cell.
                 #
                 # It is also where odometry drift lands: a stationary pose churning
                 # metres of phantom path smears the occupancy grid into cells under
@@ -1319,108 +1584,49 @@ class PlanningNode(Node):
                 # relocalized motion). The fix for that is upstream of here.
                 return
 
-            # Single cost: clearance + route adherence/progress + smoothness, with the
-            # reverse gate as a large additive penalty rather than a hard filter. The
-            # penalty degrades gracefully on its own -- a colliding trajectory costs
-            # scores[i]*w_clearance == inf, which loses to any non-colliding gate violator --
-            # so it already gives the "never stall outright" fallback that a two-stage
-            # filter had to spell out, in one term. Clearance stays soft on purpose:
-            # safety_radius is a margin, not a collision boundary, and a corridor
-            # narrower than the band forces every forward trajectory to intrude into it.
-            # The heading term exists because no positional term can rank a heading.
-            # Two cases share that:
-            #
-            #   the vx=0 rows all END where they started, so smoothness picked whichever
-            #   rotation matched last cycle -- omega=0 from a standstill -- and with a
-            #   goal further behind than one arc can swing around, standing still was
-            #   the cost minimum and stayed it: a permanent freeze;
-            #
-            #   a MOVING arc through a corner ends within centimetres of where turning
-            #   into the corner ends, so remaining_map and path_dist cannot separate
-            #   them either, and the choice fell to smoothness and dithered. Measured on
-            #   118 (2026-08-31): goal_err sat at 61-65 degrees for tens of frames while
-            #   the selected omega alternated -0.21 / +0.43 frame to frame, and the
-            #   robot drove straight through a right turn it should have taken.
-            #
-            # What differs is WHICH heading is right, and that is the route's own
-            # direction wherever there is a route: pointing at the goal, at a corner, is
-            # what cutting the corner is. Without a route there is only the goal bearing,
-            # which is what this planner had before the route existed.
             def _yaw_rate(traj):
                 dh = _world_heading(traj[1]) - _world_heading(traj[0])
                 return float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
 
-            def cost_function(i):
-                traj, param = trajectories[i], params[i]
-                turn_penalty = turn_in_place_penalty(
-                    param[0], _yaw_rate(traj), self.last_yaw_rate,
-                    self.w_turn_in_place, self.w_turn_reversal)
-                gate_penalty = reverse_gate_penalty(param[0], should_reverse)
-                traj_end = np.array(traj[-1, :3])
-                target_end = target if target is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
-                smooth = abs(self.last_param[0] - param[0]) + abs(self.last_param[1] - param[1])
-                # Skipped within 0.3 m of the goal, where the bearing is noise and
-                # turning achieves nothing.
-                heading_penalty = 0.0
-                if dist > 0.3:
-                    # The two references hand over across the terminal band: the route's
-                    # direction while there is route left, the goal's bearing once there
-                    # is not. A hard switch would leave the vx=0 rows unranked in the
-                    # band -- which is the freeze this term was written to prevent.
-                    to_goal = self.w_route_heading * _end_heading_error(traj[-1], target_end)
-                    if has_route:
-                        fade = route_band_fade(end_remainings[i], self.route_terminal_band)
-                        heading_penalty = (
-                            route_heading_penalty(self.w_route_heading, end_heading_errs[i],
-                                                  end_remainings[i], self.route_terminal_band)
-                            + (1.0 - fade) * to_goal)
-                    else:
-                        heading_penalty = to_goal
-                if not has_route:
-                    # No route this cycle: both route maps are flat, so rank on the raw
-                    # target the way this planner did before the route existed.
-                    positional = 100 * dist
-                else:
-                    # The terminal term arms inside the last route_terminal_band metres,
-                    # where remaining_map has saturated at 0 and can no longer rank
-                    # anything -- without it smoothness picks the slowest of the tied
-                    # trajectories and the robot crawls the last stretch.
-                    terminal = 0.0
-                    if target is not None:
-                        terminal = (self.w_goal_terminal
-                                    * (1.0 - route_band_fade(end_remainings[i],
-                                                             self.route_terminal_band))
-                                    * float(np.linalg.norm(traj[-1, :2] - target[:2])))
-                    positional = (self.w_route_progress * end_remainings[i]
-                                  + self.w_path_follow * path_costs[i]
-                                  + terminal)
-                return (scores[i] * self.w_clearance
-                        + positional
-                        + 10 * smooth
-                        + heading_penalty
-                        + turn_penalty
-                        + gate_penalty)
-
-            top_indices = [min(range(len(trajectories)), key=cost_function)]
-
-            self.last_param = params[top_indices[0]]
+            # map_node's arrival circles, from the camera pose; the route at the
+            # control centre is where scoring reads it.
+            here_arrived = (ROBOT_CONFIG.arrival_distance(T, target) < ARRIVE_M
+                            and (not has_route or rem_here <= self.route_terminal_band))
+            yaws = np.array([_yaw_rate(t) for t in trajectories])
+            v_nom = max(float(v_allow), self._vx_min, 0.1)
+            # A row's way to the target, and the heading it is judged by, go around what
+            # is in it: a target past a corner otherwise draws the rows into its inside.
+            band = half_w + ROBOT_CONFIG.safety_radius
+            end_goal_dxys, end_goal_errs = around_obstacles(
+                trajectories[:, -1, :2], [heading_of_pose7(t[-1]) for t in trajectories],
+                end_goal_dxys, end_goal_errs, scores, target, ESDF_map >= band, self.origin,
+                self.resolution, band)
+            # A blocked route publishes the standstill row rather than nothing, so
+            # cmd_vel_control stops at once instead of waiting out a stale path.
+            sel = select_by_time(
+                params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
+                end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
+                should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
+                carrot_rem, durations, carry, self._last_yaw, stand_still=route_blocked)
+            self.last_param = params[sel]
+            self._last_yaw = float(yaws[sel])
+            self._turn_heading = float(heading_of_pose7(trajectories[sel][-1])) if is_turn[sel] else None
 
             # `fwd_ok` is what tells the two standstills apart: 0 means blocked,
             # anything else means stuck by cost with somewhere to go.
             self.get_logger().info(
-                f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
-                f'fwd_ok={n_fwd_ok} '
-                f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
-                f'route_err={np.rad2deg(end_heading_errs[top_indices[0]]):.0f}deg '
+                f'sel vx={params[sel][0]:.2f} omega={params[sel][1]:.2f} '
+                f'fwd_ok={n_fwd_ok} carried={int(sel == carry)} '
+                f'goal_err={np.rad2deg(_end_heading_error(trajectories[sel][0], target)):.0f}deg '
+                f'route_err={np.rad2deg(end_heading_errs[sel]):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
-                f'should_reverse={should_reverse} '
+                f'should_reverse={should_reverse} follow={follow} '
                 f'climb_cells={0 if min_span_map is None else int((min_span_map > self.obstacle_config.min_wall_span_m).sum())}'
             )
 
             # velocity feedforward for cmd_vel_control: (vx, omega) of the selected
             # trajectory. vx is the commanded body-forward speed (lattice param; its
-            # sign flags the fixed-speed reverse vocabulary via angular.x). omega is
+            # sign flags the reverse vocabulary via angular.x). omega is
             # NOT taken from the lattice param -- that omega is about the camera optical
             # axis and would need a hand-maintained sign/frame correction. Instead we
             # derive the yaw rate straight from the trajectory's own world poses, using
@@ -1428,13 +1634,10 @@ class PlanningNode(Node):
             # published Path: angular.z = d(world heading)/dt over the first step. This
             # stays consistent with the path by construction and is correct even if the
             # camera pitches (where -omega_y would be subtly wrong).
-            sel_traj = trajectories[top_indices[0]]
-            sel_vx = float(params[top_indices[0]][0])
-
-            self._executed_vx = cap_selected_arc(sel_traj, sel_vx, v_allow)
+            sel_traj = trajectories[sel]
+            sel_vx = float(params[sel][0])
 
             sel_omega = _yaw_rate(sel_traj)
-            self.last_yaw_rate = sel_omega
 
             # `turn_ok` is the one the log line could not answer: how many vx=0 rows
             # were collision-free when the gate banned every non-reverse row.
@@ -1448,9 +1651,10 @@ class PlanningNode(Node):
                 'n_traj': int(len(trajectories)),
                 'sel_vx': round(sel_vx, 3),
                 'sel_omega': round(sel_omega, 3),
+                'follow': follow,
             })))
 
-            self.publish_selected_path(trajectories, top_indices, depth_msg.header)
+            self.publish_selected_path(trajectories, [sel], depth_msg.header)
 
 
 def main(args=None):

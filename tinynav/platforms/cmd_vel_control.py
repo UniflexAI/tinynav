@@ -7,12 +7,37 @@ from std_msgs.msg import Bool
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
+import json
 import logging
+import os
 import time
 from tinynav.core.robot_specs import ROBOT_CONFIG
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
+
+#: This rig's learned yaw bias, `rad_per_m` (left positive), carried from one nav goal's
+#: process to the next.
+YAW_BIAS_PATH = '/tinynav/tinynav_db/calib/yaw_bias.json'
+
+
+def read_yaw_bias(path):
+    """The bias saved at `path`, 0 when there is none or it cannot be read."""
+    try:
+        with open(path) as f:
+            return float(json.load(f)['rad_per_m'])
+    except FileNotFoundError:
+        return 0.0
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning(f'ignoring {path}, not a yaw bias ({e!r})')
+        return 0.0
+
+
+def write_yaw_bias(path, rad_per_m):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + '.tmp', 'w') as f:
+        json.dump({'rad_per_m': rad_per_m}, f)
+    os.replace(path + '.tmp', path)
 
 class CmdVelControlNode(Node):
     def __init__(self):
@@ -53,23 +78,36 @@ class CmdVelControlNode(Node):
         # Static-friction compensation: very small vx often cannot move the robot.
         self.min_effective_linear_speed = self.robot.min_linear_vel
         self.min_effective_angular_speed = self.robot.min_angular_vel
+        # A turn in place has a floor of its own: some gaits step only above it.
+        self.min_effective_spin_speed = max(self.robot.min_angular_vel, self.robot.min_spin_vel)
         # How small a REQUEST means the planner is stopping rather than driving -- not
         # the same quantity as the speed the chassis can execute. See `_snap`.
         self.linear_engage_threshold = 0.04
-        # No measured value for the turn axis yet, so it keeps the old behaviour
-        # (request below the executable minimum reads as a stop).
-        self.angular_engage_threshold = self.min_effective_angular_speed
-        self.fixed_reverse_speed = 0.3
+        # Below the planner's smallest turn (0.107 rad/s), so every turn it asks for
+        # is raised to what the chassis executes rather than read as a stop.
+        self.angular_engage_threshold = 0.05
+        self.max_reverse_speed = 0.3
         # How far back the differenced path has to point before it reads as reverse.
         # A turn-in-place rollout barely translates, so the sign of `raw_vx` there is
         # noise -- and answering it took the robot backwards at full speed with the
         # planner asking for no such thing: 37 of 38 reverses on 122 2026-09-18, and
-        # 9 more in one leg it never got through. The reverse vocabulary drives 0.3,
+        # 9 more in one leg it never got through. The reverse vocabulary drives 0.15 and 0.3,
         # so anything between separates them; this sits well clear of both.
         self.reverse_min_vx = 0.05
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
+        # The chassis's own yaw while it is told to walk straight, learned from odometry
+        # (rad per metre, left positive) and taken off every forward command after the
+        # floors: a turn the planner asks for still goes through `_snap`, the correction
+        # does not, since it is smaller than any floor. Odometry, not the path, is the
+        # reference: a relocalization moves the path and would be learned as a bias.
+        #: Metres of straight walking the learned bias converges over.
+        self.yaw_bias_metres = 2.0
+        self._yaw_bias = read_yaw_bias(YAW_BIAS_PATH)
+        self._bias_said = time.monotonic()
+        self._bias_heading = None
+        self._bias_settle = 0.0
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -120,10 +158,36 @@ class CmdVelControlNode(Node):
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
+    def _heading(self) -> float:
+        """The robot's heading in odom: the camera's +z (forward) on the ground plane."""
+        q = self.pose.pose.pose.orientation
+        fwd = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()[:, 2]
+        return float(np.arctan2(fwd[1], fwd[0]))
+
+    def _learn_yaw_bias(self, prev, now, dt, straight, turn):
+        """One tick of the bias: while told straight, it moves by the yaw odometry saw
+        over `yaw_bias_metres`. A turn's tail (`turn` rad/s, stopping at max_angular_acc)
+        and a heading jump faster than the chassis can turn are not walking."""
+        if not straight:
+            self._bias_settle = max(self._bias_settle, now + abs(turn) / self.max_angular_acc)
+            return
+        self._bias_heading = self._heading()
+        if prev is None or now < self._bias_settle:
+            return
+        d = float(np.arctan2(np.sin(self._bias_heading - prev), np.cos(self._bias_heading - prev)))
+        if abs(d) <= self.max_angular_speed * dt:
+            self._yaw_bias += d / self.yaw_bias_metres
+            if now - self._bias_said >= 5.0:
+                self._bias_said = now
+                self.logger.info(f'yaw bias {np.degrees(self._yaw_bias):+.2f} deg/m')
+                write_yaw_bias(YAW_BIAS_PATH, self._yaw_bias)
+
     def cmd_timer_callback(self):
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
+        # Only a tick that walked straight leaves a heading for the next to difference.
+        prev_heading, self._bias_heading = self._bias_heading, None
 
         if not self._nav_active:
             return
@@ -171,9 +235,16 @@ class CmdVelControlNode(Node):
         out.linear.x = self._snap(out.linear.x, target_cmd.linear.x,
                                   self.min_effective_linear_speed,
                                   self.linear_engage_threshold)
-        out.angular.z = self._snap(out.angular.z, target_cmd.angular.z,
-                                   self.min_effective_angular_speed,
+        spin_floor = (self.min_effective_spin_speed if out.linear.x == 0.0
+                      else self.min_effective_angular_speed)
+        out.angular.z = self._snap(out.angular.z, target_cmd.angular.z, spin_floor,
                                    self.angular_engage_threshold)
+        if self.pose is not None:
+            self._learn_yaw_bias(prev_heading, now, dt,
+                                 out.linear.x > 0.0 and out.angular.z == 0.0, out.angular.z)
+        if out.linear.x > 0.0:
+            out.angular.z = float(np.clip(out.angular.z - self._yaw_bias * out.linear.x,
+                                          -self.max_angular_speed, self.max_angular_speed))
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
@@ -221,7 +292,9 @@ class CmdVelControlNode(Node):
         raw_vx = float(linear_velocity_vec[0])
         is_backward_segment = raw_vx < -self.reverse_min_vx
         if is_backward_segment:
-            vx = -self.fixed_reverse_speed
+            # The planned speed, capped: the planner slows a reverse that is in
+            # collision (planning_node.REVERSE_CAREFUL_SPEED).
+            vx = -min(self.max_reverse_speed, -raw_vx)
         else:
             vx = float(np.clip(raw_vx, 0.0, self.max_forward_speed))
         vy = 0.0
@@ -229,14 +302,19 @@ class CmdVelControlNode(Node):
         if is_backward_segment:
             vyaw = 0.0
 
+        # A turn-in-place rollout does not translate, so its heading_err is the bearing
+        # of float noise; steering by it overrides the planner's turn with a full-rate
+        # spin of either sign. Below reverse_min_vx the segment has no bearing.
+        has_bearing = float(np.hypot(linear_velocity_vec[0], linear_velocity_vec[1])) >= self.reverse_min_vx
+
         # Hack: if path first segment points >80 deg away from robot heading,
         # force an in-place turn. Skip explicit backward segments because reverse
         # naturally has heading_err close to +/-pi.
-        if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
+        if has_bearing and (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
             vx = 0.0
             vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
         # Minimal rotate-first gate: apply only for forward motion.
-        elif vx > 0.0 and abs(heading_err) > 0.45:
+        elif has_bearing and vx > 0.0 and abs(heading_err) > 0.45:
             vx = 0.0
             vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
 

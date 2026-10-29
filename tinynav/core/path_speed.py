@@ -21,10 +21,11 @@ import numpy as np
 from tinynav.core.path_prior import (
     poses_to_positions, horizontal_arclength, is_stale, PathSampleIndex)
 
-# How much faster than the operator to replay. Multiplies the prior for BOTH of its
-# consumers -- planning's open-space target and map_node's carrot horizon -- so they
-# stay one speed. Set from the environment because pilot spawns both nodes with no
-# `--ros-args`.
+# How much faster than the operator to replay: map_node multiplies the prior by it
+# before publishing /planning/speed_cap, so planning's open-space target and the carrot
+# horizon stay one speed. This is the rig's default; a gain on /planning/speed_gain
+# (tinynav-pilot sends the map's own) overrides it while fresh. From the environment
+# because pilot spawns the nodes with no `--ros-args`.
 CAPTURE_SPEED_GAIN = float(os.environ.get('TINYNAV_CAPTURE_SPEED_GAIN', '1.0'))
 
 # Defaults (tunable).
@@ -84,6 +85,17 @@ class PathSpeedIndex(PathSampleIndex):
         the online clearance schedule still governs)."""
         v = self.nearest_value(position_xyz)
         return v if (v is not None and np.isfinite(v) and v > 0.0) else float('inf')
+
+
+def mean_speed(map_path: str) -> float | None:
+    """The mean of `map_path`'s path_speed.npy labels (m/s), the prior's cruising speed
+    over the whole capture; None for a map without one."""
+    try:
+        speeds = np.load(os.path.join(map_path, 'path_speed.npy'))[:, 3]
+    except (OSError, ValueError, IndexError):
+        return None
+    speeds = speeds[np.isfinite(speeds)]
+    return float(speeds.mean()) if speeds.size else None
 
 
 def bake(map_path: str, force: bool = False) -> str:

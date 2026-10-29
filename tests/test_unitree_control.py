@@ -7,12 +7,14 @@ on a reply RPC, that the gait is asserted once per motion start, that a stop is 
 Move, and that the diagnostics speak up when the chassis stops executing and stay
 quiet when it does not.
 
-Needs unitree_sdk2py and rclpy, so this runs in the device container.
+Needs unitree_sdk2py and cyclonedds, so this runs in the device container.
 """
 from __future__ import annotations
 
 import os
+import sys
 import threading
+import types
 import time
 import unittest
 
@@ -22,11 +24,21 @@ from tinynav.platforms import unitree_control as uc  # noqa: E402
 
 
 class _Log:
+    """Records lines, and like rclpy's logger raises when one call site logs at a
+    second severity."""
+
     def __init__(self):
         self.lines = []
+        self._sites = {}
 
     def _add(self, level):
-        return lambda msg: self.lines.append((level, msg))
+        def log(msg):
+            caller = sys._getframe(1)
+            site = (caller.f_code.co_filename, caller.f_lineno)
+            if self._sites.setdefault(site, level) != level:
+                raise ValueError('Logger severity cannot be changed between calls.')
+            self.lines.append((level, msg))
+        return log
 
     def __getattr__(self, level):
         if level in ('debug', 'info', 'warning', 'error'):
@@ -50,6 +62,20 @@ class _Sport:
         time.sleep(self.walk_delay)
         self.calls.append('ClassicWalk')
         return 0
+
+    def StandUp(self):
+        self.calls.append('StandUp')
+        return 0
+
+    def BalanceStand(self):
+        self.calls.append('BalanceStand')
+        return 0
+
+    def FreeWalk(self):
+        self.calls.append('FreeWalk')
+        return self.free_code
+
+    free_code = 0
 
     def Move(self, vx, vy, wz):
         self.calls.append('Move' if (vx, vy, wz) != (0.0, 0.0, 0.0) else 'Move0')
@@ -88,11 +114,21 @@ class _GaitSpy:
 def _node(sport=None, gait=None):
     node = uc.Ros2UnitreeManagerNode.__new__(uc.Ros2UnitreeManagerNode)
     node.logger = _Log()
+    node.profile = uc.require_profile('go2')
     node.sport_client = sport or _Sport()
     node.is_quadruped = True
+    node._gait_steps = {'classic': ('ClassicWalk', lambda: node.sport_client.ClassicWalk(True)),
+                        'free': ('FreeWalk', lambda: node.sport_client.FreeWalk())}
+    node.walk_gait = 'classic'
+    node.said_gaits = []
+    node.publisher_gait = types.SimpleNamespace(Write=lambda m: node.said_gaits.append(m.data))
+    node._robot_status = None
     node.last_twist_time = None
     node._walking = False
     node._gait_due = False
+    node._gait_held = False
+    node.robot_model = 'go2'
+    node._reasserted_in = None
     node._move_failures = 0
     node._move_failure_logged_at = None
     node.watch = uc.ChassisWatch(node.logger)
@@ -135,6 +171,134 @@ class TestTwistPath(unittest.TestCase):
         _drive(node, t + 1.0, 3, 0.5)
         self.assertTrue(node.logger.has('warning', 'rt/cmd_vel silent'))
         self.assertEqual(node.gait.requests, 2)
+
+    def test_a_held_gait_is_not_asked_for_again(self):
+        # A dock's final approach starts and stops every second; each start used to
+        # send ClassicWalk, and one that timed out held the sport service while the
+        # dock's sit arrived, so the sit timed out too (65, 2026-09-29).
+        node = _node()
+        node._note_gait(0)
+        t = _drive(node, 0.0, 10, 0.5)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 0)
+
+    def test_a_failed_assertion_is_asked_for_at_the_next_start(self):
+        node = _node()
+        node._note_gait(3104)
+        t = _drive(node, 0.0, 10, 0.5)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 2)
+
+    def test_a_stand_is_followed_by_one_assertion(self):
+        # A stand's own ClassicWalk returns 0 within 10ms, before the robot is up;
+        # counted as held, it left the chassis in BalanceStand ignoring every Move
+        # (65, 2026-09-29). The next motion start asserts it once, and only that
+        # call's 0 holds it.
+        node = _node()
+        node._robot_status = None
+        node._note_gait(0)
+        node._play_steps('Standing', [('StandUp', lambda: 0),
+                                      ('ClassicWalk', lambda: 0)], 'standup')
+        t = _drive(node, 0.0, 10, 0.5)
+        self.assertEqual(node.gait.requests, 1)
+        node._note_gait(0)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 1)
+
+    def _chassis_at(self, node, error_code):
+        node.watch.on_sport_state(0.0, 0, 0, error_code, (0.0, 0.0, 0.0), 0.0, ())
+
+    def test_a_stand_from_outside_is_asserted_once(self):
+        # The remote sat the robot and stood it again: the chassis came back at 100
+        # with the hold still set, and every turn in place of the dock went unexecuted.
+        node = _node()
+        node._note_gait(0)
+        self._chassis_at(node, 100)
+        t = _drive(node, 0.0, 10, 0.5)
+        self.assertEqual(node.gait.requests, 1)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 1, 'asserted again in the same state')
+
+    def test_walking_is_not_asserted_again(self):
+        node = _node()
+        node._note_gait(0)
+        self._chassis_at(node, 2010)
+        t = _drive(node, 0.0, 10, 0.5)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 0)
+
+    def test_leaving_the_gait_again_is_asserted_again(self):
+        node = _node()
+        node._note_gait(0)
+        self._chassis_at(node, 100)
+        t = _drive(node, 0.0, 10, 0.5)
+        self._chassis_at(node, 2010)
+        t = _drive(node, t, 5, 0.0)
+        t = _drive(node, t, 10, 0.5)
+        self._chassis_at(node, 100)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 2)
+
+    def test_a_robot_without_a_measured_state_is_left_alone(self):
+        node = _node()
+        node.robot_model = 'b2'
+        node._note_gait(0)
+        self._chassis_at(node, 100)
+        _drive(node, 0.0, 10, 0.5)
+        self.assertEqual(node.gait.requests, 0)
+
+    def test_a_gait_switched_to_is_said_and_is_the_one_a_stand_asserts(self):
+        node = _node()
+        node._play_action('play gait free')
+        self.assertEqual(node.said_gaits, ['free'])
+        node._play_action('play stand')
+        _drive(node, 0.0, 10, 0.5)
+        self.assertEqual(node.sport_client.calls[:4], ['FreeWalk', 'StandUp', 'BalanceStand', 'FreeWalk'])
+        self.assertEqual(node.sport_client.count('ClassicWalk'), 0)
+        self.assertEqual(node.gait.requests, 1)
+
+    def test_a_refused_switch_keeps_the_gait_and_says_so(self):
+        node = _node()
+        node.sport_client.free_code = -1
+        node._play_action('play gait free')
+        self.assertEqual(node.said_gaits, ['classic'])
+        node._play_action('play stand')
+        self.assertEqual(node.sport_client.calls[-1], 'ClassicWalk')
+
+    def test_the_free_gait_is_not_judged_by_the_classic_state(self):
+        node = _node()
+        node.walk_gait = 'free'
+        node._note_gait(0)
+        self._chassis_at(node, 100)
+        _drive(node, 0.0, 10, 0.5)
+        self.assertEqual(node.gait.requests, 0)
+
+    def test_the_classic_gait_is_part_of_a_stand(self):
+        node = _node()
+        node._play_action('play stand')
+        self.assertEqual(node.sport_client.calls, ['StandUp', 'BalanceStand', 'ClassicWalk'])
+
+    def test_a_sit_clears_the_gait(self):
+        node = _node()
+        node._robot_status = None
+        node._note_gait(0)
+        node._play_steps('Sitting', [('StandDown', lambda: 0)], 'sitting')
+        self.assertFalse(node._gait_held)
+
+    def test_the_worker_reports_each_result(self):
+        seen = []
+        worker = uc.GaitWorker(lambda: 0, _Log(), on_result=seen.append)
+        worker.run_once()
+        worker = uc.GaitWorker(lambda: (_ for _ in ()).throw(RuntimeError()), _Log(),
+                               on_result=seen.append)
+        worker.run_once()
+        self.assertEqual(seen, [0, None])
 
     def test_steady_stream_logs_no_gap(self):
         node = _node()
@@ -186,10 +350,11 @@ class TestGaitWorker(unittest.TestCase):
         uc.GaitWorker(lambda: time.sleep(uc._SLOW_RPC_S + 0.05) or 0, log).run_once()
         self.assertTrue(log.has('warning', '[sport] ClassicWalk'))
 
-    def test_fast_reply_is_not_logged(self):
+    def test_fast_reply_is_logged_as_info(self):
         log = _Log()
         uc.GaitWorker(lambda: 0, log).run_once()
         self.assertFalse(log.has('warning', '[sport]'))
+        self.assertTrue(log.has('info', '[sport] ClassicWalk code=0'))
 
     def test_nonzero_code_is_logged_however_fast(self):
         log = _Log()
@@ -250,6 +415,103 @@ class TestGaitWorker(unittest.TestCase):
             worker.stop()
 
 
+class TestActionWorker(unittest.TestCase):
+    """65, 2026-09-29: a stand queued behind a 20s refused one ran with the robot
+    walking at 0.9 m/s. The stamp is taken on arrival, so waiting is measurable."""
+
+    def _worker(self):
+        played, log = [], _Log()
+        return uc.ActionWorker(played.append, log), played, log
+
+    def test_a_command_run_on_arrival_is_played(self):
+        worker, played, _ = self._worker()
+        worker.run_once(10.0, 'play sit', 10.1)
+        self.assertEqual(played, ['play sit'])
+
+    def test_a_command_that_waited_too_long_is_dropped(self):
+        worker, played, log = self._worker()
+        worker.run_once(10.0, 'play stand', 10.0 + uc._ACTION_MAX_WAIT_S + 0.1)
+        self.assertEqual(played, [])
+        self.assertTrue(log.has('warning', 'dropped'))
+
+    def test_one_behind_a_stuck_call_is_dropped_and_the_next_is_not(self):
+        """Through the thread: the reader stamps on arrival while the first call
+        blocks, and only the one that waited past the limit is lost."""
+        played, gate = [], threading.Event()
+
+        def play(data):
+            if data == 'play stand' and not played:
+                gate.wait(2.0)
+            played.append(data)
+
+        worker = uc.ActionWorker(play, _Log())
+        worker.start()
+        t0 = time.monotonic()
+        worker.submit('play stand', t0)
+        worker.submit('play stand', t0 - uc._ACTION_MAX_WAIT_S)   # already stale
+        gate.set()
+        worker.submit('play sit', time.monotonic())
+        worker.stop()
+        self.assertEqual(played, ['play stand', 'play sit'])
+
+    def test_a_raising_play_does_not_kill_the_worker(self):
+        played = []
+
+        def play(data):
+            if data == 'bad':
+                raise RuntimeError('boom')
+            played.append(data)
+
+        log = _Log()
+        worker = uc.ActionWorker(play, log)
+        worker.start()
+        now = time.monotonic()
+        worker.submit('bad', now)
+        worker.submit('play sit', now)
+        worker.stop()
+        self.assertEqual(played, ['play sit'])
+        self.assertTrue(log.has('error', 'action failed'))
+
+    def test_the_reader_only_queues(self):
+        node = _node()
+        node.actions = uc.ActionWorker(lambda d: self.fail('played on the reader'), node.logger)
+        node.ActionMessageHandler(type('M', (), {'data': 'play sit'})())
+        self.assertEqual(node.actions._queue.qsize(), 1)
+
+
+class TestActionReader(unittest.TestCase):
+    """65: 4 of 17 dock sits never reached the handler through the SDK's default
+    best-effort reader."""
+
+    def _qos(self):
+        seen = {}
+
+        class _Channel:
+            def SetReader(self, qos, handler, depth):
+                seen.update(qos=qos, depth=depth)
+
+        class _Factory:
+            def CreateChannel(self, name, msg_type):
+                return _Channel()
+
+        from unittest import mock
+        with mock.patch.object(uc, 'ChannelFactory', _Factory):
+            uc.reliable_reader('rt/service/command', object, lambda m: None, 10)
+        return seen
+
+    def test_the_action_reader_is_reliable(self):
+        from cyclonedds.core import Policy
+        policies = list(self._qos()['qos'])
+        self.assertTrue(any(isinstance(p, Policy.Reliability.Reliable) for p in policies))
+
+    def test_the_action_reader_does_not_replay_on_restart(self):
+        from cyclonedds.core import Policy
+        policies = list(self._qos()['qos'])
+        replaying = (Policy.Durability.TransientLocal, Policy.Durability.Transient,
+                     Policy.Durability.Persistent)
+        self.assertFalse(any(p in replaying for p in policies))
+
+
 class TestChassisWatch(unittest.TestCase):
     def _run(self, cmd_v, chassis_v, seconds, watch=None, t0=0.0):
         log = watch.log if watch else _Log()
@@ -288,6 +550,15 @@ class TestChassisWatch(unittest.TestCase):
         changes = [m for lv, m in log.lines if m.startswith('[chassis] mode=')]
         self.assertEqual(len(changes), 2)
         self.assertIn('was mode=7', changes[-1])
+
+    def test_an_error_code_after_a_clean_state_is_logged(self):
+        log = _Log()
+        watch = uc.ChassisWatch(log)
+        watch.on_sport_state(0.0, 9, 1, 0, (0, 0, 0), 0.0, ())
+        watch.on_sport_state(0.1, 9, 1, 2010, (0, 0, 0), 0.0, ())
+        watch.on_sport_state(0.2, 9, 1, 0, (0, 0, 0), 0.0, ())
+        self.assertTrue(log.has('warning', 'error_code=2010'))
+        self.assertEqual(watch.state_at, 0.2)
 
     def test_silent_sport_state_is_logged(self):
         log = _Log()
@@ -344,6 +615,87 @@ class TestAs2Profile(unittest.TestCase):
         node._play_action(Msg())
         self.assertEqual(node.sport_client.calls, ['StandDown'])
         self.assertEqual(node._robot_status, uc.RobotStatus.SITTING)
+
+    def test_a_silent_chassis_is_given_up_on_after_ten_seconds(self):
+        lost = []
+        watch = uc.ChassisWatch(_Log(), lost=lost.append)
+        watch.on_sport_state(0.0, 7, 1, 0, (0, 0, 0), 0.0, ())
+        watch.check(9.0)
+        self.assertEqual(lost, [])
+        watch.check(11.0)
+        self.assertEqual(lost, [11.0])
+
+    def test_a_chassis_never_heard_is_given_up_on_from_the_start(self):
+        lost = []
+        watch = uc.ChassisWatch(_Log(), started=100.0, lost=lost.append)
+        watch.check(105.0)
+        self.assertEqual(lost, [])
+        watch.check(111.0)
+        self.assertEqual(lost, [11.0])
+
+
+class TestConstructionOrder(unittest.TestCase):
+    """The battery reader's thread can hand a sample over the moment Init
+    returns, so /battery's publisher has to exist before the subscription."""
+
+    def test_the_battery_publisher_exists_before_lowstate_is_subscribed(self):
+        import inspect
+        src = inspect.getsource(uc.Ros2UnitreeManagerNode._init_battery_subscription)
+        self.assertIn('self.publisher_battery = ChannelPublisher(', src)
+        self.assertIn('sub.Init(self.BatteryMessageHandler', src)
+        self.assertLess(src.index('self.publisher_battery = ChannelPublisher('),
+                        src.index('sub.Init(self.BatteryMessageHandler'))
+
+
+class TestMainEntry(unittest.TestCase):
+    """The process's own entrypoint: argparse dests are snake_case, so main() must
+    read `network_interface`. A camelCase paste here is invisible to every test
+    that builds the node directly -- it only shows on the rig, as a restart loop."""
+
+    def test_main_reads_the_argparse_dest(self):
+        import inspect
+        src = inspect.getsource(uc.main)
+        self.assertIn('parsed_args.network_interface', src)
+        self.assertNotIn('parsed_args.networkInterface', src)
+
+
+class TestNewestReader(unittest.TestCase):
+    def test_each_read_reaches_the_handler_and_a_raise_does_not_end_it(self):
+        reads = iter(['first', 'second'])
+        done = threading.Event()
+
+        class _Sub:
+            def __init__(self, name, msg_type):
+                pass
+
+            def Init(self, handler=None, queueLen=0):
+                assert handler is None, 'a handler decodes every sample'
+
+            def Read(self, timeout=None):
+                try:
+                    return next(reads)
+                except StopIteration:
+                    done.wait()
+
+        seen, log = [], _Log()
+
+        def handler(msg):
+            seen.append(msg)
+            if msg == 'first':
+                raise RuntimeError('boom')
+
+        real = uc.ChannelSubscriber
+        uc.ChannelSubscriber = _Sub
+        try:
+            uc.newest_reader('rt/x', object, handler, 200.0, log)
+            deadline = time.monotonic() + 2.0
+            while len(seen) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            uc.ChannelSubscriber = real
+            done.set()
+        self.assertEqual(seen, ['first', 'second'])
+        self.assertTrue(log.has('error', 'rt/x handling failed'))
 
 
 if __name__ == '__main__':

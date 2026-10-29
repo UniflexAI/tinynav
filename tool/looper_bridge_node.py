@@ -27,6 +27,10 @@ class LooperBridgeNode(Node):
         self.bridge = CvBridge()
 
         self.cached_camera_info = None
+        # What has been said once. Not the logger's once=True: rclpy resolves the
+        # caller's source file before it checks, on every call, and these callbacks
+        # run at 10-100Hz.
+        self._said = set()
         self.last_keyframe_pose = None
         self.last_keyframe_time = None
         self.last_pose = None
@@ -43,10 +47,6 @@ class LooperBridgeNode(Node):
 
         self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
-
-        self.vio_100hz_sub = self.create_subscription(
-            PoseStamped, "/camera/camera/vio_100hz", self.vio_100hz_callback, 50
-        )
 
         self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
@@ -76,29 +76,24 @@ class LooperBridgeNode(Node):
             "Bridging /camera/camera/vio_image + /camera/camera/depth/image_rect_raw + /camera/camera/infra1/image_rect_raw into TinyNav /slam topics."
         )
         self.get_logger().info(
-            "Bridging /camera/camera/vio_100hz into /slam/odometry."
-        )
-
-    def vio_100hz_callback(self, pose_msg: PoseStamped):
-        # /camera/camera/vio_100hz already reports T_world_camera.
-        T_world_camera = pose_msg2np(pose_msg)
-        odom_msg = np2msg(T_world_camera, pose_msg.header.stamp, "world", "camera")
-        self.odom_pub.publish(odom_msg)
-        self.get_logger().info(
-            f"Bridged first /camera/camera/vio_100hz message at "
-            f"{pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d} to /slam/odometry.",
-            once=True,
+            "Bridging /camera/camera/vio_image into /slam/odometry and /slam/odometry_visual."
         )
 
     def camera_info_callback(self, msg: CameraInfo):
         self.cached_camera_info = msg
-        self.get_logger().info(
-            f"Received camera info from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}.",
-            once=True,
-        )
+        if self._first('camera_info'):
+            self.get_logger().info(
+                f"Received camera info from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}.")
+
+    def _first(self, what) -> bool:
+        if what in self._said:
+            return False
+        self._said.add(what)
+        return True
 
     def tf_callback(self, msg: TFMessage):
-        self.get_logger().info("Received TF_STATIC for Looper bridge.", once=True)
+        if self._first('tf_static'):
+            self.get_logger().info("Received TF_STATIC for Looper bridge.")
 
     def log_missing_inputs(self):
         self._missing_input_counter += 1
@@ -163,8 +158,14 @@ class LooperBridgeNode(Node):
         return depth_out
 
     def publish_visual_odom(self, pose_msg: PoseStamped):
+        """The 20Hz image-rate pose, on both odometry topics."""
         odom_msg = self.build_odom(pose_msg2np(pose_msg), pose_msg.header.stamp)
         self.odom_visual_pub.publish(odom_msg)
+        self.odom_pub.publish(odom_msg)
+        if self._first('odometry'):
+            self.get_logger().info(
+                f"Bridged first /camera/camera/vio_image pose at "
+                f"{pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d} to /slam/odometry.")
 
     def sync_callback(self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image):
         if self.cached_camera_info is None:
@@ -178,11 +179,11 @@ class LooperBridgeNode(Node):
         depth_m = self.decode_depth_meters(depth_msg)
         depth_out = self.build_depth_msg(depth_m, stamp)
 
-        self.get_logger().info(
-            "sync_callback: "
-            f"t={self.stamp_to_sec(stamp):.3f}, "
-            f"depth={depth_m.shape}, image={image_msg.height}x{image_msg.width}"
-        )
+        if self._first('sync'):
+            self.get_logger().info(
+                "sync_callback: first frame "
+                f"t={self.stamp_to_sec(stamp):.3f}, "
+                f"depth={depth_m.shape}, image={image_msg.height}x{image_msg.width}")
 
         image_out = copy.deepcopy(image_msg)
         image_out.header.stamp = stamp

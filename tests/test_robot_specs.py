@@ -1,7 +1,9 @@
 import json
+from dataclasses import replace
 
 import pytest
 
+from tinynav.core import robot_specs
 from tinynav.core.robot_specs import GO2_CONFIG, with_measured_camera
 
 
@@ -24,3 +26,10 @@ def test_an_unreadable_file_is_the_type_default_and_says_so(tmp_path, capsys, bo
     path.write_text(body)
     assert with_measured_camera(GO2_CONFIG, path) is GO2_CONFIG
     assert str(path) in capsys.readouterr().err
+
+
+def test_only_the_free_gait_has_floors_of_its_own(tmp_path):
+    missing = tmp_path / 'none.json'
+    classic, free = (robot_specs.robot_config(missing, gait) for gait in ('classic', 'free'))
+    floors = robot_specs.FREE_GAIT_FLOORS.get(classic.name, {})
+    assert replace(classic, **floors) == free

@@ -10,7 +10,8 @@ what reached /cmd_vel was a median of exactly 0.000.
 Upstream instead takes the bearing to a pose `lookahead_steps` ahead, expressed in the
 robot frame, and uses it only to REPLACE the command when it is large. These tests pin
 the two properties that distinguish that from what was here: the reference moves the
-output (leverage), and nothing accumulates between cycles (no integrator).
+output (leverage), and nothing accumulates between cycles (no integrator). The one
+thing learned is the chassis's own yaw against odometry, never the path (YawBiasTest).
 
 Frame: with identity pose orientations, cmd_vel_control's T_robot_to_camera makes world
 +z the robot's forward axis and world -x its left, so heading_err = atan2(-dx, dz).
@@ -20,6 +21,8 @@ Needs rclpy, so this runs in the device container.
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 import time
 import unittest
 
@@ -27,18 +30,22 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path
+from scipy.spatial.transform import Rotation as R
 
+from tinynav.platforms import cmd_vel_control
 from tinynav.platforms.cmd_vel_control import CmdVelControlNode
 
 _DT = 1.0 / 12.0
 
 
-def _pose(x, y, z):
+def _pose(x, y, z, yaw=0.0):
+    """`yaw` is the robot's, left positive: a turn about world -y in this frame."""
     p = PoseStamped()
     p.pose.position.x = float(x)
     p.pose.position.y = float(y)
     p.pose.position.z = float(z)
-    p.pose.orientation.w = 1.0
+    p.pose.orientation.y = -math.sin(yaw / 2.0)
+    p.pose.orientation.w = math.cos(yaw / 2.0)
     return p
 
 
@@ -60,7 +67,11 @@ class _NodeCase(unittest.TestCase):
         rclpy.shutdown()
 
     def setUp(self):
+        self._calib = tempfile.TemporaryDirectory()
+        cmd_vel_control.YAW_BIAS_PATH = os.path.join(self._calib.name, 'calib', 'yaw_bias.json')
         self.node = CmdVelControlNode()
+        # The classic gait's floors, whatever CHASSIS_GAIT the host has.
+        self.node.min_effective_spin_speed = self.node.min_effective_angular_speed
         self.sent: list[Twist] = []
         self.node.cmd_pub.publish = self.sent.append
         self.node._nav_active = True
@@ -71,6 +82,7 @@ class _NodeCase(unittest.TestCase):
 
     def tearDown(self):
         self.node.destroy_node()
+        self._calib.cleanup()
 
     def _tick(self, ticks=1, before=None):
         """Tick the timer `ticks` times, never stale. Returns the published Twists."""
@@ -131,6 +143,88 @@ class HeadingControlTest(_NodeCase):
         # one back trips here rather than on a rig.
         for attr in ('_yaw_bias_per_m', '_drift_lp', 'yaw_kp', 'yaw_bias_ki'):
             self.assertFalse(hasattr(self.node, attr), f'{attr} is back')
+
+
+class YawBiasTest(_NodeCase):
+    """The chassis's own yaw while told straight is learned from odometry and taken off
+    the command. Odometry here is z-up: the robot at `heading`, its camera's +z forward."""
+
+    STRAIGHT = _path((0, 0, 0), (0, 0, 1.0))
+
+    def _face(self, heading):
+        cam = R.from_euler('z', heading).as_matrix() @ self.node.T_robot_to_camera[:3, :3].T
+        q = R.from_matrix(cam).as_quat()
+        o = self.node.pose.pose.pose.orientation
+        o.x, o.y, o.z, o.w = q
+
+    def _walk(self, ticks, yaw_per_m, say=False):
+        """Straight ahead on a chassis that yaws `yaw_per_m` (rad/m) more than it is told;
+        `say` makes every tick due to say (and save) the bias."""
+        self.node.path_callback(self.STRAIGHT)
+        state = {'h': 0.0}
+
+        def chassis(n):
+            if say:
+                n._bias_said = -1e9
+            sent = n.prev_cmd
+            state['h'] += (yaw_per_m * sent.linear.x + sent.angular.z) * _DT
+            self._face(state['h'])
+        return self._tick(ticks, before=chassis)
+
+    def test_a_chassis_that_yaws_left_is_told_right_until_it_walks_straight(self):
+        bias = np.radians(3.0)
+        out = self._walk(400, bias)[-1]           # 400 ticks at ~0.9 m/s: some 30 m
+        self.assertAlmostEqual(out.angular.z, -bias * out.linear.x, places=3)
+
+    def test_the_next_goal_starts_from_the_bias_learned(self):
+        self._walk(400, np.radians(3.0), say=True)
+        learned = self.node._yaw_bias
+        self.assertGreater(learned, 0.0)
+        self.assertAlmostEqual(CmdVelControlNode()._yaw_bias, learned, places=9)
+
+    def test_a_heading_jump_is_not_learned(self):
+        self._walk(5, 0.0)
+        self._face(1.0)                           # an odometry restart
+        self._tick(1)
+        self.assertEqual(self.node._yaw_bias, 0.0)
+
+
+class TurnInPlaceTest(_NodeCase):
+    """A rollout that only rotates has no bearing: its position difference is float
+    noise, and noise a hair behind the robot reads as heading_err = +/-pi. The force
+    turn must not steer by it -- the planner's own yaw is the command."""
+
+    #: Behind the robot by float noise: atan2 of this is +/-pi.
+    NOISE = -1e-9
+
+    def test_a_turn_in_place_turns_the_way_the_planner_asked(self):
+        for yaw in (+0.4, -0.4):
+            out = self._drive(_path((0, 0, 0), (0, 0, self.NOISE, yaw)))[-1]
+            self.assertEqual(out.linear.x, 0.0)
+            self.assertAlmostEqual(out.angular.z, yaw, places=3, msg=f'asked {yaw:+}')
+
+    def test_a_standstill_is_not_a_spin(self):
+        # Same pose twice: the planner asked for nothing at all.
+        out = self._drive(_path((0, 0, 0), (0, 0, self.NOISE)))[-1]
+        self.assertEqual(out.linear.x, 0.0)
+        self.assertEqual(out.angular.z, 0.0)
+
+    def test_a_slow_turn_in_place_is_raised_to_what_the_chassis_executes(self):
+        # A go2 in the free gait does not step below 0.45; the planner's smallest turn is 0.107.
+        n = self.node
+        n.min_effective_angular_speed, n.min_effective_spin_speed = 0.2, 0.45
+        for yaw in (+0.107, -0.107):
+            out = self._drive(_path((0, 0, 0), (0, 0, self.NOISE, yaw)))[-1]
+            self.assertAlmostEqual(out.angular.z, math.copysign(0.45, yaw), places=6)
+        # The pair: a request below the engage threshold is still a stop.
+        out = self._drive(_path((0, 0, 0), (0, 0, self.NOISE, 0.03)))[-1]
+        self.assertEqual(out.angular.z, 0.0)
+
+    def test_a_real_sideways_segment_still_forces_the_turn(self):
+        # The pair to the two above: past reverse_min_vx the bearing is real.
+        out = self._drive(_path((0, 0, 0), (-1.0, 0, 0.05)))[-1]
+        self.assertEqual(out.linear.x, 0.0)
+        self.assertGreater(out.angular.z, 0.3)
 
 
 class DeadbandTest(_NodeCase):
@@ -194,6 +288,23 @@ class DeadbandTest(_NodeCase):
             self.assertAlmostEqual(snap(-0.01, -engage, min_exec, engage), -min_exec)
             # Inside the band, request below the engage threshold: this is a stop.
             self.assertEqual(snap(0.01, engage * 0.9, min_exec, engage), 0.0)
+
+
+
+class ReverseSpeedTest(_NodeCase):
+    def _reverse(self, metres_per_pose):
+        n = self.node
+        poses = [(0, 0, -metres_per_pose * k) for k in range(n.lookahead_steps + 2)]
+        return self._drive(_path(*poses), ticks=60)[-1].linear.x
+
+    def test_a_reverse_is_driven_at_its_planned_speed_capped_at_the_fixed_one(self):
+        n = self.node
+        per_pose = n.planner_dt * n.path_pose_stride
+        slow = self._reverse(0.5 * n.max_reverse_speed * per_pose)
+        fast = self._reverse(3.0 * n.max_reverse_speed * per_pose)
+        self.assertAlmostEqual(fast, -n.max_reverse_speed, places=3)
+        self.assertLess(slow, 0.0)
+        self.assertGreater(slow, fast + 0.05)
 
 
 if __name__ == '__main__':

@@ -10,12 +10,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'cor
 from std_msgs.msg import Header
 from math_utils import matrix_to_quat
 from scipy.ndimage import distance_transform_edt
-from planning_node import (run_raycasting_loopy, build_route_fields, route_band_fade,
-                           route_heading_penalty, score_trajectories_by_ESDF,
+from planning_node import (run_raycasting_loopy, build_route_fields, score_trajectories_by_ESDF,
+                           select_by_time, carried_row, turn_remainder, admit_reverse,
+                           generate_predefined_trajectory_vocabularies, REVERSE_SPEED,
+                           REVERSE_CAREFUL_SPEED, REVERSE_CAREFUL_M,
+                           ARRIVE_M, ARRIVE_TICKS, ARRIVE_TICK_S,
+                           generate_rotate_then_go, ROTATE_DEG, ROTATE_THEN_GO_M,
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
-                           reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M, reverse_gate_penalty,
-                           generate_trajectory_library_3d, turn_in_place_penalty,
-                           heading_of_pose7, angle_between, cap_selected_arc)
+                           reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
+                           generate_trajectory_library_3d, heading_of_pose7, angle_between,
+                           route_left_at, around_obstacles, route_blocked_ahead)
 from types import SimpleNamespace
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
@@ -202,7 +206,7 @@ def test_score_trajectories_by_esdf_route_terms():
     on_route_traj = np.array([[
         [x, 2.5, 0.0, 0.0, 0.0, 0.0, 1.0] for x in np.linspace(0.6, 4.4, 5)
     ]])
-    scores, occ_points, path_costs, end_remainings, end_heading_errs = score_trajectories_by_ESDF(
+    scores, occ_points, path_costs, end_remainings, end_heading_errs = _score5(
         on_route_traj, ESDF_map, path_dist_map, remaining_map, route_heading_map,
         origin, resolution,
     )
@@ -214,11 +218,16 @@ def test_score_trajectories_by_esdf_route_terms():
     off_route_traj = np.array([[
         [x, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0] for x in np.linspace(0.6, 4.4, 5)
     ]])
-    _, _, off_path_costs, _, _ = score_trajectories_by_ESDF(
+    _, _, off_path_costs, _, _ = _score5(
         off_route_traj, ESDF_map, path_dist_map, remaining_map, route_heading_map,
         origin, resolution,
     )
     assert abs(off_path_costs[0] - 2.0) < 0.2
+
+
+def _score5(*args):
+    """The scorer's first five columns: what these tests are about."""
+    return score_trajectories_by_ESDF(*args)[:5]
 
 
 def _pose_facing(x, y, heading):
@@ -262,47 +271,16 @@ def test_route_heading_is_the_route_direction_not_the_bearing_to_the_goal():
     straight = np.array([[_pose_facing(x, 0.5, 0.0) for x in np.linspace(2.0, 3.0, 5)]])
     turning = np.array([[_pose_facing(2.5, y, np.pi / 2) for y in np.linspace(0.5, 1.5, 5)]])
 
-    _, _, _, _, straight_err = score_trajectories_by_ESDF(
+    _, _, _, _, straight_err = _score5(
         straight, ESDF_map, path_dist_map, remaining_map, route_heading_map,
         origin, resolution,
     )
-    _, _, _, _, turning_err = score_trajectories_by_ESDF(
+    _, _, _, _, turning_err = _score5(
         turning, ESDF_map, path_dist_map, remaining_map, route_heading_map,
         origin, resolution,
     )
     assert turning_err[0] < np.deg2rad(20), turning_err[0]
     assert straight_err[0] > np.deg2rad(60), straight_err[0]
-
-def test_the_goal_takes_over_from_the_route_across_the_terminal_band():
-    """One encoding of the band. The heading term fades out over it and the terminal
-    position term fades in; written twice they would drift, and on arrival the robot
-    would be pulled toward two different headings."""
-    band = 0.5
-    assert route_band_fade(3.0, band) == 1.0        # far out: the route decides
-    assert route_band_fade(0.0, band) == 0.0        # arrived: the goal decides
-    assert 0.0 < route_band_fade(0.25, band) < 1.0  # and it hands over, not switches
-
-
-def test_carrying_straight_on_at_a_corner_costs_more_than_turning():
-    """The penalty the cost actually adds, not just the field it reads.
-
-    Deleting the term from cost_function leaves the heading test above green -- this
-    is the one that goes red, because it asserts the number that changes the choice.
-    """
-    w, band = 60.0, 0.5
-    turning = route_heading_penalty(w, np.deg2rad(5), 3.0, band)
-    straight = route_heading_penalty(w, np.deg2rad(85), 3.0, band)
-    assert straight > turning
-    # ... by enough to outweigh the smoothness term (10 * |d omega|, at most ~13 over
-    # the full omega range) that was winning these ties.
-    assert straight - turning > 13.0
-
-    # Inside the terminal band the route has run out: the arrival heading takes over,
-    # so this term must fade rather than fight it.
-    assert route_heading_penalty(w, np.deg2rad(85), 0.0, band) == 0.0
-    assert (route_heading_penalty(w, np.deg2rad(85), 0.25, band)
-            < 0.6 * route_heading_penalty(w, np.deg2rad(85), 3.0, band))
-
 
 if __name__ == "__main__":
     # Upstream's goal-heading tests are deliberately absent: they exercise
@@ -312,8 +290,6 @@ if __name__ == "__main__":
     test_run_raycasting_comparison()
     test_build_route_fields_no_route()
     test_route_heading_is_the_route_direction_not_the_bearing_to_the_goal()
-    test_carrying_straight_on_at_a_corner_costs_more_than_turning()
-    test_the_goal_takes_over_from_the_route_across_the_terminal_band()
     test_build_route_fields_straight_line()
     test_score_trajectories_by_esdf_route_terms()
     print("Route field tests passed.")
@@ -515,7 +491,7 @@ def _score_standing_at(pose_xy, obst_xy):
     # facing +x with the body-+z-forward convention this file uses
     q = matrix_to_quat(np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))
     traj = np.array([[[pose_xy[0], pose_xy[1], 0.0, q[0], q[1], q[2], q[3]]] * 4])
-    scores, _, _, _, _ = score_trajectories_by_ESDF(
+    scores, _, _, _, _ = _score5(
         traj, ESDF, path_dist, remaining, route_heading, origin, resolution,
         _B2['safety_radius'], _B2['front_len'], _B2['rear_len'], _B2['half_w'])
     return scores[0]
@@ -672,65 +648,6 @@ def test_the_report_names_where_the_hits_are():
 
 # --- sampling/execution decoupling: the execution half --------------------------
 
-def test_superspeed_arc_is_capped_toward_its_start():
-    """An arc sampled at the class ceiling but selected into a tighter clearance
-    budget shrinks toward its start by exactly v_allow/sel_vx: cmd_vel_control
-    reads speed off path geometry, so the shrink IS the cap. Position columns
-    scale; heading columns (the omega source) must not move."""
-    t = np.zeros((31, 7))
-    t[:, 0] = np.linspace(0.0, 1.8, 31)            # 0.6 m/s * 3 s, straight +x
-    t[:, 2] = np.linspace(0.0, 0.3, 31)            # z rides along proportionally
-    t[:, 6] = 1.0                                  # identity quat
-    before = t.copy()
-    executed = cap_selected_arc(t, 0.6, 0.3)
-    assert executed == 0.3
-    assert np.allclose(t[:, 0], np.linspace(0.0, 0.9, 31))
-    assert np.allclose(t[:, 2], before[:, 2] * 0.5)
-    assert np.allclose(t[:, 3:], before[:, 3:])
-
-
-def test_within_allow_arc_is_untouched():
-    """The cap must be a no-op below the budget -- no gratuitous resample of an
-    already-legal arc, and the schedule keeps the selected speed."""
-    t = np.zeros((31, 7))
-    t[:, 0] = np.linspace(0.0, 0.9, 31)
-    t[:, 6] = 1.0
-    before = t.copy()
-    assert cap_selected_arc(t, 0.3, 0.6) == 0.3
-    assert (t == before).all()
-
-
-def test_reverse_arc_is_not_capped():
-    """Reverse keeps the fixed-speed vocabulary cmd_vel_control rewrites; a
-    negative sel_vx is never 'over' the (nonnegative) budget."""
-    t = np.zeros((31, 7))
-    t[:, 0] = np.linspace(0.0, -0.9, 31)
-    t[:, 6] = 1.0
-    before = t.copy()
-    assert cap_selected_arc(t, -0.3, 0.2) == -0.3
-    assert (t == before).all()
-
-
-def test_capped_speed_discounts_the_next_reaction_window():
-    """The clearance schedule must discount by the speed the last path actually
-    carries (_executed_vx), not the lattice param: reserving braking distance at
-    the selected 0.6 when only 0.3 executes would double-penalize the next
-    cycle's budget."""
-    node_attrs = SimpleNamespace(_t_react_s=0.5, _clear_c0_m=0.4,
-                                 _clear_open_m=2.0, _vx_min=0.1)
-    at_executed = PlanningNode._speed_from_clearance(node_attrs, 1.0, 0.3, 0.6)
-    at_selected = PlanningNode._speed_from_clearance(node_attrs, 1.0, 0.6, 0.6)
-    assert at_executed > at_selected
-
-
-def test_sync_callback_caps_through_the_helper():
-    """Guard the wiring: the selected row's cap must go through cap_selected_arc,
-    so a refactor cannot silently drop the decoupling's execution half."""
-    calls = [n.func.id for n in ast.walk(_sync_callback_src())
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-    assert 'cap_selected_arc' in calls
-
-
 def _sync_callback_src():
     src = open(os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core',
                             'planning_node.py')).read()
@@ -755,12 +672,13 @@ def test_the_all_collision_branch_publishes_nothing():
 
 
 class _Grid:
-    """Just the two attributes `score_trajectories` reads off the node."""
+    """Just the attributes `score_trajectories` reads off the node."""
 
     score_trajectories = PlanningNode.score_trajectories
 
     def __init__(self, origin, resolution):
         self.origin, self.resolution = origin, resolution
+        self._traj_dt, self.route_terminal_band = 0.1, 0.5
 
 
 _SHAPE, _RES, _ORIGIN = (160, 160), 0.05, np.array([-3.0, -3.0])
@@ -787,9 +705,9 @@ def _score_rows(obst_xy, back_step):
     here = [0.0, 0.0, 0.0, q[0], q[1], q[2], q[3]]
     standing = [list(here) for _ in range(4)]
     reverse = [[-back_step * k] + here[1:] for k in range(4)]
-    scores, _, _, _, _ = _Grid(_ORIGIN, _RES).score_trajectories(
+    scores = _Grid(_ORIGIN, _RES).score_trajectories(
         np.array([standing, reverse]), np.array([[0.0, 0.0], [-0.3, 0.0]]),
-        ESDF, path_dist, remaining, route_heading)
+        ESDF, path_dist, remaining, route_heading, np.zeros(3), False)[0]
     return scores[0], scores[1]
 
 
@@ -850,14 +768,7 @@ def test_but_a_reading_a_step_further_out_does_not():
 
 
 def test_a_clear_corridor_does_not_arm_reverse_however_blocked_the_rollouts_are():
-    """The `n_fwd_ok == 0` arm is gone, so arming is the clearance reading alone.
-
-    That arm answered a standstill the gate itself caused: banning every non-reverse
-    row, vx=0 included, left backing out as the only motion. `reverse_gate_penalty`
-    no longer bans the turn-in-place rows, and on 122 2026-09-18 eight of the ten
-    `fwd_ok == 0` readings still had those rows clear -- turning out beats reversing
-    out, and reversing from three metres of clear corridor was never the intent.
-    """
+    """Arming is the clearance reading alone, never "no forward row is clear"."""
     assert not reverse_armed(3.0, 0.05)
 
 
@@ -879,15 +790,29 @@ def test_the_lattice_offers_no_speed_between_a_standstill_and_the_floor():
                 f'v_allow {v_allow} offered {vx}, under the floor and over a standstill'
 
 
-def test_but_the_standstill_rows_are_still_offered():
-    """The other half. The heading term ranks turning against them, and a goal the
-    robot has to swing around to has nothing else to rank -- dropping them is the
-    freeze the heading term was written to prevent."""
+# Camera convention, body +Z forward and level: identity would point +Z straight up.
+_LEVEL_Q = np.array([-0.5, 0.5, -0.5, 0.5])
+
+
+def test_the_lattice_turns_only_at_rates_the_chassis_executes():
+    """One standstill row and no turn in place; every turn at least min_angular_vel."""
     for v_allow in (0.2, 0.6):
         _, params = generate_trajectory_library_3d(
-            max_linear_vel=v_allow, min_linear_vel=0.2)
-        turning = [w for vx, w in params if vx == 0.0 and abs(w) > 1e-6]
-        assert len(turning) >= 2, f'v_allow {v_allow} left no turn-in-place rows'
+            max_linear_vel=v_allow, min_linear_vel=0.2, max_angular_vel=0.75,
+            max_lat_acc=0.5, min_angular_vel=0.2)
+        assert sum(1 for vx, w in params if vx == 0.0) == 1
+        assert all(w == 0.0 or abs(w) >= 0.2 for _, w in params)
+
+
+def test_every_turn_in_place_drives_on_after_it():
+    trajs, params, durations = generate_rotate_then_go(
+        np.zeros(3), _LEVEL_Q, np.deg2rad(ROTATE_DEG), 0.75, 0.2, ROTATE_THEN_GO_M, 0.1, 70)
+    start = heading_of_pose7(np.concatenate([np.zeros(3), _LEVEL_Q]))
+    for traj, dur, deg in zip(trajs, durations, ROTATE_DEG):
+        assert abs(np.linalg.norm(traj[-1, :2]) - ROTATE_THEN_GO_M) < 1e-6
+        turned = np.rad2deg(angle_between(heading_of_pose7(traj[-1]), start))
+        assert abs(turned - min(abs(deg), 360 - abs(deg))) < 1e-6
+        assert dur <= 69 * 0.1
 
 
 def test_and_the_top_speed_is_still_offered():
@@ -895,15 +820,6 @@ def test_and_the_top_speed_is_still_offered():
     to still be in the lattice, or the robot never reaches it."""
     for v_allow in (0.2, 0.43, 0.6):
         assert max(_lattice_speeds(v_allow, 0.2)) == round(v_allow, 9)
-
-
-def test_the_reverse_gate_still_separates_the_two_moving_families():
-    """The counter-case: without this the test above passes on a gate that banned
-    nothing at all, which would let reverse rows win while driving forward."""
-    assert reverse_gate_penalty(0.4, True) == 1e9, 'forward allowed while reversing'
-    assert reverse_gate_penalty(-0.3, False) == 1e9, 'reverse allowed while driving'
-    assert reverse_gate_penalty(-0.3, True) == 0.0
-    assert reverse_gate_penalty(0.4, False) == 0.0
 
 
 def test_reverse_stays_engaged_until_the_corridor_opens_past_the_exit():
@@ -940,47 +856,191 @@ def test_footprint_cells_cover_the_body_along_its_heading():
 
 
 # --- turn-in-place penalty ------------------------------------------------------
-def _init_weights(*names):
-    """The planner's weights as __init__ assigns them, without building a node."""
-    cls = next(n for n in ast.walk(_planning_source())
-               if isinstance(n, ast.ClassDef) and n.name == 'PlanningNode')
-    init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == '__init__')
-    found = {t.attr: n.value.value for n in ast.walk(init) if isinstance(n, ast.Assign)
-             and isinstance(n.value, ast.Constant)
-             for t in n.targets if isinstance(t, ast.Attribute) and t.attr in names}
-    return [found[n] for n in names]
 
 
-def test_turning_back_against_the_last_rotation_costs_more_than_carrying_on():
-    w_turn, w_rev = 10.0, 30.0
-    carry_on = turn_in_place_penalty(0.0, 0.5, 0.4, w_turn, w_rev)
-    turn_back = turn_in_place_penalty(0.0, -0.5, 0.4, w_turn, w_rev)
-    assert turn_back > carry_on > 0.0
-    # From a standstill, or a straight line, there is no direction to turn back on.
-    assert (turn_in_place_penalty(0.0, -0.5, 0.0, w_turn, w_rev)
-            == turn_in_place_penalty(0.0, 0.5, 0.0, w_turn, w_rev) == carry_on)
+# --- the time cost ---------------------------------------------------------------
+
+def test_the_time_cost_arrives_where_map_node_does():
+    src = open(os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core', 'map_node.py')).read()
+    node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
+                and getattr(n.targets[0], 'id', None) == '_ARRIVE_M')
+    assert ast.unparse(node.value) == 'ROBOT_CONFIG.arrival_radius'
+    assert ARRIVE_M == ROBOT_CONFIG.planned_arrival_radius < ROBOT_CONFIG.arrival_radius
+    assert "os.environ.get('TINYNAV_ARRIVE_TICKS', '%d')" % ARRIVE_TICKS in src
+    assert 'create_timer(%s, self.nav_target_timer_callback)' % ARRIVE_TICK_S in src
 
 
-def test_only_turn_in_place_rows_pay_it():
-    """The counter-case: moving arcs and a standstill are untouched."""
-    assert turn_in_place_penalty(0.3, -0.5, 0.4, 10.0, 30.0) == 0.0
-    assert turn_in_place_penalty(-0.3, -0.5, 0.4, 10.0, 30.0) == 0.0
-    assert turn_in_place_penalty(0.0, 0.0, 0.4, 10.0, 30.0) == 0.0
+def test_the_time_cost_arrives_on_the_tick_map_node_does():
+    """Closing on a target, the scorer's arrival lands on the first sample whose
+    camera pose is inside map_node's circles (RobotConfig.arrival_distance) at ARRIVE_M: nose
+    first, where the camera's circle leads, and tail first, where the control
+    centre's does."""
+    origin, resolution, dt = np.array([0.0, 0.0]), 0.1, 0.1
+    zeros = np.zeros((50, 50))
+    target = np.array([3.0, 2.5])
+    centres = np.linspace(1.0, 3.0, 41)
+    cam = ROBOT_CONFIG.cam_offset_3d
+    for heading in (0.0, np.pi):
+        traj = np.array([[_pose_facing(x, 2.5, heading) for x in centres]])
+        arrive_t = score_trajectories_by_ESDF(
+            traj, np.full((50, 50), 5.0, dtype=np.float32), zeros, zeros, zeros, origin,
+            resolution, 0.1, *ROBOT_CONFIG.footprint_from_control(), target[0], target[1],
+            float(cam[0]), float(cam[1]), float(cam[2]), ARRIVE_M, 1, 1, 0.5, False, dt)[5][0]
+        c, s = np.cos(heading), np.sin(heading)
+        R = np.array([[s, 0.0, c], [-c, 0.0, s], [0.0, -1.0, 0.0]])
+        first = None
+        for i, x in enumerate(centres[1:], start=1):
+            T = np.eye(4)
+            T[:3, :3] = R
+            T[:3, 3] = np.array([x, 2.5, 0.0]) + R @ cam
+            if ROBOT_CONFIG.arrival_distance(T, target) < ARRIVE_M:
+                first = i
+                break
+        assert first is not None and abs(arrive_t - first * dt) < 1e-9, heading
 
 
-def test_a_reversed_turn_still_beats_standing_still_facing_the_wrong_way():
-    """The penalty must not bring back the freeze the heading term fixed: with the
-    goal far behind on the side opposite the last turn, the fastest turn-in-place row
-    has to save more heading cost than it pays, or standing still wins."""
-    w_heading, w_turn, w_rev = _init_weights(
-        'w_route_heading', 'w_turn_in_place', 'w_turn_reversal')
-    trajs, params = generate_trajectory_library_3d(
-        max_angular_vel=ROBOT_CONFIG.max_angular_vel, min_linear_vel=0.2)
-    spins = [i for i, (vx, w) in enumerate(params) if vx == 0.0 and abs(w) > 1e-6]
-    i = max(spins, key=lambda k: abs(params[k][1]))
-    traj = trajs[i]
-    turned = angle_between(heading_of_pose7(traj[-1]), heading_of_pose7(traj[0]))
-    dh = heading_of_pose7(traj[1]) - heading_of_pose7(traj[0])
-    yaw_rate = float(np.arctan2(np.sin(dh), np.cos(dh)) / 0.1)
-    paid = turn_in_place_penalty(0.0, yaw_rate, -yaw_rate, w_turn, w_rev)
-    assert w_heading * turned > paid, (w_heading * turned, paid)
+def test_standing_still_is_banned_while_another_row_is_open():
+    """A standstill, a slow turn and a forward row, none of them arriving."""
+    vx, yaw = np.array([0.0, 0.0, 0.3]), np.array([0.0, 0.11, 0.0])
+    rem = np.array([1.0, 1.0, 0.1])
+    pick = select_by_time(vx, yaw, np.zeros(3), np.full(3, np.inf), rem, np.zeros(3),
+                          np.zeros(3), np.zeros(3), rem, False, True, False, 0.5, 0.75, 0.5, 3.0)
+    assert pick == 2
+
+
+def test_but_inside_the_arrival_radius_standing_is_waiting():
+    """Every row arrives on the same tick there; the least motion is standing."""
+    vx, yaw = np.array([0.0, 0.0, 0.3]), np.array([0.0, 0.11, 0.0])
+    one = np.full(3, 1.0)
+    pick = select_by_time(vx, yaw, np.zeros(3), one, np.zeros(3), np.zeros(3), np.zeros(3),
+                          np.zeros(3), np.zeros(3), True, True, False, 0.5, 0.75, 0.5, 3.0)
+    assert pick == 0
+
+
+# --- carrying a choice forward -------------------------------------------------------
+
+def _pick(vx, yaw, t_end, **kw):
+    n = len(vx)
+    z = np.zeros(n)
+    return select_by_time(np.array(vx), np.array(yaw), z, np.full(n, np.inf), z, z, z, z, z,
+                          False, False, False, 0.5, 0.75, 0.5, np.array(t_end), **kw)
+
+
+def test_a_mirror_tie_keeps_the_last_direction():
+    """Left and right equally fast and equally much motion: the side turned last wins,
+    whichever of the two is a hair faster."""
+    assert _pick([0.2, 0.2], [0.3, -0.3], [1.0, 1.01], last_yaw=-0.3) == 1
+    assert _pick([0.2, 0.2], [0.3, -0.3], [1.01, 1.0], last_yaw=0.3) == 0
+
+
+def test_a_blocked_route_picks_the_standstill_row_over_a_faster_one():
+    assert _pick([0.0, 0.2, 0.2], [0.0, 0.0, 0.75], [1.0, 0.5, 0.5], stand_still=True) == 0
+
+
+def test_the_carried_row_wins_a_tie_but_not_a_race():
+    assert _pick([0.0, 0.2, 0.2], [0.0, 0.0, 0.75], [1.0, 1.0, 1.1], carry=2) == 2
+    assert _pick([0.0, 0.2, 0.2], [0.0, 0.0, 0.75], [1.0, 1.0, 1.5], carry=2) == 1
+
+
+def test_a_lattice_row_is_carried_as_itself_whatever_the_speed_cap():
+    params = np.array([[0.2, 0.0], [0.4, 0.214], [0.6, 0.214], [0.6, -0.214], [-0.15, 0.0],
+                       [0.8, 0.3], [0.2, 0.75]])
+    is_turn = np.array([False, False, False, False, False, False, True])
+    assert carried_row(params, is_turn, 0.55, 0.214) == 2
+    assert carried_row(params, is_turn, 0.8, 0.214) == 2    # the turn before the speed
+    assert carried_row(params, is_turn, 0.55, -0.214) == 3
+    assert carried_row(params, is_turn, -0.15, 0.0) == 4
+    assert carried_row(params, is_turn, -0.15, 0.3) == -1   # never the other way round
+    assert carried_row(params, is_turn, 0.2, 0.75) == 5     # never a turn in place
+
+
+def test_a_turn_in_place_carries_as_its_remainder():
+    """A 45 deg turn, 3 steps in: the remainder, as a delta, turns the rest of the
+    way to the same heading."""
+    d = np.deg2rad(45.0)
+    traj, _, _ = generate_rotate_then_go(np.zeros(3), _LEVEL_Q, np.array([d]), 0.75, 0.2, 0.5, 0.1, 60)
+    goal = heading_of_pose7(traj[0, -1])
+    rem = turn_remainder(traj[0, 2, 3:], goal, 0.075)
+    assert np.isclose(abs(rem), d - 3 * 0.075, atol=1e-6)
+    rest, _, _ = generate_rotate_then_go(np.zeros(3), traj[0, 2, 3:], np.array([rem]), 0.75, 0.2, 0.5, 0.1, 60)
+    assert np.isclose(angle_between(heading_of_pose7(rest[0, -1]), goal), 0.0, atol=1e-6)
+    assert turn_remainder(traj[0, -1, 3:], goal, 0.075) is None
+
+
+# --- reversing ---------------------------------------------------------------------
+
+def test_armed_the_careful_reverse_opens_only_when_the_full_one_is_blocked():
+    params = np.array([[0.4, 0.0], [-REVERSE_SPEED, 0.0], [-REVERSE_CAREFUL_SPEED, 0.0]])
+    inf = np.inf
+    assert list(admit_reverse([0.0, 0.0, inf], params, True)) == [0.0, 0.0, inf]
+    assert list(admit_reverse([inf, inf, inf], params, True)) == [inf, inf, 0.0]
+    assert list(admit_reverse([0.0, inf, 0.0], params, False)) == [0.0, inf, inf]
+
+
+def test_the_careful_reverse_stops_after_its_length():
+    trajs, params = generate_predefined_trajectory_vocabularies(init_q=_LEVEL_Q)
+    careful = trajs[np.flatnonzero(np.isclose(params[:, 0], -REVERSE_CAREFUL_SPEED))[0]]
+    full = trajs[np.flatnonzero(np.isclose(params[:, 0], -REVERSE_SPEED))[0]]
+    assert np.isclose(np.linalg.norm(careful[-1, :2]), REVERSE_CAREFUL_M)
+    assert np.linalg.norm(full[-1, :2]) > 2 * REVERSE_CAREFUL_M
+
+
+
+def test_the_route_left_at_a_point_is_from_its_nearest_route_point():
+    route = np.c_[np.arange(0.0, 8.0, 0.05), np.zeros(160)]
+    assert abs(route_left_at(route, [3.01, 0.2]) - 4.95) < 1e-6
+
+
+def _walled(wall_to_y):
+    """3 m x 3 m at 0.05 m, a wall at x = 1.5 from y = 0 up to `wall_to_y`: the cells
+    0.25 m clear of it."""
+    occ = np.zeros((60, 60), dtype=bool)
+    occ[30, :int(wall_to_y / 0.05)] = True
+    return distance_transform_edt(~occ) * 0.05 >= 0.25
+
+
+def _around(free, ends, target):
+    """Every row facing +x: (straight, its bearing error, the distance and error back)."""
+    to = target - ends
+    straight = np.linalg.norm(to, axis=1)
+    err = np.abs(np.arctan2(to[:, 1], to[:, 0]))
+    return (straight, err) + around_obstacles(ends, np.zeros(len(ends)), straight, err,
+                                              np.zeros(len(ends)), target, free, np.zeros(2),
+                                              0.05, 0.25)
+
+
+def test_a_row_behind_a_wall_from_the_target_goes_round_it():
+    ends = np.array([[1.0, 0.5], [2.0, 1.5]])         # behind the wall; on the target's side
+    straight, err, d, e = _around(_walled(2.0), ends, np.array([2.0, 0.5]))
+    assert d[0] > straight[0] + 2.0                   # up round the wall's end and back
+    assert err[0] == 0.0 and e[0] > 1.0               # faces the wall, not the way round
+    assert d[1] == straight[1] and e[1] == err[1]
+
+
+def test_a_target_walled_off_leaves_every_row_its_straight_distance():
+    ends = np.array([[1.0, 0.5], [1.0, 2.6]])
+    straight, err, d, e = _around(_walled(3.0), ends, np.array([2.0, 0.5]))  # the wall spans the grid
+    assert np.allclose(d, straight) and np.allclose(e, err)
+
+
+def _blocked_with_box_at(x, y):
+    """A 4m route along x at y=2.5, the robot at x=1 and the stop pose at x=3, and one
+    obstacle cell at (x, y)."""
+    origin, res = np.array([0.0, 0.0]), 0.1
+    path_dist, remaining, _, _ = build_route_fields([(0.5, 2.5), (4.5, 2.5)], (50, 50), origin, res)
+    obstacle = np.zeros((50, 50), dtype=bool)
+    obstacle[int(x / res), int(y / res)] = True
+    esdf = distance_transform_edt(~obstacle) * res
+    return route_blocked_ahead(esdf, path_dist, remaining, rem_here=3.5, stop_rem=1.5, half_w=0.25)
+
+
+def test_an_obstacle_on_the_route_before_the_stop_pose_blocks_it():
+    assert _blocked_with_box_at(2.0, 2.5)
+    assert _blocked_with_box_at(2.0, 2.7)             # within half a body of the line
+
+
+def test_an_obstacle_beside_behind_or_past_the_stop_pose_does_not():
+    assert not _blocked_with_box_at(2.0, 3.0)         # clears the body
+    assert not _blocked_with_box_at(0.6, 2.5)         # behind the robot
+    assert not _blocked_with_box_at(4.0, 2.5)         # past the stop pose
+

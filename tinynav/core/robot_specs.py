@@ -68,6 +68,9 @@ class RobotConfig:
     max_linear_vel: float = 1.0
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
+    #: The slowest turn in place, where the gait needs more than min_angular_vel to
+    #: take a step at all (`FREE_GAIT_FLOORS`); 0 is no floor beyond it.
+    min_spin_vel: float = 0.0
     obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
 
     @property
@@ -79,15 +82,44 @@ class RobotConfig:
         """Returns (front_len, rear_len, half_w) relative to control center."""
         return self.front_len, self.rear_len, self.half_width
 
+    @property
+    def arrival_radius(self):
+        """Radius of the two arrival circles (arrival_distance): two half-widths."""
+        return 2.0 * self.half_width
+
+    @property
+    def planned_arrival_radius(self):
+        """The radius planning rolls its trajectories into: one and a half half-widths,
+        tighter than arrival_radius, so a row has to head for the target, not graze the
+        circle."""
+        return 1.5 * self.half_width
+
+    def arrival_distance(self, T_camera, target_xy):
+        """XY distance from `target_xy` to the nearer of the two arrival circle
+        centres, the camera and the control centre, for a camera pose."""
+        camera = T_camera[:3, 3]
+        control = camera - T_camera[:3, :3] @ self.cam_offset_3d
+        target = np.asarray(target_xy, dtype=float)[:2]
+        return min(float(np.linalg.norm(camera[:2] - target)),
+                   float(np.linalg.norm(control[:2] - target)))
+
 
 GO2_CONFIG = RobotConfig(
     name='go2',
     front_len=0.25, rear_len=0.35, half_width=0.15,
     camera_fwd=0.30, camera_left=0.0,
     safety_radius=0.2,
+    # Measured on looper 2026-09-29, in place: 0.19 rad/s does not yaw at all, 0.20 does.
+    min_angular_vel=0.2,
+    # Measured on 65 2026-10-16, in place, free gait: 1.0 rad/s drives 0.87 and 3.0
+    # drives 2.87, so the chassis is not what bounds it. 2.0 swung the body into the
+    # wall turning in place in tight spots; 1.0 is the operator's call. go2w and b2
+    # take the same number unmeasured.
+    max_angular_vel=1.0,
 )
 
-GO2W_CONFIG = replace(GO2_CONFIG, name='go2w')
+# The wheeled base was not measured, so it keeps the default.
+GO2W_CONFIG = replace(GO2_CONFIG, name='go2w', min_angular_vel=RobotConfig.min_angular_vel)
 
 AS2_CONFIG = RobotConfig(
     name='as2',
@@ -98,9 +130,14 @@ AS2_CONFIG = RobotConfig(
 
 B2_CONFIG = RobotConfig(
     name='b2',
-    front_len=0.44, rear_len=0.44, half_width=0.15,
+    front_len=0.44, rear_len=0.44, half_width=0.175,
     camera_fwd=0.44, camera_left=0.0,
-    safety_radius=0.075,
+    safety_radius=0.05,
+    # The operator's call, 2026-10-13, as go2's: a 15-degree turn row reaches the chassis
+    # as 0.1-0.26 rad/s, and b2 yawed 0.06 rad/s on those (122, round r11, 90s stuck).
+    min_angular_vel=0.2,
+    # As go2's, unmeasured on b2: the operator's call, 2026-10-16.
+    max_angular_vel=1.0,
     # min_linear_vel stays the 0.1 default. 0.2 was run on 122 on 2026-09-04 and the
     # robot could barely move: cmd_vel_control DROPS a target below this rather than
     # raising it, so [0.1, 0.2) went from creeping to standing still -- every /cmd_vel
@@ -152,9 +189,23 @@ except KeyError:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}") from None
 
 
-def robot_config(path=CAMERA_OFFSET_PATH):
-    """This ROBOT_TYPE's config with the rig's measurement, read from disk now."""
-    return with_measured_camera(_TYPE_CONFIG, path)
+GAITS = ('classic', 'free')
+#: The gait unitree_control walks in between pilot's switches (docker-compose.d/drivers.yml).
+CHASSIS_GAIT = os.environ.get("CHASSIS_GAIT", "classic").strip().lower()
+if CHASSIS_GAIT not in GAITS:
+    raise ValueError(f"Unsupported CHASSIS_GAIT: {CHASSIS_GAIT!r}, expected one of {GAITS}")
+
+#: In the free gait, the slowest walk and turn in place that take a step at all: the
+#: thresholds as measured, no margin (pilot's docs/gotchas.md).
+FREE_GAIT_FLOORS = {'go2': {'min_linear_vel': 0.25, 'min_spin_vel': 0.45}}
+
+
+def robot_config(path=CAMERA_OFFSET_PATH, gait=CHASSIS_GAIT):
+    """This ROBOT_TYPE's config in `gait`, with the rig's measurement read from disk now."""
+    config = _TYPE_CONFIG
+    if gait == 'free' and config.name in FREE_GAIT_FLOORS:
+        config = replace(config, **FREE_GAIT_FLOORS[config.name])
+    return with_measured_camera(config, path)
 
 
 #: Read once, at import: a process picks up a new measurement at its next launch.
