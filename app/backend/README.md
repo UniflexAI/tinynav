@@ -92,6 +92,18 @@ The interactive API docs are available at `http://<host>:8000/docs`.
 | `GET` | `/sensor/mode` | Detected sensor mode: `looper`, `realsense`, or `unknown` |
 | `GET` | `/sensor/image-topics` | List of available camera topics |
 
+### Bag diagnostics
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/files/bags/{bag_name}/check` | Read-only check of a recorded bag: SQLite integrity, camera stream gaps, synchronized depth coverage, `/tf_static`. Returns `{report, text}` |
+
+The check runs `tool/check_camera_bag.py --skip-usb` in its own process group,
+one at a time (409 while another runs). Closing the request cancels it; it times
+out after 15 minutes. A 23 GB bag takes about a minute. On the robot,
+`python3 tool/check_camera_bag.py <bag_name>` gives the same report and can
+also line up stream gaps with kernel USB events from `journalctl`.
+
 ## File structure
 
 ```
@@ -104,6 +116,7 @@ app/backend/
 └── routers/
     ├── device.py
     ├── bag.py
+    ├── bag_check.py
     ├── map.py
     ├── poi.py
     └── nav.py
