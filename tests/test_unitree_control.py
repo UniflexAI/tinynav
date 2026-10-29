@@ -12,6 +12,7 @@ Needs unitree_sdk2py and rclpy, so this runs in the device container.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import types
 import time
@@ -23,11 +24,21 @@ from tinynav.platforms import unitree_control as uc  # noqa: E402
 
 
 class _Log:
+    """Records lines, and like rclpy's logger raises when one call site logs at a
+    second severity."""
+
     def __init__(self):
         self.lines = []
+        self._sites = {}
 
     def _add(self, level):
-        return lambda msg: self.lines.append((level, msg))
+        def log(msg):
+            caller = sys._getframe(1)
+            site = (caller.f_code.co_filename, caller.f_lineno)
+            if self._sites.setdefault(site, level) != level:
+                raise ValueError('Logger severity cannot be changed between calls.')
+            self.lines.append((level, msg))
+        return log
 
     def __getattr__(self, level):
         if level in ('debug', 'info', 'warning', 'error'):
@@ -526,6 +537,15 @@ class TestChassisWatch(unittest.TestCase):
         changes = [m for lv, m in log.lines if m.startswith('[chassis] mode=')]
         self.assertEqual(len(changes), 2)
         self.assertIn('was mode=7', changes[-1])
+
+    def test_an_error_code_after_a_clean_state_is_logged(self):
+        log = _Log()
+        watch = uc.ChassisWatch(log)
+        watch.on_sport_state(0.0, 9, 1, 0, (0, 0, 0), 0.0, ())
+        watch.on_sport_state(0.1, 9, 1, 2010, (0, 0, 0), 0.0, ())
+        watch.on_sport_state(0.2, 9, 1, 0, (0, 0, 0), 0.0, ())
+        self.assertTrue(log.has('warning', 'error_code=2010'))
+        self.assertEqual(watch.state_at, 0.2)
 
     def test_silent_sport_state_is_logged(self):
         log = _Log()

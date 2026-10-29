@@ -264,8 +264,12 @@ class ChassisWatch:
         key = (mode, gait, error_code)
         if key != self.state:
             was = '' if self.state is None else f' (was mode={self.state[0]} gait={self.state[1]} error_code={self.state[2]})'
-            (self.log.warning if error_code else self.log.info)(
-                f'[chassis] mode={mode} gait={gait} error_code={error_code}{was}')
+            line = f'[chassis] mode={mode} gait={gait} error_code={error_code}{was}'
+            # Two call sites: rclpy raises if one site logs at two severities.
+            if error_code:
+                self.log.warning(line)
+            else:
+                self.log.info(line)
             self.state = key
         self.v = (v[0], v[1])
         self.yaw_speed = yaw_speed
