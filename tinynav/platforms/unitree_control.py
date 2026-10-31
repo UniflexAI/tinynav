@@ -360,7 +360,10 @@ class Ros2UnitreeManagerNode:
         self.logger = log or logging.getLogger('unitree_control')
         self._net_iface = networkInterface
 
-        self.channel = ChannelFactoryInitialize(0, networkInterface)
+        # Dual-homed SDK channel: the robot NIC for the dog, plus the host bus on
+        # lo (core_runtime's cmd_vel and the bus publishers live there). One
+        # channel, one cyclonedds domain id -- a second channel is not an option.
+        self.channel = ChannelFactoryInitialize(0, f"{networkInterface},lo")
         self.sport_client = self.profile.client_factory()
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
@@ -374,6 +377,7 @@ class Ros2UnitreeManagerNode:
         self._move_failures = 0
         self._move_failure_logged_at = None
         self.watch = ChassisWatch(self.logger, time.monotonic(), self._chassis_lost)
+        self._never_heard_logged = False
 
         # Gait machinery: only the profiles whose audit allows a per-motion
         # assertion (go2/b2/b2w). AS2's BalanceStand is a toggle -- asserting on
@@ -470,8 +474,18 @@ class Ros2UnitreeManagerNode:
                                                      self.logger)
 
     def _chassis_lost(self, silent):
-        """Exit for compose to restart, unless the cable is out: a fresh process would
-        hear nothing either, and the link coming back is what to wait for."""
+        """Exit for compose to restart -- but only if the dog was heard and then went
+        silent. A dog that never showed up (powered off, mid self-check, cable pulled
+        behind the box switch, which keeps the carrier up) is waited for: exiting
+        here would loop a fresh DDS participant plus the startup gait RPC into the
+        dog every ~13s."""
+        if self.watch.state_at is None:
+            if not self._never_heard_logged:
+                self.logger.warning(
+                    f'[chassis] no rt/lf/sportmodestate yet with {self._net_iface} up '
+                    f'-- waiting for the dog, no restart loop')
+                self._never_heard_logged = True
+            return
         try:
             with open(f'/sys/class/net/{self._net_iface}/carrier') as f:
                 linked = f.read().strip() == '1'
