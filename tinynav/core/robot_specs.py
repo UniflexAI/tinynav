@@ -182,7 +182,31 @@ def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
         return config
 
 
-ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()
+#: Every type this module carries. The names are the `*_CONFIG` globals below;
+#: pilot's /device/robot-type route validates against this list (imported from
+#: here), so one place owns the set.
+KNOWN_TYPES = ('go2', 'go2w', 'as2', 'b2', 'b2w', 'g1')
+
+#: Which robot this process is. Resolution is **file over env**: the operator's
+#: choice (/looper/config/pilot_settings.json, written by pilot's settings page)
+#: is what a restart applies; ROBOT_TYPE env is the rig's factory default, set in
+#: .env. Same rule as every other key in that file (odom_source, reloc_source) --
+#: planning_node reads it the same way. A tiny local read on purpose: tinynav
+#: cannot import pilot's libs (pilot imports tinynav, never the reverse).
+SETTINGS_PATH = os.environ.get('PILOT_SETTINGS_PATH', '/looper/config/pilot_settings.json')
+
+
+def _chosen_robot_type() -> str:
+    env = os.environ.get("ROBOT_TYPE", "go2").strip().lower()
+    try:
+        with open(SETTINGS_PATH) as f:
+            chosen = json.load(f).get("robot_type")
+    except (OSError, ValueError):
+        return env
+    return chosen.strip().lower() if isinstance(chosen, str) and chosen.strip() else env
+
+
+ROBOT_TYPE = _chosen_robot_type()
 try:
     _TYPE_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
 except KeyError:
