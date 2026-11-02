@@ -360,24 +360,42 @@ class MapNode(Node):
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
         self.vlad_timestamps = list(self.map_poses.keys())
+        # A pure-lidar build (capabilities.json) has no embeddings by
+        # construction: the index is absent, not corrupt. Empty structures keep
+        # the loader honest -- candidate queries match nothing, which is the
+        # truth for a map that localizes by lidar alone.
+        lidar_only = False
         try:
-            self.vlad_centres = self.db.metadata["vlad_centres"]
-            self.map_vlad_descriptors = np.stack([
-                self.db.vlad_descriptors[timestamp]
-                for timestamp in self.vlad_timestamps
-            ])
-        except KeyError as exc:
-            raise RuntimeError(
-                "This map does not contain a complete DINOv2 patch VLAD "
-                "relocalization index. Rebuild the map with this branch before "
-                f"running map_node. map_path={tinynav_map_path}, missing_key={exc}"
-            ) from exc
-        self.get_logger().info(
-            "Using DINOv2 patch VLAD relocalization index: "
-            f"vocab={self.vlad_centres.shape}, "
-            f"descriptors={self.map_vlad_descriptors.shape}, "
-            f"keyframes={len(self.vlad_timestamps)}"
-        )
+            import json as _json
+            with open(f"{tinynav_map_path}/capabilities.json") as _f:
+                lidar_only = _json.load(_f).get("build") == "lidar"
+        except (OSError, ValueError):
+            pass
+        if lidar_only:
+            self.vlad_centres = np.zeros((0, 1), dtype=np.float32)
+            self.map_vlad_descriptors = np.zeros((0, 1), dtype=np.float32)
+            self.get_logger().info(
+                "pure-lidar map: no visual relocalization index "
+                f"(keyframes={len(self.vlad_timestamps)})")
+        else:
+            try:
+                self.vlad_centres = self.db.metadata["vlad_centres"]
+                self.map_vlad_descriptors = np.stack([
+                    self.db.vlad_descriptors[timestamp]
+                    for timestamp in self.vlad_timestamps
+                ])
+            except KeyError as exc:
+                raise RuntimeError(
+                    "This map does not contain a complete DINOv2 patch VLAD "
+                    "relocalization index. Rebuild the map with this branch before "
+                    f"running map_node. map_path={tinynav_map_path}, missing_key={exc}"
+                ) from exc
+            self.get_logger().info(
+                "Using DINOv2 patch VLAD relocalization index: "
+                f"vocab={self.vlad_centres.shape}, "
+                f"descriptors={self.map_vlad_descriptors.shape}, "
+                f"keyframes={len(self.vlad_timestamps)}"
+            )
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
         self.sdf_map = np.load(f"{tinynav_map_path}/sdf_map.npy")

@@ -10,6 +10,7 @@ and a reverse gate. With no route available it falls back to distance-to-goal.
 
 import heapq
 import json
+import os
 import rclpy
 from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
@@ -25,6 +26,7 @@ import message_filters
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointCloud
+from sensor_msgs_py import point_cloud2
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool, Header, Float32, String
@@ -106,6 +108,77 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
                     occupancy_grid[end_voxel_x, end_voxel_y, end_voxel_z] += 0.2
 
     # Explicit clipping loop
+    for i in range(grid_shape_x):
+        for j in range(grid_shape_y):
+            for k in range(grid_shape_z):
+                if occupancy_grid[i, j, k] < -0.1:
+                    occupancy_grid[i, j, k] = -0.1
+                elif occupancy_grid[i, j, k] > 0.1:
+                    occupancy_grid[i, j, k] = 0.1
+
+    return occupancy_grid
+
+
+@njit(cache=True)
+def run_raycasting_points_loopy(points, T_points_to_world, grid_shape, origin, resolution):
+    """Rays from the sensor to lidar returns: free along the ray, occupied at the end.
+
+    The point-cloud twin of `run_raycasting_loopy` -- same vote magnitudes
+    (-0.05 per traversed voxel, +0.2 at the return, clipped to +/-0.1), so both
+    sources feed `update_occupancy_grid` the same way and the decay, the ESDF and
+    everything downstream stay identical.
+
+    `points` are `(N, 3)` in the sensor frame the calibration describes;
+    `T_points_to_world` takes that frame into the world the pose lives in.
+    Mid-360 returns are sparse by nature (no pixels to interpolate over), which is
+    why the planner integrates several scans before the ESDF is rebuilt -- a
+    single scan draws thin lines, not walls.
+    """
+    occupancy_grid = np.zeros(grid_shape)
+    grid_shape_x, grid_shape_y, grid_shape_z = grid_shape
+    origin_x, origin_y, origin_z = origin
+
+    start_voxel_x = int(np.floor((T_points_to_world[0, 3] - origin_x) / resolution))
+    start_voxel_y = int(np.floor((T_points_to_world[1, 3] - origin_y) / resolution))
+    start_voxel_z = int(np.floor((T_points_to_world[2, 3] - origin_z) / resolution))
+
+    n_points = points.shape[0]
+    for i in range(n_points):
+        px = points[i, 0]
+        py = points[i, 1]
+        pz = points[i, 2]
+
+        pw_x = T_points_to_world[0, 0] * px + T_points_to_world[0, 1] * py + T_points_to_world[0, 2] * pz + T_points_to_world[0, 3]
+        pw_y = T_points_to_world[1, 0] * px + T_points_to_world[1, 1] * py + T_points_to_world[1, 2] * pz + T_points_to_world[1, 3]
+        pw_z = T_points_to_world[2, 0] * px + T_points_to_world[2, 1] * py + T_points_to_world[2, 2] * pz + T_points_to_world[2, 3]
+
+        end_voxel_x = int(np.floor((pw_x - origin_x) / resolution))
+        end_voxel_y = int(np.floor((pw_y - origin_y) / resolution))
+        end_voxel_z = int(np.floor((pw_z - origin_z) / resolution))
+
+        diff_x = end_voxel_x - start_voxel_x
+        diff_y = end_voxel_y - start_voxel_y
+        diff_z = end_voxel_z - start_voxel_z
+
+        steps = max(abs(diff_x), abs(diff_y), abs(diff_z))
+        if steps == 0:
+            continue
+
+        for k in range(steps + 1):
+            t = k / steps
+            interp_x = int(round(start_voxel_x + t * diff_x))
+            interp_y = int(round(start_voxel_y + t * diff_y))
+            interp_z = int(round(start_voxel_z + t * diff_z))
+            if (0 <= interp_x < grid_shape_x and
+                    0 <= interp_y < grid_shape_y and
+                    0 <= interp_z < grid_shape_z):
+                occupancy_grid[interp_x, interp_y, interp_z] -= 0.05
+
+        if (0 <= end_voxel_x < grid_shape_x and
+                0 <= end_voxel_y < grid_shape_y and
+                0 <= end_voxel_z < grid_shape_z):
+            occupancy_grid[end_voxel_x, end_voxel_y, end_voxel_z] += 0.2
+
     for i in range(grid_shape_x):
         for j in range(grid_shape_y):
             for k in range(grid_shape_z):
@@ -980,6 +1053,37 @@ class PlanningNode(Node):
         #: corridor opens past REVERSE_EXIT_M. It was lost in merge `3a69dbc`, whose
         #: subject says it brings in #247's reverse gate.
         self.reverse_engaged = False
+        # ---- occupancy source: the camera's depth, or the lidar's returns -----
+        # Dark rooms are where the camera's depth gives out (few textured pixels
+        # to match, so it drops frames or returns noise) while the lidar keeps
+        # returning range. The lidar path builds the same voxel votes as the
+        # depth one, so everything past `_apply_votes` is unchanged.
+        #
+        # **One source, chosen at start-up** (restart-to-apply): pilot saves the
+        # operator's choice to PILOT_SETTINGS_PATH and the pipeline for the OTHER
+        # source is never built -- only the selected stream is subscribed and
+        # deserialized. A switch applies on the next planner start; there is no
+        # runtime topic for it.
+        self.occupancy_source = self._read_setting(
+            'occupancy_source', ('depth', 'lidar'),
+            os.environ.get('TINYNAV_OCCUPANCY_SOURCE', 'depth'))
+        self._lidar_topic = os.environ.get('TINYNAV_LIDAR_TOPIC', '/livox/lidar')
+        self._lidar_calib = os.environ.get('TINYNAV_LIDAR_CALIB', '/looper/calib/extrinsics.yaml')
+        self.lidar_step = max(1, int(os.environ.get('TINYNAV_LIDAR_STEP', '4')))
+        self.lidar_min_range = float(os.environ.get('TINYNAV_LIDAR_MIN_RANGE', '0.3'))
+        self.T_lidar_to_cam = self._load_lidar_calib()
+        # The operator's global linear-speed ceiling: clamped onto the schedule
+        # (with the map's own capture-speed prior, whichever is lower). None =
+        # uncapped.
+        saved_speed = self._read_setting('max_speed', None, None)
+        self._user_max_speed = float(saved_speed) if saved_speed else None
+        self.get_logger().info(
+            f'occupancy source {self.occupancy_source} '
+            f'(max speed {self._user_max_speed if self._user_max_speed else "uncapped"})')
+        if self.occupancy_source == 'lidar' and self.T_lidar_to_cam is None:
+            self.get_logger().error(
+                'lidar occupancy requested but no calibration -- planner starts '
+                'with no occupancy input; fix the calib and restart')
         # Two, not one: the Looper sends depth in pairs ~10ms apart, and a queue of one
         # drops the first of each pair while a frame (~70ms) is being planned.
         latest_depth_only = QoSProfile(
@@ -988,13 +1092,15 @@ class PlanningNode(Node):
         poses_covering_one_depth_frame = QoSProfile(
             history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE
         )
-        self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth',
-                                                    qos_profile=latest_depth_only)
-        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual',
-                                                   qos_profile=poses_covering_one_depth_frame)
-
-        self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
-        self.ts.registerCallback(self.sync_callback)
+        if self.occupancy_source == 'depth':
+            self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth',
+                                                        qos_profile=latest_depth_only)
+            self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual',
+                                                       qos_profile=poses_covering_one_depth_frame)
+            self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
+            self.ts.registerCallback(self.sync_callback)
+        else:
+            self._build_lidar_pipeline()
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
         self.resolution = 0.05
@@ -1226,8 +1332,11 @@ class PlanningNode(Node):
         v_open is the open-space target (capture-speed prior or vx_max fallback)."""
         c_eff = max(0.0, clearance_m - v_prev * self._t_react_s)
         # np.interp saturates to the endpoints outside [clear_c0_m, clear_open_m].
-        return float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
-                               [self._vx_min, v_open]))
+        v = float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
+                            [self._vx_min, v_open]))
+        if self._user_max_speed is not None:
+            v = min(v, max(self._user_max_speed, self._vx_min))
+        return v
 
     def _on_global_route(self, msg: Path):
         self._global_route_map_xy = (
@@ -1365,7 +1474,8 @@ class PlanningNode(Node):
         self.obstacle_mask_pub.publish(msg)
 
 
-    def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
+    def _roll_grid_to(self, T):
+        """Keep the grid centred on the robot: roll it when it has drifted."""
         center = self.origin + np.array(self.grid_shape) * self.resolution / 2
         robot_pos = T[:3, 3]
         target_center = robot_pos - np.array([0.0, 0.0, self.z_grid_drop])
@@ -1374,7 +1484,17 @@ class PlanningNode(Node):
             new_center = target_center
             new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
             self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
+
+    def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
+        self._roll_grid_to(T)
         new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
+        self._apply_votes(new_occ, T)
+
+    def _apply_votes(self, new_occ, T):
+        """Integrate one frame's votes: decay, under-body clearing, clip.
+
+        Shared by both sources -- the depth raycast and the lidar one return the
+        same +/- values, so everything past this point is source-agnostic."""
         self.occupancy_grid *= 0.99
         # The camera cannot see under the body, so no ray ever clears those cells;
         # decay them faster, but not to zero at once, so a real obstacle there still reads.
@@ -1468,19 +1588,114 @@ class PlanningNode(Node):
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
+        init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
+        self._plan_and_publish(T, init_q, depth_msg.header)
+
+    def _load_lidar_calib(self):
+        """`T_lidar_to_cam` from the rig's calibration file, or None.
+
+        The file is FAST-Calib's `Rcl`/`Pcl`, whose semantics are
+        `p_cam = Rcl @ p_lidar + Pcl` -- exactly the transform this path needs,
+        so it is used as it stands rather than inverted."""
+        try:
+            import yaml
+            with open(self._lidar_calib) as f:
+                cal = yaml.safe_load(f)
+            T = np.eye(4)
+            T[:3, :3] = np.asarray(cal['Rcl'], dtype=float)
+            T[:3, 3] = np.asarray(cal['Pcl'], dtype=float)
+            return T
+        except Exception as e:  # noqa: BLE001 - a missing calib is a disabled source
+            self.get_logger().warning(
+                f'lidar occupancy: calibration unreadable ({self._lidar_calib}: {e}); '
+                'the lidar source stays off')
+            return None
+
+    def _read_setting(self, key, valid, default):
+        """One setting from pilot's rig file (PILOT_SETTINGS_PATH), where the
+        operator's choices live; `default` (usually the env) rules when the file
+        has nothing valid. Read once at start-up -- restart-to-apply."""
+        import json as _json
+        path = os.environ.get('PILOT_SETTINGS_PATH',
+                              '/looper/config/pilot_settings.json')
+        value = default
+        try:
+            with open(path) as f:
+                doc = _json.load(f)
+            saved = doc.get(key)
+            if valid is None:
+                value = float(saved) if isinstance(saved, (int, float)) else default
+            elif saved in valid:
+                value = saved
+        except (OSError, ValueError):
+            pass
+        return value
+
+    def _build_lidar_pipeline(self):
+        """The lidar source's synchronizer. Built only when the lidar is the
+        selected source: the PointCloud2 stream is the expensive one to
+        deserialize, and in depth mode nobody consumes it."""
+        from sensor_msgs.msg import PointCloud2
+        self._lidar_sub = message_filters.Subscriber(self, PointCloud2, self._lidar_topic)
+        self._lidar_pose_sub = message_filters.Subscriber(
+            self, Odometry, '/slam/odometry_visual')
+        self._lidar_sync = message_filters.ApproximateTimeSynchronizer(
+            [self._lidar_sub, self._lidar_pose_sub], queue_size=10, slop=0.2)
+        self._lidar_sync.registerCallback(self.lidar_sync_callback)
+
+    def lidar_sync_callback(self, cloud_msg, odom_msg):
+        """The lidar twin of `sync_callback`: same votes, same planning tail."""
+        if self.occupancy_source != 'lidar' or self.T_lidar_to_cam is None:
+            return
+        if self.K is None:
+            return
+        with Timer(name='lidar preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            # read_points hands back a structured array (older builds: tuples of
+            # x,y,z); stride it before copying, a MID-360 cloud is ~20k points.
+            raw = point_cloud2.read_points(
+                cloud_msg, field_names=('x', 'y', 'z'), skip_nans=True)
+            if getattr(raw, 'dtype', None) is not None and raw.dtype.names:
+                raw = raw[::self.lidar_step]
+                points = np.empty((raw.shape[0], 3), dtype=np.float64)
+                points[:, 0], points[:, 1], points[:, 2] = raw['x'], raw['y'], raw['z']
+            else:
+                points = np.array(
+                    [tuple(p)[:3] for i, p in enumerate(raw)
+                     if i % self.lidar_step == 0], dtype=np.float64).reshape(-1, 3)
+            ranges = np.linalg.norm(points, axis=1)
+            points = points[(ranges >= self.lidar_min_range) & np.isfinite(ranges)]
+            if points.shape[0] == 0:
+                return
+            T, _ = msg2np(odom_msg)
+            T_points_to_world = T @ self.T_lidar_to_cam
+
+        with Timer(name='lidar raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            self._roll_grid_to(T)
+            new_occ = run_raycasting_points_loopy(
+                points, T_points_to_world, self.grid_shape, self.origin, self.resolution)
+            self._apply_votes(new_occ, T)
+
+        init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y,
+                           odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
+        self._plan_and_publish(T, init_q, cloud_msg.header)
+
+    def _plan_and_publish(self, T, init_q, header):
+        """Everything past the occupancy update: obstacles, ESDF, the trajectory
+        and the publishes. Both sources end here, so a frame planned from the
+        lidar and one planned from the camera are scored identically.
+        """
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             min_span_map, obstacle_mask, ESDF_map = self.build_obstacle_and_esdf(T)
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
+            self.publish_obstacle_mask(obstacle_mask, header.stamp)
             if self.occupancy_3d_pub.get_subscription_count() > 0:
                 # float32 halves the ~1 MB a frame; its readers only threshold it at 0.1.
                 self.occupancy_3d_pub.publish(self.bridge.cv2_to_imgmsg(
-                    self.occupancy_grid.astype(np.float32), header=depth_msg.header))
+                    self.occupancy_grid.astype(np.float32), header=header))
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
-            init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             # Forward clearance drives both the peak-speed schedule and the reverse gate.
             front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
             v_open = self._open_target_speed()
@@ -1654,7 +1869,9 @@ class PlanningNode(Node):
                 'follow': follow,
             })))
 
-            self.publish_selected_path(trajectories, [sel], depth_msg.header)
+            self.publish_selected_path(trajectories, [sel], header)
+
+
 
 
 def main(args=None):
