@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
+import '../widgets/bag_check_dialog.dart';
 import 'map_preview_page.dart';
 
 class MapTab extends ConsumerWidget {
@@ -263,6 +264,8 @@ class _BagFileListCard extends ConsumerWidget {
                       ref.read(selectedBagProvider.notifier).state =
                           isSelected ? null : f.name;
                     },
+                    onCheck: () => showBagCheckDialog(
+                        context, ref.read(dioProvider), f.name),
                     onDelete: () => _deleteFile(
                       context,
                       ref,
@@ -292,11 +295,13 @@ class _BagFileRow extends StatelessWidget {
   final bool isSelected;
   final VoidCallback onTap;
   final VoidCallback onDelete;
+  final VoidCallback onCheck;
   const _BagFileRow({
     required this.file,
     required this.isSelected,
     required this.onTap,
     required this.onDelete,
+    required this.onCheck,
   });
 
   @override
@@ -344,6 +349,14 @@ class _BagFileRow extends StatelessWidget {
               color: isSelected ? const Color(0xFF4A90D9) : Colors.grey.shade400,
             ),
             const SizedBox(width: 4),
+            IconButton(
+              onPressed: onCheck,
+              icon: const Icon(Icons.fact_check_outlined, size: 17),
+              color: const Color(0xFF4A90D9),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              tooltip: 'Check bag',
+            ),
             IconButton(
               onPressed: onDelete,
               icon: const Icon(Icons.delete_outline, size: 17),
