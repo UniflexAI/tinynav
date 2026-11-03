@@ -154,6 +154,7 @@ The repository is organized as follows:
   - `map_node.py` – Builds and maintains the environment map.
   - `planning_node.py` – Computes paths and trajectories using map and perception data.
   - `control_node.py` – Sends control commands to actuate the robot.
+  - [`cmd_vel_control.py`](docs/path_tracking.md) - PID path tracking with odometry feedback and ROS controller tests.
   - Supporting modules:
     - `driver_node.py`, `math_utils.py`, `models_trt.py`, `stereo_engine.py`.
 
