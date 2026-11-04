@@ -1,0 +1,347 @@
+"""Batched GPU navigation sim that reproduces the real perception -> BEV pipeline.
+
+World: flat ground (z=0) + axis-aligned boxes. Each step renders the depth pixels the planner
+samples (every RAY_STEP-th pixel) analytically, fuses them with a torch port of
+run_raycasting_loopy + update_occupancy_grid, and builds the BEV like bev.make_bev. So the
+policy sees the same ring-shaped ground hits, free-space carving and decay as on the robot.
+
+The rolling grid is stored toroidally (global voxel index mod GRID_SHAPE) so recentering is a
+strip clear instead of a per-env roll.
+"""
+import math
+from dataclasses import dataclass
+
+import torch
+
+from tinynav.core.robot_specs import ROBOT_CONFIG
+from tinynav.rl.bev import (BEV_SIZE, ELEV_RANGE, GRID_RES, GRID_SHAPE, GROUND_MAX, GROUND_PRIOR, GROUND_RING, KNOWN_EPS,
+                            OCC_THRESHOLD, RAY_STEP, robot_frame_cells)
+
+GX, GY, GZ = GRID_SHAPE
+MAX_RAY_SAMPLES = 56  # past this many voxel steps a ray from the grid center is outside the grid
+FAR_DEPTH = 65.5  # what the stereo depth reports for sky / out-of-range pixels
+
+
+@dataclass
+class SimConfig:
+    num_envs: int = 256
+    dt: float = 0.15  # planner runs at the depth rate, ~7Hz on the debug bags
+    max_steps: int = 300
+    env_chunk: int = 32  # envs per raycast chunk, bounds GPU memory
+    # world
+    arena: float = 16.0
+    n_boxes: int = 24
+    box_size: tuple = (0.3, 2.0)
+    box_height: tuple = (0.2, 1.5)
+    wall_prob: float = 0.3
+    # camera (RealSense infra1 on the debug bags)
+    img_w: int = 544
+    img_h: int = 640
+    fx: float = 306.82
+    fy: float = 306.82
+    cx: float = 272.28
+    cy: float = 312.66
+    cam_height: tuple = (0.38, 0.48)
+    cam_pitch_deg: tuple = (0.0, 5.0)
+    pitch_jitter_deg: float = 0.7  # per-frame body sway of a walking robot
+    height_jitter: float = 0.01
+    depth_drop: float = 0.2  # fraction of invalid stereo pixels
+    disparity_noise_px: float = 0.1
+    baseline: float = 0.05
+    # robot
+    v_min: float = -0.3
+    v_max: float = ROBOT_CONFIG.max_linear_vel
+    w_max: float = ROBOT_CONFIG.max_angular_vel
+    lin_acc: float = 1.0
+    ang_acc: float = 2.0
+    latency_steps: int = 1
+    act_noise: float = 0.1
+    # task
+    goal_dist: tuple = (2.0, 8.0)
+    goal_tol: float = 0.3
+    clearance: float = 0.3
+
+
+def _ray_voxels(start, end, valid, o3):
+    """Storage indices + masks of every voxel run_raycasting_loopy touches. Compiled: pure elementwise."""
+    shape = torch.tensor(GRID_SHAPE, device=start.device)
+    diff = end - start[:, None]
+    steps = diff.abs().amax(-1)
+    valid = valid & (steps > 0)
+    i = torch.arange(MAX_RAY_SAMPLES + 1, device=start.device, dtype=torch.float32)
+    t = i / steps.clamp(min=1)[..., None].float()
+    interp = torch.round(start[:, None, None].float() + t[..., None] * diff[:, :, None].float()).int()
+    inb = ((interp >= 0) & (interp < shape)).all(-1) & (i <= steps[..., None]) & valid[..., None]
+    e_inb = ((end >= 0) & (end < shape)).all(-1) & valid
+
+    def flat(v, off):
+        g = v + off
+        return ((g[..., 0] % GX) * GY + (g[..., 1] % GY)) * GZ + g[..., 2]
+    fi = torch.where(inb, flat(interp, o3[:, None, None]), 0)
+    fe = torch.where(e_inb, flat(end, o3[:, None]), 0)
+    return fi.flatten(1).long(), inb.flatten(1), fe.long(), e_inb
+
+
+_ray_voxels_compiled = torch.compile(_ray_voxels, dynamic=True)
+
+
+def _rot(yaw, pitch):
+    """Camera-to-world rotation, columns = (right, down, forward) for heading yaw, pitched down."""
+    cy, sy, cp, sp = torch.cos(yaw), torch.sin(yaw), torch.cos(pitch), torch.sin(pitch)
+    f = torch.stack([cp * cy, cp * sy, -sp], -1)
+    r = torch.stack([sy, -cy, torch.zeros_like(yaw)], -1)
+    d = torch.cross(f, r, dim=-1)
+    return torch.stack([r, d, f], -1)
+
+
+class NavSim:
+    def __init__(self, cfg: SimConfig = SimConfig(), device="cuda", seed=0):
+        self.cfg, self.device, n = cfg, torch.device(device), cfg.num_envs
+        self.gen = torch.Generator(device=self.device).manual_seed(seed)
+        dev = self.device
+        v, u = torch.meshgrid(torch.arange(0, cfg.img_h, RAY_STEP), torch.arange(0, cfg.img_w, RAY_STEP), indexing="ij")
+        self.pix_dir = torch.stack([(u - cfg.cx) / cfg.fx, (v - cfg.cy) / cfg.fy, torch.ones_like(u, dtype=torch.float)], -1).reshape(-1, 3).float().to(dev)
+        fwd, left = robot_frame_cells()
+        self.bev_fwd, self.bev_left = torch.tensor(fwd, device=dev).float(), torch.tensor(left, device=dev).float()
+        d = self.bev_left.hypot(self.bev_fwd)
+        self.ground_ring = (d >= GROUND_RING[0]) & (d <= GROUND_RING[1])
+        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+        self.fp = (fl, rl, hw)
+        self.cam_off = float(ROBOT_CONFIG.cam_offset_3d[2])  # forward offset control -> camera
+
+        self.grid = torch.zeros((n, GX, GY, GZ), device=dev)
+        self.base = torch.zeros((n, 3), device=dev)  # world position of global voxel (0,0,0)
+        self.o = torch.zeros((n, 2), dtype=torch.long, device=dev)  # grid window origin, global voxels
+        self.boxes = torch.zeros((n, cfg.n_boxes + 4, 5), device=dev)  # cx, cy, hx, hy, height
+        self.pos = torch.zeros((n, 2), device=dev)
+        self.yaw = torch.zeros(n, device=dev)
+        self.vel = torch.zeros((n, 2), device=dev)
+        self.cmd_queue = torch.zeros((n, cfg.latency_steps + 1, 2), device=dev)
+        self.last_action = torch.zeros((n, 2), device=dev)
+        self.goal = torch.zeros((n, 2), device=dev)
+        self.cam_h = torch.zeros(n, device=dev)
+        self.pitch = torch.zeros(n, device=dev)
+        self.steps = torch.zeros(n, dtype=torch.long, device=dev)
+        self.prev_dist = torch.zeros(n, device=dev)
+
+    # ---------- randomness ----------
+    def _rand(self, *shape, lo=0.0, hi=1.0):
+        return lo + (hi - lo) * torch.rand(shape, generator=self.gen, device=self.device)
+
+    # ---------- world ----------
+    def _make_boxes(self, idx):
+        c, k = self.cfg, len(idx)
+        b = torch.zeros((k, c.n_boxes + 4, 5), device=self.device)
+        half = c.arena / 2
+        b[:, :c.n_boxes, 0:2] = self._rand(k, c.n_boxes, 2, lo=-half, hi=half)
+        b[:, :c.n_boxes, 2:4] = self._rand(k, c.n_boxes, 2, lo=c.box_size[0], hi=c.box_size[1]) / 2
+        wall = self._rand(k, c.n_boxes) < c.wall_prob  # long thin boxes
+        along = self._rand(k, c.n_boxes) < 0.5
+        b[:, :c.n_boxes, 2] = torch.where(wall & along, self._rand(k, c.n_boxes, lo=1.0, hi=2.5), torch.where(wall, 0.08, b[:, :c.n_boxes, 2]))
+        b[:, :c.n_boxes, 3] = torch.where(wall & ~along, self._rand(k, c.n_boxes, lo=1.0, hi=2.5), torch.where(wall, 0.08, b[:, :c.n_boxes, 3]))
+        b[:, :c.n_boxes, 4] = self._rand(k, c.n_boxes, lo=c.box_height[0], hi=c.box_height[1])
+        b[:, :c.n_boxes, 4] *= self._rand(k, c.n_boxes) < self._rand(k, 1, lo=0.3, hi=1.0)  # per-env density; height 0 = absent
+        border = torch.tensor([[half + 0.1, 0, 0.1, half + 0.2], [-half - 0.1, 0, 0.1, half + 0.2],
+                               [0, half + 0.1, half + 0.2, 0.1], [0, -half - 0.1, half + 0.2, 0.1]], device=self.device)
+        b[:, c.n_boxes:, :4] = border
+        b[:, c.n_boxes:, 4] = 1.0
+        self.boxes[idx] = b
+
+    def _footprint_hits(self, boxes, pos, yaw, margin=0.0):
+        """SAT test of the robot footprint (inflated by margin) against every box. Returns [k, B]."""
+        fl, rl, hw = self.fp
+        hl, hw = (fl + rl) / 2 + margin, hw + margin
+        cy, sy = torch.cos(yaw)[:, None], torch.sin(yaw)[:, None]
+        c = pos[:, None] + ((fl - rl) / 2) * torch.stack([cy, sy], -1)
+        d = c - boxes[..., :2]
+        bx, by, present = boxes[..., 2], boxes[..., 3], boxes[..., 4] > 0
+        ax_x = (d[..., 0].abs() <= bx + hl * cy.abs() + hw * sy.abs())
+        ax_y = (d[..., 1].abs() <= by + hl * sy.abs() + hw * cy.abs())
+        ax_f = ((d[..., 0] * cy + d[..., 1] * sy).abs() <= hl + bx * cy.abs() + by * sy.abs())
+        ax_l = ((-d[..., 0] * sy + d[..., 1] * cy).abs() <= hw + bx * sy.abs() + by * cy.abs())
+        return ax_x & ax_y & ax_f & ax_l & present
+
+    def _point_clear(self, boxes, p, margin):
+        d = (p[:, None] - boxes[..., :2]).abs()
+        inside = (d[..., 0] <= boxes[..., 2] + margin) & (d[..., 1] <= boxes[..., 3] + margin) & (boxes[..., 4] > 0)
+        return ~inside.any(1)
+
+    def reset(self, idx=None):
+        c = self.cfg
+        idx = torch.arange(c.num_envs, device=self.device) if idx is None else idx
+        if len(idx) == 0:
+            return
+        self._make_boxes(idx)
+        todo = idx
+        for attempt in range(50):
+            k, half = len(todo), c.arena / 2 - 1.0
+            pos = self._rand(k, 2, lo=-half, hi=half)
+            yaw = self._rand(k, lo=-math.pi, hi=math.pi)
+            r = self._rand(k, lo=c.goal_dist[0], hi=c.goal_dist[1])
+            a = self._rand(k, lo=-math.pi, hi=math.pi)
+            goal = pos + r[:, None] * torch.stack([torch.cos(a), torch.sin(a)], -1)
+            ok = ~self._footprint_hits(self.boxes[todo], pos, yaw, c.clearance).any(1)
+            ok &= self._point_clear(self.boxes[todo], goal, c.clearance + 0.2) & (goal.abs() < half).all(1)
+            self.pos[todo[ok]], self.yaw[todo[ok]], self.goal[todo[ok]] = pos[ok], yaw[ok], goal[ok]
+            todo = todo[~ok]
+            if len(todo) == 0:
+                break
+            if attempt % 10 == 9:
+                self._make_boxes(todo)  # too crowded, regenerate
+        assert len(todo) == 0, "could not place start/goal"
+        k = len(idx)
+        self.cam_h[idx] = self._rand(k, lo=c.cam_height[0], hi=c.cam_height[1])
+        self.pitch[idx] = torch.deg2rad(self._rand(k, lo=c.cam_pitch_deg[0], hi=c.cam_pitch_deg[1]))
+        self.vel[idx] = 0
+        self.cmd_queue[idx] = 0
+        self.last_action[idx] = 0
+        self.steps[idx] = 0
+        self.grid[idx] = 0
+        cam = self.camera_pose(idx)[1]
+        # real grid starts centered on the first camera pose: origin = cam - shape*res/2
+        self.base[idx] = cam - torch.tensor(GRID_SHAPE, device=self.device) * GRID_RES / 2
+        self.o[idx] = 0
+        self.prev_dist[idx] = (self.goal[idx] - self.pos[idx]).norm(dim=1)
+        self._sense(idx)
+
+    # ---------- perception ----------
+    def camera_pose(self, idx, jitter=False):
+        pitch, h = self.pitch[idx], self.cam_h[idx]
+        if jitter:
+            pitch = pitch + math.radians(self.cfg.pitch_jitter_deg) * torch.randn(pitch.shape, generator=self.gen, device=self.device)
+            h = h + self.cfg.height_jitter * torch.randn(h.shape, generator=self.gen, device=self.device)
+        R = _rot(self.yaw[idx], pitch)
+        return R, torch.cat([self.pos[idx], h[:, None]], 1) + R[..., 2] * self.cam_off
+
+    def _render(self, idx, R, cam):
+        """Z-depth of the sampled pixels against ground + boxes. Returns [k, P] (nan = invalid)."""
+        c, b = self.cfg, self.boxes[idx]
+        dirs = torch.einsum("kij,pj->kpi", R, self.pix_dir)  # world ray per unit z-depth
+        dz = dirs[..., 2]
+        depth = torch.where(dz < -1e-6, -cam[:, None, 2] / dz, torch.full_like(dz, math.inf))
+        o, d = cam[:, None, None], dirs[:, :, None]  # [k,1,1,3], [k,P,1,3]
+        lo = torch.stack([b[..., 0] - b[..., 2], b[..., 1] - b[..., 3], torch.zeros_like(b[..., 0])], -1)[:, None]
+        hi = torch.stack([b[..., 0] + b[..., 2], b[..., 1] + b[..., 3], b[..., 4]], -1)[:, None]
+        inv = 1.0 / torch.where(d.abs() < 1e-9, torch.full_like(d, 1e-9), d)
+        t1, t2 = (lo - o) * inv, (hi - o) * inv
+        tn = torch.minimum(t1, t2).amax(-1)
+        tf = torch.maximum(t1, t2).amin(-1)
+        hit = (tn <= tf) & (tn > 0) & (b[:, None, :, 4] > 0)
+        depth = torch.minimum(depth, torch.where(hit, tn, torch.full_like(tn, math.inf)).amin(-1))
+        sigma = depth ** 2 * c.disparity_noise_px / (c.fx * c.baseline)
+        depth = torch.where(depth < 20.0, depth + sigma.nan_to_num(0) * torch.randn(depth.shape, generator=self.gen, device=self.device), torch.full_like(depth, FAR_DEPTH))
+        drop = torch.rand(depth.shape, generator=self.gen, device=self.device) < c.depth_drop
+        return torch.where(drop | (depth <= 0), torch.full_like(depth, math.nan), depth)
+
+    def _recenter(self, idx, cam):
+        """Port of the node's recenter rule + roll_occupancy_grid on the toroidal grid."""
+        center = self.base[idx, :2] + (self.o[idx] + torch.tensor([GX, GY], device=self.device) / 2) * GRID_RES
+        move = (cam[:, :2] - center).norm(dim=1) > 0.1  # z never shifts: flat ground, fixed camera height
+        if not move.any():
+            return
+        idx, cam = idx[move], cam[move]
+        new_o = torch.round((cam[:, :2] - torch.tensor([GX, GY], device=self.device) * GRID_RES / 2 - self.base[idx, :2]) / GRID_RES).long()
+        old_o = self.o[idx]
+        ar = torch.arange(GX, device=self.device)
+        g = new_o[:, :, None] + ar  # global indices of the new window, per axis
+        enter = (g < old_o[:, :, None]) | (g >= old_o[:, :, None] + GX)
+        mask = torch.zeros_like(enter).scatter_(2, g % GX, enter)  # storage slots that must be cleared
+        keep = ~(mask[:, 0, :, None, None] | mask[:, 1, None, :, None])
+        self.grid[idx] *= keep
+        self.o[idx] = new_o
+
+    def _fuse(self, idx, R, cam, depth):
+        """Port of run_raycasting_loopy + decay/clip, written in local window coordinates."""
+        k, dev = len(idx), self.device
+        origin = self.base[idx] + torch.cat([self.o[idx], torch.zeros((k, 1), dtype=torch.long, device=dev)], 1) * GRID_RES
+        pts = cam[:, None] + torch.einsum("kij,kpj->kpi", R, self.pix_dir[None] * depth[..., None])
+        start = torch.floor((cam - origin) / GRID_RES).int()  # [k,3]
+        end = torch.floor((pts - origin[:, None]) / GRID_RES).nan_to_num(0).clamp(-10**6, 10**6).int()
+        o3 = torch.cat([self.o[idx], torch.zeros((k, 1), dtype=torch.long, device=dev)], 1).int()
+        voxels = _ray_voxels_compiled if dev.type == "cuda" else _ray_voxels
+        fi, inb, fe, e_inb = voxels(start, end, torch.isfinite(depth), o3)
+        new = torch.zeros((k, GX * GY * GZ), device=dev)
+        new.scatter_add_(1, fi, inb.float() * -0.05)
+        new.scatter_add_(1, fe, e_inb.float() * 0.2)
+        new = new.clamp(-0.1, 0.1).view(k, GX, GY, GZ)
+        self.grid[idx] = (self.grid[idx] * 0.99 + new).clamp(-0.2, 0.2)
+
+    def _sense(self, idx):
+        for ch in torch.split(idx, self.cfg.env_chunk):
+            R, cam = self.camera_pose(ch, jitter=True)
+            self._recenter(ch, cam)
+            self._fuse(ch, R, cam, self._render(ch, R, cam))
+
+    def bev(self, idx=None):
+        """Port of bev.make_bev on the toroidal grid. Returns [k, 2, BEV_SIZE, BEV_SIZE]."""
+        idx = torch.arange(self.cfg.num_envs, device=self.device) if idx is None else idx
+        cam = self.camera_pose(idx)[1]
+        k = len(idx)
+        ref_z = cam[:, 2]
+        z_top = self.base[idx, 2, None] + (torch.arange(GZ, device=self.device) + 1) * GRID_RES - ref_z[:, None]  # [k,Z]
+        floor = self.base[idx, 2] - ref_z
+        center = self.pos[idx]  # export_bev: cam - R @ cam_offset_3d == control center
+        c, s = torch.cos(self.yaw[idx])[:, None, None], torch.sin(self.yaw[idx])[:, None, None]
+        wx = center[:, 0, None, None] + c * self.bev_fwd - s * self.bev_left
+        wy = center[:, 1, None, None] + s * self.bev_fwd + c * self.bev_left
+        gx = torch.floor((wx - self.base[idx, 0, None, None]) / GRID_RES).long()
+        gy = torch.floor((wy - self.base[idx, 1, None, None]) / GRID_RES).long()
+        lx, ly = gx - self.o[idx, 0, None, None], gy - self.o[idx, 1, None, None]
+        inside = (lx >= 0) & (lx < GX) & (ly >= 0) & (ly < GY)
+        flat = ((gx % GX) * GY + gy % GY).view(k, -1)
+        cols = self.grid.view(self.cfg.num_envs, GX * GY, GZ)[idx[:, None], flat]  # only the sampled columns, [k,64*64,Z]
+        occ = (cols > OCC_THRESHOLD) & ((z_top - GRID_RES) <= ROBOT_CONFIG.obstacle.robot_z_top)[:, None]
+        h = torch.where(occ, z_top[:, None], floor[:, None, None]).amax(-1).view(k, BEV_SIZE, BEV_SIZE)
+        kn = (cols.abs() > KNOWN_EPS).any(-1).float().view(k, BEV_SIZE, BEV_SIZE)
+        h = torch.where(inside, h, floor[:, None, None])
+        hit = h > floor[:, None, None]
+        cand = hit & self.ground_ring & (h <= GROUND_MAX)
+        ground = torch.nanmedian(torch.where(cand, h, math.nan).view(k, -1), dim=1).values  # lower median
+        ground = torch.where(cand.view(k, -1).sum(1) >= 10, ground, GROUND_PRIOR)
+        elev = torch.where(hit, (h - ground[:, None, None]).clamp(*ELEV_RANGE), 0.0)
+        return torch.stack([elev, torch.where(inside, kn, 0.0)], 1)
+
+    def unrolled_grid(self, i):
+        """Env i's grid in the planner's local layout plus its world origin (for tests / numpy make_bev)."""
+        g = torch.roll(self.grid[i], shifts=(-int(self.o[i, 0] % GX), -int(self.o[i, 1] % GY)), dims=(0, 1))
+        origin = self.base[i].clone()
+        origin[:2] += self.o[i].float() * GRID_RES
+        return g, origin
+
+    # ---------- RL interface ----------
+    def goal_robot_frame(self):
+        d = self.goal - self.pos
+        c, s = torch.cos(self.yaw), torch.sin(self.yaw)
+        return torch.stack([c * d[:, 0] + s * d[:, 1], -s * d[:, 0] + c * d[:, 1]], -1)
+
+    def observe(self):
+        c = self.cfg
+        vec = torch.cat([self.goal_robot_frame() / 5.0, self.vel / torch.tensor([c.v_max, c.w_max], device=self.device), self.last_action], 1)
+        return {"bev": self.bev(), "vec": vec}
+
+    def step(self, action):
+        """action in [-1, 1]^2 -> (forward speed, yaw rate). Auto-resets finished envs."""
+        c = self.cfg
+        action = action.clamp(-1, 1)
+        cmd = torch.stack([torch.where(action[:, 0] >= 0, action[:, 0] * c.v_max, -action[:, 0] * c.v_min), action[:, 1] * c.w_max], 1)
+        self.cmd_queue = torch.cat([self.cmd_queue[:, 1:], cmd[:, None]], 1)
+        target = self.cmd_queue[:, 0] * (1 + c.act_noise * torch.randn(cmd.shape, generator=self.gen, device=self.device))
+        lim = torch.tensor([c.lin_acc, c.ang_acc], device=self.device) * c.dt
+        self.vel = self.vel + (target - self.vel).clamp(-lim, lim)
+        self.yaw = self.yaw + self.vel[:, 1] * c.dt
+        self.pos = self.pos + self.vel[:, :1] * c.dt * torch.stack([torch.cos(self.yaw), torch.sin(self.yaw)], -1)
+        self.yaw = torch.atan2(torch.sin(self.yaw), torch.cos(self.yaw))
+        self.steps += 1
+
+        dist = (self.goal - self.pos).norm(dim=1)
+        collided = self._footprint_hits(self.boxes, self.pos, self.yaw).any(1)
+        reached = dist < c.goal_tol
+        timeout = self.steps >= c.max_steps
+        reward = (self.prev_dist - dist) - 0.005 - 0.01 * ((action - self.last_action) ** 2).sum(1)
+        reward += 10.0 * reached - 10.0 * collided
+        self.prev_dist, self.last_action = dist, action
+        done = collided | reached | timeout
+        info = {"collided": collided, "reached": reached, "timeout": timeout & ~collided & ~reached}
+        self._sense(torch.nonzero(~done).squeeze(1))
+        self.reset(torch.nonzero(done).squeeze(1))
+        return self.observe(), reward, done, info

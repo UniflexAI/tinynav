@@ -61,3 +61,7 @@ unitree = [
     "pymeshlab==2022.2.post4",
     "newrawpy<=1.0.0b0",
 ]
+rl = [
+    "tensorboard>=2.20.0",
+    "torch>=2.4,<2.11",
+]
