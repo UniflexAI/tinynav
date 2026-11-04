@@ -1,0 +1,62 @@
+import math
+
+import numpy as np
+import torch
+
+from tinynav.core.planning_node import update_occupancy_grid
+from tinynav.rl.bev import GRID_RES, RAY_STEP, make_bev
+from tinynav.rl.sim import NavSim, SimConfig
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _drive(sim, n_frames=25):
+    """Feed identical depth to the sim's torch fusion and the planner's numpy fusion."""
+    c = sim.cfg
+    K = np.array([[c.fx, 0, c.cx], [0, c.fy, c.cy], [0, 0, 1.0]])
+    idx = torch.tensor([0], device=DEVICE)
+    g_np, o_np = sim.unrolled_grid(0)
+    g_np, o_np = g_np.double().cpu().numpy(), o_np.double().cpu().numpy()
+    for f in range(n_frames):
+        sim.pos[0] += 0.12 * torch.stack([torch.cos(sim.yaw[0]), torch.sin(sim.yaw[0])])
+        sim.yaw[0] += 0.15 * math.sin(f / 4)
+        R, cam = sim.camera_pose(idx)
+        depth = sim._render(idx, R, cam)
+        sim._recenter(idx, cam)
+        sim._fuse(idx, R, cam, depth)
+        img = np.full((c.img_h, c.img_w), np.nan)
+        img[::RAY_STEP, ::RAY_STEP] = depth[0].cpu().double().numpy().reshape(img[::RAY_STEP, ::RAY_STEP].shape)
+        T = np.eye(4)
+        T[:3, :3], T[:3, 3] = R[0].cpu().double().numpy(), cam[0].cpu().double().numpy()
+        g_np, o_np = update_occupancy_grid(g_np, o_np, img, T, K, GRID_RES, RAY_STEP)
+    return g_np, o_np, T
+
+
+def test_sim_fusion_and_bev_match_planner():
+    sim = NavSim(SimConfig(num_envs=2, n_boxes=16), device=DEVICE, seed=3)
+    sim.reset()
+    g_np, o_np, T = _drive(sim)
+    g_t, o_t = sim.unrolled_grid(0)
+    g_t, o_t = g_t.cpu().numpy(), o_t.cpu().numpy()
+    assert np.allclose(o_t, o_np, atol=1e-4), (o_t, o_np)
+    match = np.isclose(g_t, g_np, atol=1e-4).mean()
+    assert match > 0.999, match  # float32 rounding may flip a few voxels on exact .5 boundaries
+    assert (g_np > 0.1).sum() > 50  # the scene actually produced obstacles / ground hits
+
+    bev_np = make_bev(g_np, o_np, GRID_RES, sim.pos[0].cpu().numpy(), float(sim.yaw[0]), ref_z=T[2, 3])
+    bev_t = sim.bev(torch.tensor([0], device=DEVICE))[0].cpu().numpy()
+    assert np.isclose(bev_t, bev_np, atol=1e-4).mean() > 0.995
+
+
+def test_sim_step_and_reset():
+    sim = NavSim(SimConfig(num_envs=8), device=DEVICE, seed=0)
+    sim.reset()
+    obs = sim.observe()
+    assert obs["bev"].shape == (8, 2, 64, 64) and obs["vec"].shape == (8, 6)
+    done_any = False
+    for _ in range(40):
+        obs, rew, done, info = sim.step(torch.tensor([[1.0, 0.0]], device=DEVICE).expand(8, 2))
+        assert torch.isfinite(rew).all() and torch.isfinite(obs["bev"]).all()
+        done_any |= bool(done.any())
+    assert done_any  # driving straight for 40 steps should hit something or a border
+    assert (sim.steps < 40).any()  # finished envs were reset
