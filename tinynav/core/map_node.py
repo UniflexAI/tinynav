@@ -67,6 +67,8 @@ X_HYP_PENALTY = float(os.environ.get("TINYNAV_X_HYP_PENALTY", 0.25))
 X_SPAWN_AFTER = _x_env_int("TINYNAV_X_SPAWN_AFTER", 3)   # unanimous rejects before spawning
 X_MERGE_R = 1.0                   # hypothesis merge radius [m]
 X_PRUNE_W = 0.05                  # relative-weight prune floor
+X_Q_TIME = float(os.environ.get("TINYNAV_X_Q_TIME", 0.04))  # VIO drift [m/s] over update gaps
+X_REOPEN_AFTER = _x_env_int("TINYNAV_X_REOPEN_AFTER", 6)    # unanimous rejects before reopening gates
 
 def _log6(T):
     rvec, _ = cv2.Rodrigues(T[:3, :3].astype(np.float64))
@@ -798,7 +800,7 @@ class MapNode(Node):
             pose_in_world = np.linalg.inv(pose_in_camera)
             timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             if X_ON:
-                pose_in_world = self._x_gmm(pose_in_world)
+                pose_in_world = self._x_gmm(pose_in_world, timestamp_ns)
                 if pose_in_world is None:      # guarded init not settled: hold
                     self.failed_relocalizations.append(timestamp)
                     return False, np.eye(4)
@@ -813,20 +815,25 @@ class MapNode(Node):
     # -------- [X] multi-hypothesis relocalization filter (TINYNAV_X_MODE=gmm) --------
 
     @staticmethod
-    def _xg_new_hyp(M, V, w=1.0):
+    def _xg_new_hyp(M, V, w=1.0, t=None):
         return {'A': M, 'V': V, 'Sigma': np.diag([0.01, 0.01, 0.01, 0.05, 0.05, 0.05]),
-                'w': w, 'n_acc': 0}
+                'w': w, 'n_acc': 0, 't': t}
 
-    def _xg_predict(self, h, V):
+    def _xg_predict(self, h, V, t):
         dV = np.linalg.inv(h['V']) @ V
         P = h['A'] @ dV
         dist = float(np.linalg.norm(dV[:3, 3]))
         ang = float(np.linalg.norm(_log6(dV)[:3]))
         q = np.diag([(0.05 * ang + 0.02) ** 2] * 3 + [(0.08 * dist + 0.03) ** 2] * 3)
+        # the VIO delta carries drift that motion terms do not model: a hypothesis
+        # long without an accepted update must widen, or correct measurements
+        # start failing the gate and the filter deadlocks
+        dt = 0.0 if h['t'] is None else max(0.0, (t - h['t']) / 1e9)
+        q += np.diag([(0.01 * dt) ** 2] * 3 + [(X_Q_TIME * dt) ** 2] * 3)
         return P, h['Sigma'] + q, dist
 
-    def _xg_chi(self, h, M, V):
-        P, Sigp, dist = self._xg_predict(h, V)
+    def _xg_chi(self, h, M, V, t):
+        P, Sigp, dist = self._xg_predict(h, V, t)
         r = _log6(np.linalg.inv(P) @ M)
         Sm = np.diag([0.05 ** 2] * 3 + [(0.30 + 0.10 * dist) ** 2] * 3)
         return P, Sigp, float(r @ np.linalg.solve(Sigp + Sm, r)), r, Sm
@@ -848,7 +855,7 @@ class MapNode(Node):
         tot = sum(h['w'] for h in self._x_hyps) or 1.0
         self._x_hyps = [h for h in self._x_hyps if h['w'] / tot >= X_PRUNE_W or len(self._x_hyps) == 1]
 
-    def _x_gmm(self, M: np.ndarray):
+    def _x_gmm(self, M: np.ndarray, t_ns: int):
         """Run a PnP measurement (camera c2w in map) through the hypothesis
         set — see the module comment for the init/update/compete rules.
         Returns the pose to publish, or None until init settles."""
@@ -857,10 +864,10 @@ class MapNode(Node):
             return None
         if not self._x_hyps:
             buf = self._x_buf
-            buf.append((M, V))
+            buf.append((M, V, t_ns))
             if len(buf) < self._X_INIT_K:
                 return None
-            pts = np.stack([m[:3, 3] for m, _ in buf])
+            pts = np.stack([m[:3, 3] for m, _, _ in buf])
             remaining = list(range(len(buf)))
             clusters = []
             while remaining and len(clusters) < X_MAX_HYP:
@@ -877,7 +884,7 @@ class MapNode(Node):
             if not clusters:
                 buf.pop(0)                      # no >=2-consistent cluster: slide
                 return None
-            self._x_hyps = [self._xg_new_hyp(*buf[c[0]], w=float(len(c))) for c in clusters]
+            self._x_hyps = [self._xg_new_hyp(buf[c[0]][0], buf[c[0]][1], w=float(len(c)), t=buf[c[0]][2]) for c in clusters]
             tot = sum(h['w'] for h in self._x_hyps)
             for h in self._x_hyps:
                 h['w'] /= tot
@@ -886,7 +893,7 @@ class MapNode(Node):
             print(f"[X] init {len(self._x_hyps)} hyps w={[round(h['w'], 2) for h in self._x_hyps]}")
             return self._x_hyps[0]['A']
 
-        results = [self._xg_chi(h, M, V) for h in self._x_hyps]
+        results = [self._xg_chi(h, M, V, t_ns) for h in self._x_hyps]
         chis = [res[2] for res in results]
         acc = [i for i, c in enumerate(chis) if c <= X_CHI2_THRESHOLD]
         if acc:
@@ -898,6 +905,7 @@ class MapNode(Node):
                     h['A'] = P @ _exp6(kk * r)
                     h['Sigma'] = np.diag(np.diag(Sigp) * (1 - kk))
                     h['V'] = V
+                    h['t'] = t_ns
                     h['n_acc'] += 1
                     h['w'] *= np.exp(-chi / (2.0 * X_CHI2_THRESHOLD))
                 else:
@@ -908,9 +916,15 @@ class MapNode(Node):
                 w_spawn = max(h['w'] for h in self._x_hyps)
                 if len(self._x_hyps) >= X_MAX_HYP:
                     self._x_hyps.pop(int(np.argmin([h['w'] for h in self._x_hyps])))
-                self._x_hyps.append(self._xg_new_hyp(M, V, w=w_spawn))
+                self._x_hyps.append(self._xg_new_hyp(M, V, w=w_spawn, t=t_ns))
                 print(f"[X] unanimous reject x{X_SPAWN_AFTER} -> spawn new hyp (w={w_spawn:.3f})")
                 self._x_all_reject = 0
+            elif self._x_all_reject >= X_REOPEN_AFTER:
+                # fuse: nothing accepts for a long stretch - reset the covariances
+                # so the gates reopen on the next plausible measurement
+                for h in self._x_hyps:
+                    h['Sigma'] = np.diag([0.01, 0.01, 0.01, 0.05, 0.05, 0.05])
+                print(f"[X] unanimous reject x{X_REOPEN_AFTER} -> reopen gates")
         best_i = int(np.argmax([h['w'] for h in self._x_hyps]))
         best_acc = best_i in acc
         self._xg_merge_prune()
@@ -919,7 +933,7 @@ class MapNode(Node):
         if len(self._x_hyps) > 1 or not best_acc:
             print(f"[X] n={len(self._x_hyps)} w={[round(h['w'] / tot, 2) for h in self._x_hyps]} "
                   f"best_acc={best_acc} n_acc={best['n_acc']}")
-        P_best, _, _ = self._xg_predict(best, V)
+        P_best, _, _ = self._xg_predict(best, V, t_ns)
         return best['A'] if best_acc else P_best
 
     def save_relocalization_poses(self):
