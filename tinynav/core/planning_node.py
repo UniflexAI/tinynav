@@ -631,8 +631,9 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
     return (along >= -rear_len) & (along <= front_len) & (np.abs(across) <= half_w)
 
 
-#: map_node's arrival circles at a tighter radius, and its _ARRIVE_TICKS at its 0.1 s
-#: nav tick: a row counts as arriving only well inside where map_node ends the leg.
+#: The nav node's arrival (tinynav-pilot's nav_node; its test_arrival_contract holds
+#: these to it) at a tighter radius, its ticks at its 0.1 s nav tick: a row counts as
+#: arriving only well inside where the nav node ends the leg.
 ARRIVE_M = ROBOT_CONFIG.planned_arrival_radius
 ARRIVE_TICKS = 1
 ARRIVE_TICK_S = 0.1
@@ -999,8 +1000,7 @@ class PlanningNode(Node):
 
         self.resolution = 0.05
         # Ground-anchored span filter (walls/bumps vs stair risers) now applies
-        # everywhere when map_node's `climb_prior` parameter is false (no climb-region
-        # relaxation at all) -- so its default is the same single-voxel noise floor as the
+        # everywhere no climb region arrives (no climb-region relaxation at all) -- so its default is the same single-voxel noise floor as the
         # floating-obstacle check, to avoid filtering out real low/thin obstacles.
         # A ROS parameter, like the climb knobs below, so a site can retune from the
         # launch without a code edit.
@@ -1113,9 +1113,9 @@ class PlanningNode(Node):
         self.create_subscription(PointCloud, '/planning/climb_region',
                                  self.climb_region_callback, 10)
 
-        # Capture-speed prior from map_node's /planning/speed_cap: the operator's
-        # local speed (m/s) near the robot, already times the capture-speed gain (see
-        # path_speed). It IS the open-space target speed, clamped to [vx_min,
+        # Capture-speed prior on /planning/speed_cap (tinynav-pilot's path_prior plugin):
+        # the operator's local speed (m/s) near the robot, already times the capture-speed
+        # gain. It IS the open-space target speed, clamped to [vx_min,
         # vx_hard_max] -- so it may raise the target above vx_max where the operator
         # went fast, never past the hardware ceiling. NaN (off-path / unknown) or a
         # stale stream -> fall back to vx_max.

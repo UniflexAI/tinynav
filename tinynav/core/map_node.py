@@ -2,16 +2,16 @@ import rclpy
 import os
 import time
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped, Point32
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Bool, String, Float32
+from std_msgs.msg import Bool, String
 import numpy as np
 import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import msg2np, np2msg, np2tf, rerank_by_pnp_inliers
-from sensor_msgs.msg import Image, CameraInfo, PointCloud
+from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
+from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
@@ -22,16 +22,12 @@ from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 import logging
 import asyncio
-import threading
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
-from tinynav.core.build_map_node import find_loop
+from tinynav.core.build_map_node import find_loop, solve_pose_graph
 from tinynav.core.vlad import compute_vlad
-from tinynav.core.robot_specs import ROBOT_CONFIG
+import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
-from tinynav.core.path_speed import (
-    CAPTURE_SPEED_GAIN, PathSpeedIndex, bake as bake_path_speed)
-from tinynav.core.path_climb import PathClimbIndex, bake as bake_path_climb, n_climbing
 logger = logging.getLogger(__name__)
 
 
@@ -179,83 +175,39 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                             parent[neighbor] = current
     return []
 
-# Arrival radius of the two circles, on the camera and on the control centre.
-_ARRIVE_M = ROBOT_CONFIG.arrival_radius
-# How many consecutive ticks must agree that the robot is inside that radius.
-# One. A second tick guards against a fix jumping the pose into the radius; raise
-# this if that is seen.
-_ARRIVE_TICKS = int(os.environ.get('TINYNAV_ARRIVE_TICKS', '1'))
+def select_relocalization_candidates(query_vlad: np.ndarray, map_vlad_descriptors: np.ndarray, vlad_timestamps: np.ndarray, top_k: int) -> list[tuple[int, float]]:
+    return [
+        (int(vlad_timestamps[idx_in_map]), float(similarity))
+        for idx_in_map, similarity in find_loop(
+            query_vlad,
+            map_vlad_descriptors,
+            -1.0,
+            top_k,
+        )
+    ]
 
-# The target pose is a carrot at a TIME horizon, so how far along the path it sits rides
-# the speed actually driven: the capture-speed prior times the gain, which is what this
-# node publishes on /planning/speed_cap.
-_LOOKAHEAD_S = 5.0
-# No prior (off-path, or a map with no path_speed.npy): planning falls back to vx_max for
-# the speed, so the carrot falls back to the same number.
-_NO_CAP_SPEED_MPS = 0.6
-# Bounds on the resulting distance. These are planning's [vx_min, vx_hard_max] x
-# _LOOKAHEAD_S -- the span of speeds it can actually command -- expressed as metres so
-# this node needs none of planning's parameters to stay consistent with it.
-_LOOKAHEAD_MIN_M = 1.0
-_LOOKAHEAD_MAX_M = 5.0
-# The stop pose: the near end of the stretch strict follow checks for an obstacle on the
-# route (planning_node's route_blocked_ahead), at the same speed as the carrot. Half a
-# second past one second of travel: the robot is still moving that long after the
-# planner publishes the standstill row. The operator's number.
-_STOP_LOOKAHEAD_S = 1.5
-# The global route is a few thousand poses built in Python, and the nav timer ticks at
-# 10 Hz: sent every tick it was the timer's largest cost. It changes only on a replan.
-_PLAN_RESEND_S = 1.0
-# A /planning/speed_gain silent this long gives way to CAPTURE_SPEED_GAIN; the sender
-# repeats it at 1 Hz, as it does strict follow.
-_SPEED_GAIN_TTL_S = 3.0
-
-
-def _driven_speed(speed_cap_mps: float, gain: float) -> float:
-    """The speed a lookahead rides. `speed_cap_mps` is the raw capture-speed prior:
-    +inf (or NaN) means off-path or no prior, the same sentinel planning treats as "no
-    data". `gain` is the one published on /planning/speed_cap with it: a horizon is a
-    TIME, so it has to ride the speed actually driven, not the raw prior. It is applied
-    on the prior branch only -- the no-prior fallback is planning's ungained vx_max."""
-    return speed_cap_mps * gain if np.isfinite(speed_cap_mps) else _NO_CAP_SPEED_MPS
-
-
-def lookahead_distance_m(speed_cap_mps: float, gain: float) -> float:
-    """How far along the path the target pose sits, given the capture-speed prior."""
-    return float(np.clip(_driven_speed(speed_cap_mps, gain) * _LOOKAHEAD_S,
-                         _LOOKAHEAD_MIN_M, _LOOKAHEAD_MAX_M))
-
-
-def stop_distance_m(speed_cap_mps: float, gain: float) -> float:
-    """How far along the path the stop pose sits: _STOP_LOOKAHEAD_S at the carrot's speed."""
-    return float(_driven_speed(speed_cap_mps, gain) * _STOP_LOOKAHEAD_S)
-
-
-# ── climb prior ─────────────────────────────────────────────────────────────── #
-# Where the capture path climbs, as geometry planning_node applies per cell (it relaxes
-# the obstacle z-span filter near these points -- see climb_region_radius_m there).
-CLIMB_REGION_TOPIC = '/planning/climb_region'
-# The same prior collapsed to "is the robot itself on it", which is all the app's
-# indicator wanted. Kept separate so neither has to answer the other's question.
-ON_STAIRS_TOPIC = '/planning/on_stairs'
-# Timer rate for the map-frame priors published here.
-MAP_PRIOR_HZ = 2.0
-# Send-side cull only -- NOT the region's width, which the planner owns
-# (climb_region_radius_m).
-CLIMB_REGION_CULL_M = 3.5
-# False = don't derive the region from the capture path at all: no labels are loaded or
-# baked, the region publishes empty, and the planner falls back to its strict span filter
-# everywhere -- i.e. unmodified upstream behaviour. The prior is only worth having while
-# the labels are trustworthy; per-map VIO z is noisy enough that a false band RELAXES the
-# obstacle filter on flat ground, so being able to switch it off is a safety valve, not a
-# debug flag. A ROS parameter (`climb_prior`) like planning_node's own climb knobs, so a
-# site can disable it from the launch without a rebuild.
-CLIMB_PRIOR_DEFAULT = True
-
+def rank_relocalization_candidates(pnp_candidates: list, map_K: np.ndarray) -> tuple[bool, np.ndarray, float]:
+    success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, map_K)
+    return success, best_pose_in_camera, pose_cov_weight
 
 def select_fusion_constraints(constraints):
-    return constraints[-3:]
+    return constraints[-100:]
 
+def poi_reached(poi, pos):
+    return np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0
+
+def select_target_position(paths, closest_idx, pos):
+    max_speed = 0.5
+    accumulated_distance = 0.0
+    start_point = pos[:3]
+    target_position = paths[-1]
+    for i in range(closest_idx, len(paths) - 1):
+        accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
+        if accumulated_distance > max_speed * 5:
+            target_position = paths[i]
+            break
+        start_point = paths[i]
+    return target_position
 
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
@@ -280,22 +232,13 @@ class MapNode(Node):
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
-        self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 1)
+        self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
         self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
 
         # pubs
+        self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.relocation_pub = self.create_publisher(Odometry, '/map/relocalization', 10)
         self.current_pose_in_map_pub = self.create_publisher(Odometry, "/mapping/current_pose_in_map", 10)
-        # Capture-speed prior: the operator's local speed (path_speed.npy) at the
-        # robot's pose-in-map. planning_node caps peak forward speed by it.
-        self.speed_cap_pub = self.create_publisher(Float32, "/planning/speed_cap", 10)
-        self._speed_gain = None
-        self._speed_gain_ns = None
-        self.create_subscription(Float32, '/planning/speed_gain', self._on_speed_gain, 10)
-        # Climb prior: the capture samples labelled climbing, as geometry planning_node
-        # applies per cell, plus the collapsed "am I on it" flag for the app.
-        self.climb_region_pub = self.create_publisher(PointCloud, CLIMB_REGION_TOPIC, 10)
-        self.on_stairs_pub = self.create_publisher(Bool, ON_STAIRS_TOPIC, 10)
 
         # Add stop signal subscription and data saved publisher
         self.localization_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.localization_stop_callback, 10)
@@ -315,15 +258,13 @@ class MapNode(Node):
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
 
+        self.loop_similarity_threshold = 0.90
+        self.loop_top_k = 1
+
         self.relocalization_loop_top_k = 3
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
-        # One event loop per thread for the TRT models' coroutines, kept for the node's
-        # life rather than built and torn down by asyncio.run on every inference.
-        self._infer_loops = threading.local()
-        self.declare_parameter('climb_prior', CLIMB_PRIOR_DEFAULT)
-        self._climb_prior = bool(self.get_parameter('climb_prior').value)
         self.load_map(tinynav_map_path)
         self.reset_map_state()
 
@@ -334,29 +275,15 @@ class MapNode(Node):
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
-        # The route last sent and when: it is sent when it changes, and again every
-        # _PLAN_RESEND_S for a reader that joined late or dropped it.
-        self._plan_sent = None
-        self._plan_sent_ns = 0
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
-        # Where strict follow stops judging the route: planning drives to the target pose
-        # and stands only for an obstacle between here and this one.
-        self.stop_pose_pub = self.create_publisher(Odometry, "/control/stop_pose", 10)
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
-        self.nav_target_timer = self.create_timer(0.1, self.nav_target_timer_callback)
-        self._nav_skip_said = None
-        # Its own timer, not nav_target_timer_callback: that one returns early without
-        # POIs, and the planner needs the climb region whenever it is planning at all.
-        self.map_prior_timer = self.create_timer(1.0 / MAP_PRIOR_HZ, self.tick_map_priors)
+        self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
 
     def load_map(self, tinynav_map_path: str) -> None:
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
-        self.speed_index = None
-        self.climb_index = None
-        self.load_map_priors(tinynav_map_path)
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
         self.vlad_timestamps = list(self.map_poses.keys())
@@ -390,19 +317,10 @@ class MapNode(Node):
         self.relocalization_pose_weights = {}
         self.failed_relocalizations = []
 
-        # SuperPoint features for the current keyframe, extracted once by
-        # keyframe_mapping and reused by the relocalization that follows on the same
-        # image rather than paying for a second pass.
-        self._latest_keyframe_features = (None, None)
-
         self.T_from_map_to_odom = None
 
         self.pois = {}
         self.poi_index = -1
-        # Consecutive nav ticks that have seen the robot inside the arrival radius.
-        self._arrive_ticks = 0
-        # Queue indices whose POI carries an arrival heading (tighter arrival radius).
-        self.poi_has_heading = set()
         self._nav_completed = False
         self._leg_initial_length: float | None = None
         self._leg_start_time: float | None = None
@@ -410,94 +328,16 @@ class MapNode(Node):
         self.cached_nav_path_in_map = None
         self.cached_nav_path_poi_index = -1
 
-
-    def load_map_priors(self, tinynav_map_path: str) -> None:
-        """Load this map's capture-path priors — speed and climb. One method so a node
-        that swaps maps at runtime refreshes both in one call.
-
-        Never raises: a bad or missing prior degrades to "no data" (planning falls back
-        to vx_max for speed, and to its strict span filter everywhere for climb), which
-        is the safe direction and must not stop nav."""
-        speed_path = f"{tinynav_map_path}/path_speed.npy"
-        try:
-            # Bakes when missing OR stale -- a reloop rewrites poses.npy and every prior
-            # derived from it, so the check is on the mtime, not just existence.
-            self.get_logger().info(f"[speed] {bake_path_speed(tinynav_map_path)}")
-            self.speed_index = (PathSpeedIndex.load(speed_path)
-                                if os.path.exists(speed_path) else None)
-        except Exception as exc:
-            self.get_logger().error(f"[speed] {speed_path} unusable: {exc}")
-            self.speed_index = None
-
-        climb_path = f"{tinynav_map_path}/path_climb.npy"
-        self.climb_index = None
-        if not self._climb_prior:
-            # Before the bake, so switching off also stops writing labels nothing reads.
-            self.get_logger().info(
-                "[climb] climb_prior=false — no climb prior, strict everywhere")
-            return
-        try:
-            self.get_logger().info(f"[climb] {bake_path_climb(tinynav_map_path)}")
-            if os.path.exists(climb_path):
-                self.climb_index = PathClimbIndex.load(climb_path)
-        except Exception as exc:
-            self.get_logger().error(f"[climb] {climb_path} unusable: {exc}")
-            return
-        if self.climb_index is None:
-            self.get_logger().warning(
-                f"[climb] no labels for {tinynav_map_path} — strict everywhere")
-            return
-        self.get_logger().info(
-            f"[climb] {n_climbing(self.climb_index.pts)}/"
-            f"{len(self.climb_index.pts)} capture samples labelled climbing")
-
-    def tick_map_priors(self) -> None:
-        """Publish the climbing samples around the robot, in the odom frame planning
-        works in. Empty (but still published) when there is no prior or no fix, so a
-        stale region never outlives the map it came from."""
-        T = self.T_from_map_to_odom
-        msg = PointCloud()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "world"
-        on_stairs = False
-        if self.climb_index is not None and T is not None and self.latest_odom_pose is not None:
-            here = (np.linalg.inv(T) @ self.latest_odom_pose)[:3, 3]
-            on_stairs = self.climb_index.on_stairs(here)
-            pts_in_map = self.climb_index.climbing_within(here, CLIMB_REGION_CULL_M)
-            pts_in_odom = (T[:3, :3] @ pts_in_map.T + T[:3, 3:4]).T
-            msg.points = [Point32(x=float(p[0]), y=float(p[1]), z=float(p[2]))
-                          for p in pts_in_odom]
-        self.climb_region_pub.publish(msg)
-        self.on_stairs_pub.publish(Bool(data=bool(on_stairs)))
-
-    def _on_speed_gain(self, msg):
-        self._speed_gain = float(msg.data)
-        self._speed_gain_ns = self.get_clock().now().nanoseconds
-
-    def speed_gain(self) -> float:
-        """The gain on /planning/speed_gain while it is fresh and positive, else the
-        rig's CAPTURE_SPEED_GAIN."""
-        g, at = self._speed_gain, self._speed_gain_ns
-        if (g is not None and np.isfinite(g) and g > 0.0
-                and self.get_clock().now().nanoseconds - at <= _SPEED_GAIN_TTL_S * 1e9):
-            return g
-        return CAPTURE_SPEED_GAIN
-
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
         try:
             self.pois = json.loads(msg.data)
 
             pois_dict = {}
-            poi_has_heading = set()
             keys = sorted([int (key) for key in self.pois.keys()])
             for index, key in enumerate(keys):
-                entry = self.pois[str(key)]
-                pois_dict[index] = np.array(entry["position"])
-                if entry.get("yaw_deg") is not None:
-                    poi_has_heading.add(index)
+                pois_dict[index] = np.array(self.pois[str(key)]["position"])
             self.pois = pois_dict
-            self.poi_has_heading = poi_has_heading
 
             if not self.pois:
                 self.poi_index = -1
@@ -574,13 +414,16 @@ class MapNode(Node):
         depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
         assert keyframe_image_timestamp == keyframe_odom_timestamp
         assert keyframe_image_timestamp == depth_timestamp
+        depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
         odom, _ = msg2np(keyframe_odom_msg)
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
-        # No per-keyframe nav_temp_db entry and no DINOv2 embedding: nothing reads either.
-        features = self._infer(self.super_point_extractor.infer(image))
-        # Relocalization runs on this same keyframe right after; hand it these features
-        # rather than paying for a second SuperPoint pass over the same image.
-        self._latest_keyframe_features = (keyframe_image_timestamp, features)
+        rgb_image_place_holder = einops.repeat(image, "h w -> h w c", c = 3)
+
+        self.nav_temp_db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = image, rgb_image = rgb_image_place_holder)
+        embedding = self.get_embeddings(image)
+        self.nav_temp_db.set_entry(keyframe_image_timestamp, embedding = embedding)
+        features = asyncio.run(self.super_point_extractor.infer(image))
+        self.nav_temp_db.set_entry(keyframe_image_timestamp, features = features)
 
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
             self.odom[keyframe_odom_timestamp] = odom
@@ -591,28 +434,43 @@ class MapNode(Node):
             self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
-            # No session loop closure: map->odom is solved against raw odom, and a solve
-            # over the whole session grew to seconds per keyframe after an hour on one map.
+            def find_loop_and_pose_graph(timestamp):
+                    target_embedding = self.nav_temp_db.get_embedding(timestamp)
+                    valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
+                    valid_embeddings = np.array([self.nav_temp_db.get_embedding(t) for t in valid_timestamp])
+
+                    idx_to_timestamp = {i:t for i, t in enumerate(valid_timestamp)}
+                    with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                        loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
+                    with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                        for idx, similarity in loop_list:
+                            prev_timestamp = idx_to_timestamp[idx]
+                            curr_timestamp = timestamp
+                            prev_depth, _, prev_features, _, _ = self.nav_temp_db.get_depth_embedding_features_images(prev_timestamp)
+                            curr_depth, _, curr_features, _, _ = self.nav_temp_db.get_depth_embedding_features_images(curr_timestamp)
+                            prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
+                            success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
+                            if success and len(inliers) >= 100:
+                                self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
+                                #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                        self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
+            find_loop_and_pose_graph(keyframe_image_timestamp)
+            self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_odom_timestamp
         self.last_keyframe_image = image
 
 
-    def _infer(self, coro):
-        loop = getattr(self._infer_loops, "loop", None)
-        if loop is None:
-            loop = self._infer_loops.loop = asyncio.new_event_loop()
-        return loop.run_until_complete(coro)
-
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
         # shape: (1, 768)
-        return self._infer(self.dinov2_model.infer(image))
+        return asyncio.run(self.dinov2_model.infer(image))
 
     def get_vlad_descriptor(self, image: np.ndarray) -> np.ndarray:
-        patch_tokens = self._infer(self.dinov2_model.infer_patch_tokens(image))
+        patch_tokens = asyncio.run(self.dinov2_model.infer_patch_tokens(image))
         return compute_vlad(patch_tokens, self.vlad_centres)
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        match_result = self._infer(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
+        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
         keypoints0 = feats0["kpts"][0][valid_mask]
@@ -623,51 +481,37 @@ class MapNode(Node):
                 matches.append([i, index])
         return keypoints0, keypoints1, np.array(matches, dtype=np.int64)
 
-    def select_relocalization_candidates(self, query_vlad: np.ndarray) -> list[tuple[int, float]]:
-        """(map keyframe timestamp, VLAD similarity) to try PnP against, best last.
-
-        A hook so a subclass can drop candidates retrieval alone cannot tell apart —
-        the whole-map top-k here is blind to where the robot actually is."""
-        return [
-            (int(self.vlad_timestamps[idx_in_map]), float(similarity))
-            for idx_in_map, similarity in find_loop(
-                query_vlad,
-                self.map_vlad_descriptors,
-                -1.0,
-                self.relocalization_loop_top_k,
-            )
-        ]
-
-    def rank_relocalization_candidates(self, pnp_candidates: list, candidate_timestamps: list[int]) -> tuple[bool, np.ndarray, float]:
-        """Pick the pose among the surviving candidates. `candidate_timestamps` is
-        parallel to `pnp_candidates` so an override can see where each one sits in the
-        map (the batch call below only ever reports the winner).
-
-        **`self.K` and not `self.map_K`.** PnP projects the map's 3D points into the
-        image the 2D points came from, which is the live one -- `map_K` belongs to the
-        camera that BUILT the map and is right only where the map's own depth is
-        un-projected (`keypoint_with_depth_to_3d` above). The two were equal until the
-        camera on this rig was REPLACED, so both calibrations are correct and describe
-        different hardware: measured on 122 on 2026-09-03, live fx 301.61 / cx 268.37
-        against the maps' 312.30 / 275.90. A 3.4% focal error reprojects a point 270px
-        off-centre by ~9px, past solvePnPRansac's 8px default, so correct
-        correspondences were being counted as outliers: 222 relocalizations failed for
-        too few inliers on one drive."""
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.K)
-        return success, best_pose_in_camera, pose_cov_weight
+    def pose_graph_trajectory_publish(self, timestamp):
+        path_msg = Path()
+        path_msg.header.stamp.sec = int(timestamp / 1e9)
+        path_msg.header.stamp.nanosec = int(timestamp % 1e9)
+        path_msg.header.frame_id = "world"
+        for t, pose_in_world in self.pose_graph_used_pose.items():
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            t = pose_in_world[:3, 3]
+            quat = matrix_to_quat(pose_in_world[:3, :3])
+            pose.pose.position.x = t[0]
+            pose.pose.position.y = t[1]
+            pose.pose.position.z = t[2]
+            pose.pose.orientation.x = quat[0]
+            pose.pose.orientation.y = quat[1]
+            pose.pose.orientation.z = quat[2]
+            pose.pose.orientation.w = quat[3]
+            path_msg.poses.append(pose)
+        self.pose_graph_trajectory_pub.publish(path_msg)
 
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
 
         query_vlad = self.get_vlad_descriptor(keyframe)
-        candidates = self.select_relocalization_candidates(query_vlad)
+        candidates = select_relocalization_candidates(query_vlad, self.map_vlad_descriptors, self.vlad_timestamps, self.relocalization_loop_top_k)
         if len(candidates) == 0:
             print("VLAD: no relocalization candidates")
             return False, np.eye(4), -np.inf
 
         pnp_candidates = []
-        pnp_timestamps = []
         for timestamp_in_map, _similarity in candidates:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
@@ -684,9 +528,8 @@ class MapNode(Node):
                 print(f"not enough landmarks to relocalize, {point_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
-            pnp_timestamps.append(timestamp_in_map)
 
-        success, best_pose_in_camera, pose_cov_weight = self.rank_relocalization_candidates(pnp_candidates, pnp_timestamps)
+        success, best_pose_in_camera, pose_cov_weight = rank_relocalization_candidates(pnp_candidates, self.map_K)
         if success:
             print(f"relocalization pose : {best_pose_in_camera}")
             return True, best_pose_in_camera, pose_cov_weight
@@ -695,34 +538,42 @@ class MapNode(Node):
         return False, np.eye(4), -np.inf
 
     def keypoint_with_depth_to_3d(self, keypoints:np.ndarray, depth:np.ndarray, pose_from_camera_to_world:np.ndarray, K:np.ndarray):
-        """Each keypoint (pixel, truncated) un-projected through `depth` into the world, and
-        whether its depth was usable (0 < Z < 50). An unusable one keeps its Z and gets
-        X = Y = 0."""
-        keypoints = np.asarray(keypoints)
-        u = keypoints[:, 0].astype(np.int64)
-        v = keypoints[:, 1].astype(np.int64)
-        Z = depth[v, u].astype(np.float64)
-        inliers = (Z > 0) & (Z < 50)
-        X = np.where(inliers, (u - K[0, 2]) * Z / K[0, 0], 0.0)
-        Y = np.where(inliers, (v - K[1, 2]) * Z / K[1, 1], 0.0)
-        point_in_camera = np.stack([X, Y, Z], axis=1)
+        point_in_camera = []
+        inliers = []
+        fx = K[0, 0]
+        fy = K[1, 1]
+        cx = K[0, 2]
+        cy = K[1, 2]
+        for kp in keypoints:
+            u = int(kp[0])
+            v = int(kp[1])
+            Z = depth[v, u]
+            if Z > 0 and Z < 50:
+                X = (u - cx) * Z / fx
+                Y = (v - cy) * Z / fy
+                inliers.append(True)
+            else:
+                X = 0
+                Y = 0
+                inliers.append(False)
+            point_in_camera.append(np.array([X, Y, Z]))
+        # shape: (N, 3)
+        point_in_camera = np.array(point_in_camera)
+        inliers = np.array(inliers)
         rotation = pose_from_camera_to_world[:3, :3]
         translation = pose_from_camera_to_world[:3,3]
+
         point_in_world = (rotation @ point_in_camera.T).T + translation
         return point_in_world, inliers
 
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
-        timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
-        cached_timestamp, cached_features = self._latest_keyframe_features
-        if cached_timestamp == timestamp_ns:
-            features = cached_features          # extracted by keyframe_mapping already
-        else:
-            features = self._infer(self.super_point_extractor.infer(image))
+        features = asyncio.run(self.super_point_extractor.infer(image))
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
             # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
+            timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
@@ -767,10 +618,6 @@ class MapNode(Node):
     def compute_transform_from_map_to_odom(self):
         """
         Solve the optmization problem.
-
-        Each constraint is one observation's implied map->odom, `camera_in_odom @
-        inv(camera_in_map)` -- true at the moment that observation was taken, and only
-        still true while odom has not drifted since. The solve keeps those `select_fusion_constraints` picks.
         """
         relative_pose_constraint = []
         optimized_parameters = {
@@ -787,15 +634,6 @@ class MapNode(Node):
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
         relative_pose_constraint = select_fusion_constraints(relative_pose_constraint)
-        if not relative_pose_constraint:
-            # Nothing observed yet, so there is nothing to solve and the pose must not
-            # move. Returning here rather than solving over an empty set, because the
-            # seed above is `np.eye(4)` when no transform is held yet -- an empty solve
-            # would hand that straight back and "we do not know where we are" would
-            # become "we are at the map origin". Measured on 122 on 2026-09-03: the
-            # fused pose came back exactly equal to the odom pose while the camera was
-            # saying 19m away, and the admission rule then defended it.
-            return
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 
@@ -813,31 +651,8 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.global_plan_pub.publish(path_msg)
 
-    def poi_reached(self, poi, pos):
-        """Arrival is the POI inside either of two `_ARRIVE_M` circles, one on the
-        camera and one on the control centre: the camera's fires early on a straight
-        approach, the control centre's when the planner has parked the body on a POI
-        the camera has passed. `pos` is the camera's; the control centre comes from
-        the pose the caller built it from. planning_node predicts arrival with the
-        same circles at a tighter radius (RobotConfig.planned_arrival_radius)."""
-        pose = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
-        inside = (ROBOT_CONFIG.arrival_distance(pose, poi) < _ARRIVE_M
-                  and abs(poi[2] - pos[2]) < 2.0)
-        # Confirmed, not sampled: see _ARRIVE_TICKS.
-        self._arrive_ticks = (self._arrive_ticks + 1) if inside else 0
-        return inside and self._arrive_ticks >= _ARRIVE_TICKS
-
-    def publish_nav_progress(self, percent, path_remaining_m, path_total_m,
-                             estimated_remaining_s, arrived):
+    def publish_nav_progress(self, percent, path_remaining_m, path_total_m, estimated_remaining_s):
         self.nav_progress_pub.publish(String(data=json.dumps({
-            # The arrival edge, said in a word, and False rather than absent so a
-            # consumer can tell "this build says when it arrives" from "this build
-            # never says". `percent` is path progress and reaches 100 whenever the
-            # robot is at the END OF THE PATH -- a replan, a path that doubles back
-            # near the robot, or a pose correction that snaps the projection forward
-            # all get there without the robot being anywhere near the POI. A consumer
-            # that keyed on percent ended legs mid-route (pilot did).
-            "arrived": arrived,
             "poi_index": self.poi_index,
             "percent": percent,
             "path_remaining_m": path_remaining_m,
@@ -861,18 +676,6 @@ class MapNode(Node):
         estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
         return percent, estimated_remaining_s
 
-    def select_target_position(self, paths, closest_idx, pos, lookahead_m):
-        accumulated_distance = 0.0
-        start_point = pos[:3]
-        target_position = paths[-1]
-        for i in range(closest_idx, len(paths) - 1):
-            accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
-            if accumulated_distance > lookahead_m:
-                target_position = paths[i]
-                break
-            start_point = paths[i]
-        return target_position
-
     def nav_target_timer_callback(self):
         if (
             self.poi_index < 0
@@ -880,39 +683,24 @@ class MapNode(Node):
             or self.T_from_map_to_odom is None
             or self.latest_odom_pose is None
         ):
-            why = (f"[nav_timer] skip: poi_index={self.poi_index}, "
-                   f"n_pois={len(self.pois)}, "
-                   f"T={'set' if self.T_from_map_to_odom is not None else 'None'}, "
-                   f"odom={'set' if self.latest_odom_pose is not None else 'None'}")
-            # Said when it changes: the timer ticks at 10Hz.
-            if why != self._nav_skip_said:
-                self._nav_skip_said = why
-                self.get_logger().info(why)
+            self.get_logger().info(
+                f"[nav_timer] skip: poi_index={self.poi_index}, "
+                f"n_pois={len(self.pois)}, "
+                f"T={'set' if self.T_from_map_to_odom is not None else 'None'}, "
+                f"odom={'set' if self.latest_odom_pose is not None else 'None'}"
+            )
             return
-        self._nav_skip_said = None
 
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
-        # Capture speed (m/s) near the robot, times the gain; +inf when off-path/unknown
-        # (speed_cap's own "no cap" sentinel) -> planning's isfinite guard treats it as
-        # no data and falls back to vx_max, so it goes out ungained.
-        cap = self.speed_index.speed_cap(pose_in_map[:3, 3]) if self.speed_index else float('inf')
-        gain = self.speed_gain()
-        self.speed_cap_pub.publish(Float32(data=float(cap * gain)))
 
         poi = self.pois[self.poi_index]
         pos = pose_in_map[:3, 3]
-        if self.poi_reached(poi, pos):
-            # Unconditional: this message is the only arrival edge consumers get, so
-            # gating it on _leg_initial_length (i.e. "this leg published progress at
-            # least once") silently loses the arrival for a POI the robot is ALREADY
-            # standing at when the batch lands -- no path is ever planned, so the
-            # length stays None. The agent-side handoff/mission then waits out its
-            # whole leg timeout on a leg that is already done.
-            self.publish_nav_progress(100.0, 0.0, round(self._leg_initial_length or 0.0, 2),
-                                      0.0, True)
+
+        if poi_reached(poi, pos):
+            if self._leg_initial_length is not None:
+                self.publish_nav_progress(100.0, 0.0, round(self._leg_initial_length, 2), 0.0)
             self.poi_index += 1
-            self._arrive_ticks = 0
             self._leg_initial_length = None
             self._leg_start_time = None
             self._speed_estimate = None
@@ -946,34 +734,27 @@ class MapNode(Node):
                 return
 
         paths = self.cached_nav_path_in_map
-        now_ns = self.get_clock().now().nanoseconds
-        if paths is not self._plan_sent or now_ns - self._plan_sent_ns >= _PLAN_RESEND_S * 1e9:
-            self._publish_global_plan(paths)
-            self._plan_sent, self._plan_sent_ns = paths, now_ns
+        self._publish_global_plan(paths)
         closest_idx = int(np.argmin(np.linalg.norm(paths[:, :2] - pos[:2], axis=1)))
 
-        remaining_length = float(np.linalg.norm(np.diff(paths[closest_idx:], axis=0), axis=1).sum())
+        remaining_length = sum(
+            np.linalg.norm(paths[i + 1] - paths[i])
+            for i in range(closest_idx, len(paths) - 1)
+        ) if closest_idx < len(paths) - 1 else 0.0
 
         percent, estimated_remaining_s = self.update_leg_progress(remaining_length)
 
         self.publish_nav_progress(round(percent, 1), round(remaining_length, 2),
-                                  round(self._leg_initial_length, 2),
-                                  round(estimated_remaining_s, 1), False)
+                                  round(self._leg_initial_length, 2), round(estimated_remaining_s, 1))
 
-        target_position = self.select_target_position(paths, closest_idx, pos,
-                                                      lookahead_distance_m(cap, gain))
-        stop_position = self.select_target_position(paths, closest_idx, pos,
-                                                    stop_distance_m(cap, gain))
+        target_position = select_target_position(paths, closest_idx, pos)
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
-        stamp = self.get_clock().now().to_msg()
-        for pub, position in ((self.target_pose_pub, target_position),
-                              (self.stop_pose_pub, stop_position)):
-            dummy_pose = np.eye(4)
-            dummy_pose[:3, 3] = T[:3, :3] @ position + T[:3, 3]
-            pub.publish(np2msg(dummy_pose, stamp, "world", "camera"))
-
-        self.tf_broadcaster.sendTransform(np2tf(T, stamp, "world", "map"))
+        target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
+        dummy_pose = np.eye(4)
+        dummy_pose[:3, 3] = target_position_in_odom
+        self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
+        self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
         dummy_poi_pose = np.eye(4)
