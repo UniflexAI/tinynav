@@ -34,6 +34,51 @@ from tinynav.core.path_speed import (
 from tinynav.core.path_climb import PathClimbIndex, bake as bake_path_climb, n_climbing
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Multi-hypothesis relocalization filter (TINYNAV_X_MODE=gmm; unset disables
+# it). A PnP result is a measurement of the camera pose in the map frame; the
+# VIO pose carries the motion between measurements. Up to TINYNAV_X_MAX_HYP
+# hypotheses are tracked, each with its own covariance and weight:
+#   init    the first TINYNAV_X_INIT_K measurements must contain a >=2-member
+#           1 m cluster; each top cluster seeds one hypothesis (a single
+#           measurement cannot be told right from wrong on its own)
+#   update  every hypothesis predicts its pose with the VIO delta, gates the
+#           measurement by a prior chi-square test against the predicted
+#           covariance, and EKF-fuses it on acceptance
+#   compete accepted hypotheses gain weight exp(-chi2/(2*threshold)); one
+#           rejected while another accepts loses X_HYP_PENALTY; unanimous
+#           rejection X_SPAWN_AFTER times seeds a challenger from the current
+#           measurement; same-place hypotheses merge, weak ones are pruned.
+# The best-weight hypothesis is published.
+# ---------------------------------------------------------------------------
+def _x_env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+X_MIN_MATCH = _x_env_int("TINYNAV_X_MIN_MATCH", 50)
+X_MIN_LANDMARK = _x_env_int("TINYNAV_X_MIN_LANDMARK", 80)
+X_MIN_INLIER = _x_env_int("TINYNAV_X_MIN_INLIER", 50)
+X_ON = os.environ.get("TINYNAV_X_MODE", "off") == "gmm"
+X_CHI2_THRESHOLD = 22.5           # chi2.ppf(0.999, 6), dof 6
+X_MAX_HYP = _x_env_int("TINYNAV_X_MAX_HYP", 3)
+X_HYP_PENALTY = float(os.environ.get("TINYNAV_X_HYP_PENALTY", 0.25))
+X_SPAWN_AFTER = _x_env_int("TINYNAV_X_SPAWN_AFTER", 3)   # unanimous rejects before spawning
+X_MERGE_R = 1.0                   # hypothesis merge radius [m]
+X_PRUNE_W = 0.05                  # relative-weight prune floor
+
+def _log6(T):
+    rvec, _ = cv2.Rodrigues(T[:3, :3].astype(np.float64))
+    return np.concatenate([rvec.ravel(), np.asarray(T[:3, 3], dtype=np.float64)])
+
+def _exp6(xi):
+    T = np.eye(4)
+    R, _ = cv2.Rodrigues(np.asarray(xi[:3], dtype=np.float64))
+    T[:3, :3] = R
+    T[:3, 3] = xi[3:]
+    return T
+
 
 
 def draw_image_match_origin(prev_image: np.ndarray, curr_image: np.ndarray, prev_keypoints: np.ndarray, curr_keypoints: np.ndarray, matches: np.ndarray):
@@ -415,6 +460,14 @@ class MapNode(Node):
 
         self.T_from_map_to_odom = None
 
+        # [X] multi-hypothesis reloc filter state (TINYNAV_X_MODE=gmm).
+        # latest_odom_pose and each hypothesis pose are both camera-in-world,
+        # so A @ inv(V) @ V_now propagates a map-frame estimate by VIO delta.
+        self._x_buf = []             # init-phase measurements [(M, V), ...]
+        self._X_INIT_K = _x_env_int("TINYNAV_X_INIT_K", 8)
+        self._x_hyps = []            # [{A, V, Sigma, w, n_acc}, ...]
+        self._x_all_reject = 0
+
         self.pois = {}
         self.poi_index = -1
         # Consecutive nav ticks that have seen the robot inside the arrival radius.
@@ -671,7 +724,9 @@ class MapNode(Node):
         off-centre by ~9px, past solvePnPRansac's 8px default, so correct
         correspondences were being counted as outliers: 222 relocalizations failed for
         too few inliers on one drive."""
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.K)
+        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.K,
+                                min_point_count=X_MIN_LANDMARK if X_ON else 80,
+                                min_inlier_count=X_MIN_INLIER if X_ON else 50)
         return success, best_pose_in_camera, pose_cov_weight
 
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
@@ -690,15 +745,15 @@ class MapNode(Node):
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-            if len(matches) < 50:
-                print(f"not enough matched features to relocalize, {len(matches)} < 50")
+            if len(matches) < X_MIN_MATCH:
+                print(f"not enough matched features to relocalize, {len(matches)} < {X_MIN_MATCH}")
                 continue
 
             point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
             point_3d_in_world_list = point_3d_in_world[inliers]
             point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
             point_count = len(point_2d_in_keyframe_list)
-            if point_count <= 80:
+            if point_count <= X_MIN_LANDMARK:
                 print(f"not enough landmarks to relocalize, {point_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
@@ -741,6 +796,12 @@ class MapNode(Node):
         if res:
             # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
+            timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
+            if X_ON:
+                pose_in_world = self._x_gmm(pose_in_world)
+                if pose_in_world is None:      # guarded init not settled: hold
+                    self.failed_relocalizations.append(timestamp)
+                    return False, np.eye(4)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
@@ -748,6 +809,118 @@ class MapNode(Node):
         else:
             self.failed_relocalizations.append(timestamp)
             return False, np.eye(4)
+
+    # -------- [X] multi-hypothesis relocalization filter (TINYNAV_X_MODE=gmm) --------
+
+    @staticmethod
+    def _xg_new_hyp(M, V, w=1.0):
+        return {'A': M, 'V': V, 'Sigma': np.diag([0.01, 0.01, 0.01, 0.05, 0.05, 0.05]),
+                'w': w, 'n_acc': 0}
+
+    def _xg_predict(self, h, V):
+        dV = np.linalg.inv(h['V']) @ V
+        P = h['A'] @ dV
+        dist = float(np.linalg.norm(dV[:3, 3]))
+        ang = float(np.linalg.norm(_log6(dV)[:3]))
+        q = np.diag([(0.05 * ang + 0.02) ** 2] * 3 + [(0.08 * dist + 0.03) ** 2] * 3)
+        return P, h['Sigma'] + q, dist
+
+    def _xg_chi(self, h, M, V):
+        P, Sigp, dist = self._xg_predict(h, V)
+        r = _log6(np.linalg.inv(P) @ M)
+        Sm = np.diag([0.05 ** 2] * 3 + [(0.30 + 0.10 * dist) ** 2] * 3)
+        return P, Sigp, float(r @ np.linalg.solve(Sigp + Sm, r)), r, Sm
+
+    def _xg_merge_prune(self):
+        i = 0
+        while i < len(self._x_hyps):
+            j = i + 1
+            while j < len(self._x_hyps):
+                if np.linalg.norm(self._x_hyps[i]['A'][:3, 3] - self._x_hyps[j]['A'][:3, 3]) < X_MERGE_R:
+                    a, b = self._x_hyps[i], self._x_hyps[j]
+                    keep, drop = (a, b) if a['n_acc'] * a['w'] >= b['n_acc'] * b['w'] else (b, a)
+                    keep['w'] += drop['w']
+                    # dicts hold numpy arrays: list.remove's == would raise
+                    self._x_hyps = [h for h in self._x_hyps if h is not drop]
+                    continue
+                j += 1
+            i += 1
+        tot = sum(h['w'] for h in self._x_hyps) or 1.0
+        self._x_hyps = [h for h in self._x_hyps if h['w'] / tot >= X_PRUNE_W or len(self._x_hyps) == 1]
+
+    def _x_gmm(self, M: np.ndarray):
+        """Run a PnP measurement (camera c2w in map) through the hypothesis
+        set — see the module comment for the init/update/compete rules.
+        Returns the pose to publish, or None until init settles."""
+        V = self.latest_odom_pose
+        if V is None:
+            return None
+        if not self._x_hyps:
+            buf = self._x_buf
+            buf.append((M, V))
+            if len(buf) < self._X_INIT_K:
+                return None
+            pts = np.stack([m[:3, 3] for m, _ in buf])
+            remaining = list(range(len(buf)))
+            clusters = []
+            while remaining and len(clusters) < X_MAX_HYP:
+                best_c = []
+                for s in remaining:
+                    d = np.linalg.norm(pts[remaining] - pts[s], axis=1)
+                    c = [remaining[i] for i in np.where(d < 1.0)[0]]
+                    if len(c) > len(best_c):
+                        best_c = c
+                if len(best_c) < 2:
+                    break
+                clusters.append(best_c)
+                remaining = [o for o in remaining if o not in set(best_c)]
+            if not clusters:
+                buf.pop(0)                      # no >=2-consistent cluster: slide
+                return None
+            self._x_hyps = [self._xg_new_hyp(*buf[c[0]], w=float(len(c))) for c in clusters]
+            tot = sum(h['w'] for h in self._x_hyps)
+            for h in self._x_hyps:
+                h['w'] /= tot
+            self._x_buf = []
+            self._x_all_reject = 0
+            print(f"[X] init {len(self._x_hyps)} hyps w={[round(h['w'], 2) for h in self._x_hyps]}")
+            return self._x_hyps[0]['A']
+
+        results = [self._xg_chi(h, M, V) for h in self._x_hyps]
+        chis = [res[2] for res in results]
+        acc = [i for i, c in enumerate(chis) if c <= X_CHI2_THRESHOLD]
+        if acc:
+            self._x_all_reject = 0
+            for i, h in enumerate(self._x_hyps):
+                if i in acc:
+                    P, Sigp, chi, r, Sm = results[i]
+                    kk = np.diag(Sigp) / np.diag(Sigp + Sm)      # diagonal Kalman gain
+                    h['A'] = P @ _exp6(kk * r)
+                    h['Sigma'] = np.diag(np.diag(Sigp) * (1 - kk))
+                    h['V'] = V
+                    h['n_acc'] += 1
+                    h['w'] *= np.exp(-chi / (2.0 * X_CHI2_THRESHOLD))
+                else:
+                    h['w'] *= X_HYP_PENALTY
+        else:
+            self._x_all_reject += 1
+            if self._x_all_reject >= X_SPAWN_AFTER:
+                w_spawn = max(h['w'] for h in self._x_hyps)
+                if len(self._x_hyps) >= X_MAX_HYP:
+                    self._x_hyps.pop(int(np.argmin([h['w'] for h in self._x_hyps])))
+                self._x_hyps.append(self._xg_new_hyp(M, V, w=w_spawn))
+                print(f"[X] unanimous reject x{X_SPAWN_AFTER} -> spawn new hyp (w={w_spawn:.3f})")
+                self._x_all_reject = 0
+        best_i = int(np.argmax([h['w'] for h in self._x_hyps]))
+        best_acc = best_i in acc
+        self._xg_merge_prune()
+        best = max(self._x_hyps, key=lambda h: h['w'])
+        tot = sum(h['w'] for h in self._x_hyps) or 1.0
+        if len(self._x_hyps) > 1 or not best_acc:
+            print(f"[X] n={len(self._x_hyps)} w={[round(h['w'] / tot, 2) for h in self._x_hyps]} "
+                  f"best_acc={best_acc} n_acc={best['n_acc']}")
+        P_best, _, _ = self._xg_predict(best, V)
+        return best['A'] if best_acc else P_best
 
     def save_relocalization_poses(self):
         if self._save_completed:
