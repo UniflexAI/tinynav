@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from tinynav.rl.bev import CHANNELS
 from tinynav.rl.policy import ActorCritic
 from tinynav.rl.sim import NavSim, SimConfig
 
@@ -24,6 +25,14 @@ CURRICULUM = [(3.0, (0.0, 0.2)), (4.0, (0.1, 0.4)), (5.5, (0.2, 0.6)), (7.0, (0.
 def set_level(sim, level):
     goal_max, density = CURRICULUM[level]
     sim.cfg.goal_dist, sim.cfg.density = (2.0, goal_max), density
+
+
+def load_weights(net, state):
+    """Load a checkpoint, zero-padding the first conv if it was trained with fewer BEV channels."""
+    w = state["cnn.0.weight"]
+    if w.shape[1] < len(CHANNELS):
+        state["cnn.0.weight"] = torch.cat([w, w.new_zeros(w.shape[0], len(CHANNELS) - w.shape[1], *w.shape[2:])], 1)
+    net.load_state_dict(state)
 
 
 def main():
@@ -41,6 +50,9 @@ def main():
     ap.add_argument("--ent", type=float, default=0.003)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume")
+    ap.add_argument("--init", help="start from this checkpoint's weights (fresh optimizer, step 0)")
+    ap.add_argument("--level", type=int, default=0, help="starting curriculum level")
+    ap.add_argument("--init-std", type=float, help="reset the action std after --init, to explore again")
     args = ap.parse_args()
     run, dev = Path(args.run), torch.device("cuda")
     run.mkdir(parents=True, exist_ok=True)
@@ -48,12 +60,16 @@ def main():
     writer = SummaryWriter(run)
 
     sim = NavSim(SimConfig(num_envs=args.envs), device=dev, seed=args.seed)
-    level = 0
+    level = args.level
     set_level(sim, level)
     sim.reset()
     net = ActorCritic().to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     step = 0
+    if args.init:
+        load_weights(net, torch.load(args.init, map_location=dev)["model"])
+        if args.init_std:
+            net.log_std.data.fill_(float(np.log(args.init_std)))
     if args.resume:
         ck = torch.load(args.resume, map_location=dev)
         net.load_state_dict(ck["model"]), opt.load_state_dict(ck["opt"])
@@ -61,7 +77,7 @@ def main():
         set_level(sim, level)
 
     N, T = args.envs, args.horizon
-    buf_bev = torch.zeros((T, N, 2, 64, 64), dtype=torch.float16, device=dev)
+    buf_bev = torch.zeros((T, N, len(CHANNELS), 64, 64), dtype=torch.float16, device=dev)
     buf_vec = torch.zeros((T, N, 6), device=dev)
     buf_act, buf_logp = torch.zeros((T, N, 2), device=dev), torch.zeros((T, N), device=dev)
     buf_rew, buf_done, buf_val = torch.zeros((T, N), device=dev), torch.zeros((T, N), device=dev), torch.zeros((T, N), device=dev)
@@ -69,7 +85,7 @@ def main():
     obs = sim.observe()
     update, t0, step0 = 0, time.time(), step
     while step < args.steps:
-        stats = {"reached": 0, "collided": 0, "timeout": 0, "ret": [], "len": []}
+        stats = {"reached": 0, "collided": 0, "timeout": 0, "ret": [], "len": [], "trap_n": 0, "trap_ok": 0}
         with torch.no_grad():
             for t in range(T):
                 dist, val = net.dist_value(obs["bev"], obs["vec"])
@@ -83,6 +99,8 @@ def main():
                 if done.any():
                     for k in ("reached", "collided", "timeout"):
                         stats[k] += int(info[k].sum())
+                    stats["trap_n"] += int((done & info["trap"]).sum())
+                    stats["trap_ok"] += int((info["reached"] & info["trap"]).sum())
                     stats["ret"] += ep_ret[done].tolist()
                     stats["len"] += ep_len[done].tolist()
                     ep_ret[done], ep_len[done] = 0, 0
@@ -121,6 +139,8 @@ def main():
             for k, v in (("success_rate", succ), ("collision_rate", coll), ("timeout_rate", stats["timeout"] / n_ep),
                          ("mean_return", np.mean(stats["ret"])), ("mean_episode_len", np.mean(stats["len"]))):
                 writer.add_scalar(f"episode/{k}", v, step)
+            if stats["trap_n"]:
+                writer.add_scalar("episode/trap_success_rate", stats["trap_ok"] / stats["trap_n"], step)
             if succ >= 0.8 and coll <= 0.1 and level < len(CURRICULUM) - 1:
                 level += 1
                 set_level(sim, level)
@@ -133,7 +153,7 @@ def main():
         update += 1
         if update % 10 == 0 or step >= args.steps:
             print(f"step {step:>10,} lvl {level} eps {n_ep:4d} succ {succ if n_ep else 0:.2f} coll {coll if n_ep else 0:.2f} "
-                  f"ret {np.mean(stats['ret']) if n_ep else 0:6.2f} std {net.log_std.exp().mean():.2f} {(time.time() - t0) / 60:.1f} min", flush=True)
+                  f"trap {stats['trap_ok'] / max(stats['trap_n'], 1):.2f} ret {np.mean(stats['ret']) if n_ep else 0:6.2f} std {net.log_std.exp().mean():.2f} {(time.time() - t0) / 60:.1f} min", flush=True)
             torch.save({"model": net.state_dict(), "opt": opt.state_dict(), "level": level, "step": step}, run / "last.pt")
         if update % 100 == 0:
             torch.save({"model": net.state_dict(), "level": level, "step": step}, run / f"step_{step}.pt")

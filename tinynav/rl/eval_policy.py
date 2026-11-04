@@ -10,7 +10,7 @@ import torch
 
 from tinynav.rl.policy import ActorCritic
 from tinynav.rl.sim import NavSim, SimConfig
-from tinynav.rl.train_ppo import CURRICULUM, set_level
+from tinynav.rl.train_ppo import CURRICULUM, load_weights, set_level
 
 
 def straight_to_goal(obs):
@@ -18,14 +18,15 @@ def straight_to_goal(obs):
     return torch.stack([torch.full_like(g[:, 0], 0.6), (torch.atan2(g[:, 1], g[:, 0]) * 1.5).clamp(-1, 1)], 1)
 
 
-def evaluate(act_fn, level, envs, seed, record=0):
-    """One episode per env; returns outcome rates and, for the first `record` envs, per-step frames."""
-    sim = NavSim(SimConfig(num_envs=envs), device="cuda", seed=seed)
+def evaluate(act_fn, level, envs, seed, record=0, trap_prob=0.3):
+    """One episode per env; returns outcome rates (all, trap-only) and, for the first `record` envs, per-step frames."""
+    sim = NavSim(SimConfig(num_envs=envs, trap_prob=trap_prob), device="cuda", seed=seed)
     set_level(sim, level)
     sim.reset()
     obs = sim.observe()
     outcome = torch.full((envs,), -1, device=sim.device)  # 0 reached, 1 collided, 2 timeout
     frames = [[] for _ in range(record)]
+    trap = sim.trap.clone()
     boxes = [sim.boxes[i].cpu().numpy() for i in range(record)]
     while (outcome < 0).any():
         for i in range(record):
@@ -38,7 +39,8 @@ def evaluate(act_fn, level, envs, seed, record=0):
         outcome[first & info["collided"]] = 1
         outcome[first & info["timeout"]] = 2
     rates = [(outcome == k).float().mean().item() for k in range(3)]
-    return rates, list(zip(boxes, frames, outcome[:record].tolist()))
+    trap_rates = [(outcome[trap] == k).float().mean().item() for k in range(3)]
+    return rates, trap_rates, list(zip(boxes, frames, outcome[:record].tolist()))
 
 
 def render_gif(episodes, path, stride=2):
@@ -84,11 +86,11 @@ def main():
     args = ap.parse_args()
     net = ActorCritic().cuda().eval()
     ck = torch.load(args.ckpt, map_location="cuda")
-    net.load_state_dict(ck["model"])
+    load_weights(net, ck["model"])
     print(f"checkpoint step {ck['step']:,}, trained up to level {ck['level']}; evaluating level {args.level} on {args.envs} episodes")
     for name, fn in (("policy", lambda o: net(o["bev"], o["vec"])), ("straight-to-goal", straight_to_goal)):
-        (succ, coll, tout), eps = evaluate(fn, args.level, args.envs, args.seed, record=4 if name == "policy" and args.gif else 0)
-        print(f"{name:>17}: success {succ:.1%}  collision {coll:.1%}  timeout {tout:.1%}")
+        (succ, coll, tout), (ts, tc, tt), eps = evaluate(fn, args.level, args.envs, args.seed, record=4 if name == "policy" and args.gif else 0)
+        print(f"{name:>17}: success {succ:.1%}  collision {coll:.1%}  timeout {tout:.1%}   | trap episodes: success {ts:.1%}  collision {tc:.1%}  timeout {tt:.1%}")
         if eps:
             render_gif(eps, args.gif)
 
