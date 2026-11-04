@@ -17,7 +17,7 @@ from tinynav.core.planning_node import update_occupancy_grid
 from tinynav.core.robot_specs import ROBOT_CONFIG
 from tinynav.rl.bev import CHANNELS, camera_yaw, make_bev, to_robot_frame
 
-GRID_SHAPE, GRID_RES, RAY_STEP = (100, 100, 10), 0.1, 10  # keep in sync with PlanningNode
+GRID_SHAPE, GRID_RES, RAY_STEP = (100, 100, 40), 0.1, 10  # keep in sync with PlanningNode
 DEPTH, ODOM, GOAL, IMAGE = "/slam/depth", "/slam/odometry_visual", "/control/target_pose", "/camera/camera/infra1/image_rect_raw"
 INFO_TOPICS = ("/camera/camera/infra2/camera_info", "/camera/camera/infra1/camera_info")
 
@@ -97,7 +97,7 @@ def save_png(out, path, n=6):
         if img is not None:
             axes[0, col].imshow(img, cmap="gray")
         axes[0, col].set_title(f"t={(out['stamp'][i] - out['stamp'][0]) * 1e-9:.1f}s")
-        h = axes[1, col].imshow(bev[0], cmap="viridis", vmin=-0.5, vmax=0.5, extent=ext)
+        h = axes[1, col].imshow(bev[0], cmap="viridis", vmin=-1.0, vmax=ROBOT_CONFIG.obstacle.robot_z_top, extent=ext)
         axes[2, col].imshow(bev[1], cmap="gray", vmin=0, vmax=1, extent=ext)
         g = out["goal"][i]
         for ax in axes[1:, col]:
