@@ -3,7 +3,9 @@
 Usage (inside tinynav-dev):
   uv run python -m tinynav.rl.train_ppo --run tinynav_db/rl_runs/ppo_v3_gru --steps 30_000_000
   tensorboard --logdir tinynav_db/rl_runs --port 6006
-Curriculum: level up when the last update's episodes succeed >= 80% with <= 10% collisions.
+Curriculum: level up when episodes over the last 10 updates succeed >= 80% with <= 10% collisions,
+and only after LEVEL_COOLDOWN updates at the current level: episodes run up to 400 steps, so
+right after a level change the finished episodes still come from the easier level.
 Each env's rollout is one GRU sequence; minibatches split by env so sequences stay whole.
 """
 import argparse
@@ -26,6 +28,9 @@ CURRICULUM = [
     (7.0, (0.3, 0.8), (1.2, 2.8), 0.35),
     (8.0, (0.3, 1.0), (1.5, 3.5), 0.5),
 ]
+
+
+LEVEL_COOLDOWN = 20
 
 
 def set_level(sim, level):
@@ -74,6 +79,7 @@ def main():
     obs, priv = sim.observe(), sim.privileged()
     h = net.initial_state(N, dev)
     update, t0, step0 = 0, time.time(), step
+    window, level_since = [], 0  # per-update (reached, collided, episodes)
     while step < args.steps:
         stats = {"reached": 0, "collided": 0, "timeout": 0, "ret": [], "len": [], "trap_n": 0, "trap_ok": 0}
         h0 = h.clone()
@@ -144,9 +150,12 @@ def main():
                 writer.add_scalar(f"episode/{k}", v, step)
             if stats["trap_n"]:
                 writer.add_scalar("episode/trap_success_rate", trap, step)
-            if succ >= 0.8 and coll <= 0.1 and level < len(CURRICULUM) - 1:
-                level += 1
-                set_level(sim, level)
+        window = (window + [(stats["reached"], stats["collided"], n_ep)])[-10:]
+        w_ep = sum(w[2] for w in window)
+        if (update - level_since >= LEVEL_COOLDOWN and w_ep and sum(w[0] for w in window) / w_ep >= 0.8
+                and sum(w[1] for w in window) / w_ep <= 0.1 and level < len(CURRICULUM) - 1):
+            level, level_since = level + 1, update
+            set_level(sim, level)
         for k, v in (("curriculum_level", level), ("policy_loss", pg.item()), ("value_loss", vf.item()),
                      ("entropy", ent.item()), ("action_std", net.log_std.exp().mean().item()),
                      ("steps_per_sec", (step - step0) / (time.time() - t0))):
