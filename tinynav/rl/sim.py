@@ -34,6 +34,7 @@ class SimConfig:
     box_size: tuple = (0.3, 2.0)
     box_height: tuple = (0.2, 1.5)
     wall_prob: float = 0.3
+    density: tuple = (0.3, 1.0)  # per-env fraction of the n_boxes that are present
     # camera (RealSense infra1 on the debug bags)
     img_w: int = 544
     img_h: int = 640
@@ -140,7 +141,7 @@ class NavSim:
         b[:, :c.n_boxes, 2] = torch.where(wall & along, self._rand(k, c.n_boxes, lo=1.0, hi=2.5), torch.where(wall, 0.08, b[:, :c.n_boxes, 2]))
         b[:, :c.n_boxes, 3] = torch.where(wall & ~along, self._rand(k, c.n_boxes, lo=1.0, hi=2.5), torch.where(wall, 0.08, b[:, :c.n_boxes, 3]))
         b[:, :c.n_boxes, 4] = self._rand(k, c.n_boxes, lo=c.box_height[0], hi=c.box_height[1])
-        b[:, :c.n_boxes, 4] *= self._rand(k, c.n_boxes) < self._rand(k, 1, lo=0.3, hi=1.0)  # per-env density; height 0 = absent
+        b[:, :c.n_boxes, 4] *= self._rand(k, c.n_boxes) < self._rand(k, 1, lo=c.density[0], hi=c.density[1])  # height 0 = absent
         border = torch.tensor([[half + 0.1, 0, 0.1, half + 0.2], [-half - 0.1, 0, 0.1, half + 0.2],
                                [0, half + 0.1, half + 0.2, 0.1], [0, -half - 0.1, half + 0.2, 0.1]], device=self.device)
         b[:, c.n_boxes:, :4] = border
