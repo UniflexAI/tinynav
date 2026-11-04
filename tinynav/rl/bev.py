@@ -6,6 +6,8 @@ row 0 = farthest ahead (heading points up), column 0 = robot's left.
 """
 import numpy as np
 
+from tinynav.core.robot_specs import ROBOT_CONFIG
+
 BEV_SIZE = 64
 BEV_RES = 0.1  # 6.4m square; its diagonal (9.05m) still fits in the 10m planning grid at any yaw
 CHANNELS = ("height", "known")
@@ -13,15 +15,17 @@ OCC_THRESHOLD = 0.1  # same as ObstacleConfig.occ_threshold
 KNOWN_EPS = 0.02  # |occupancy| below this has decayed back to "never seen"
 
 
-def column_features(occupancy_grid, origin, resolution, ref_z):
+def column_features(occupancy_grid, origin, resolution, ref_z, z_max):
     """Collapse the 3D grid to per-column (height, known).
 
-    height: top of the highest occupied voxel relative to ref_z (camera height), or the grid
-    floor when nothing in the column is occupied. known: any voxel observed (hit or free).
+    height: top of the highest occupied voxel at or below z_max, relative to ref_z (camera
+    height), or the grid floor when nothing qualifies. z_max drops ceilings / overhangs the
+    robot passes under, otherwise the space under a table would read as a wall.
+    known: any voxel observed (hit or free).
     """
     z_top = origin[2] + (np.arange(occupancy_grid.shape[2]) + 1) * resolution - ref_z
     floor = origin[2] - ref_z
-    occ = occupancy_grid > OCC_THRESHOLD
+    occ = (occupancy_grid > OCC_THRESHOLD) & (z_top - resolution <= z_max)
     height = np.where(occ, z_top, floor).max(axis=2)
     known = (np.abs(occupancy_grid) > KNOWN_EPS).any(axis=2)
     return height.astype(np.float32), known.astype(np.float32), floor
@@ -33,9 +37,9 @@ def robot_frame_cells(size=BEV_SIZE, res=BEV_RES):
     return np.meshgrid(c, c, indexing="ij")
 
 
-def make_bev(occupancy_grid, origin, resolution, center_xy, yaw, ref_z):
+def make_bev(occupancy_grid, origin, resolution, center_xy, yaw, ref_z, z_max=ROBOT_CONFIG.obstacle.robot_z_top):
     """Sample the world-aligned grid into the robot frame. Returns [C, BEV_SIZE, BEV_SIZE]."""
-    height, known, floor = column_features(occupancy_grid, origin, resolution, ref_z)
+    height, known, floor = column_features(occupancy_grid, origin, resolution, ref_z, z_max)
     fwd, left = robot_frame_cells()
     c, s = np.cos(yaw), np.sin(yaw)
     wx = center_xy[0] + c * fwd - s * left
