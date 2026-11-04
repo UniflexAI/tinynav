@@ -10,20 +10,31 @@ import torch
 
 from tinynav.rl.policy import ActorCritic
 from tinynav.rl.sim import NavSim, SimConfig
-from tinynav.rl.train_ppo import CURRICULUM, load_weights, set_level
+from tinynav.rl.train_ppo import CURRICULUM, set_level
 
 
-def straight_to_goal(obs):
+class PolicyActor:
+    """Runs the recurrent policy, clearing its memory for envs that just finished an episode."""
+    def __init__(self, net, n):
+        self.net, self.h = net, net.initial_state(n, "cuda")
+
+    def __call__(self, obs, done):
+        self.h = self.h * (~done)[:, None]
+        act, self.h = self.net.act(obs["bev"], obs["vec"], self.h)
+        return act
+
+
+def straight_to_goal(obs, done):
     g = obs["vec"][:, :2]
     return torch.stack([torch.full_like(g[:, 0], 0.6), (torch.atan2(g[:, 1], g[:, 0]) * 1.5).clamp(-1, 1)], 1)
 
 
-def evaluate(act_fn, level, envs, seed, record=0, trap_prob=0.3):
+def evaluate(make_actor, level, envs, seed, record=0, trap_prob=0.3):
     """One episode per env; returns outcome rates (all, trap-only) and, for the first `record` envs, per-step frames."""
     sim = NavSim(SimConfig(num_envs=envs, trap_prob=trap_prob), device="cuda", seed=seed)
     set_level(sim, level)
     sim.reset()
-    obs = sim.observe()
+    obs, act_fn, done = sim.observe(), make_actor(envs), torch.zeros(envs, dtype=torch.bool, device=sim.device)
     outcome = torch.full((envs,), -1, device=sim.device)  # 0 reached, 1 collided, 2 timeout
     frames = [[] for _ in range(record)]
     trap = sim.trap.clone()
@@ -33,7 +44,7 @@ def evaluate(act_fn, level, envs, seed, record=0, trap_prob=0.3):
             if outcome[i] < 0:
                 frames[i].append((sim.pos[i].cpu().numpy(), float(sim.yaw[i]), sim.goal[i].cpu().numpy(), obs["bev"][i].cpu().numpy()))
         with torch.no_grad():
-            obs, _, done, info = sim.step(act_fn(obs))
+            obs, _, done, info = sim.step(act_fn(obs, done))
         first = done & (outcome < 0)
         outcome[first & info["reached"]] = 0
         outcome[first & info["collided"]] = 1
@@ -86,9 +97,9 @@ def main():
     args = ap.parse_args()
     net = ActorCritic().cuda().eval()
     ck = torch.load(args.ckpt, map_location="cuda")
-    load_weights(net, ck["model"])
+    net.load_state_dict(ck["model"])
     print(f"checkpoint step {ck['step']:,}, trained up to level {ck['level']}; evaluating level {args.level} on {args.envs} episodes")
-    for name, fn in (("policy", lambda o: net(o["bev"], o["vec"])), ("straight-to-goal", straight_to_goal)):
+    for name, fn in (("policy", lambda n: PolicyActor(net, n)), ("straight-to-goal", lambda n: straight_to_goal)):
         (succ, coll, tout), (ts, tc, tt), eps = evaluate(fn, args.level, args.envs, args.seed, record=4 if name == "policy" and args.gif else 0)
         print(f"{name:>17}: success {succ:.1%}  collision {coll:.1%}  timeout {tout:.1%}   | trap episodes: success {ts:.1%}  collision {tc:.1%}  timeout {tt:.1%}")
         if eps:

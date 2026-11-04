@@ -81,11 +81,25 @@ def test_policy_consumes_sim_obs():
     from tinynav.rl.policy import ActorCritic
     sim = NavSim(SimConfig(num_envs=4), device=DEVICE, seed=0)
     sim.reset()
-    obs = sim.observe()
+    obs, priv = sim.observe(), sim.privileged()
     net = ActorCritic().to(DEVICE)
-    act = net(obs["bev"], obs["vec"])
-    assert act.shape == (4, 2) and act.abs().max() <= 1
-    dist, val = net.dist_value(obs["bev"], obs["vec"])
+    act, h = net.act(obs["bev"], obs["vec"], net.initial_state(4, DEVICE))
+    assert act.shape == (4, 2) and act.abs().max() <= 1 and h.shape == (4, 256)
+    dist, val = net.heads(net.gru(net.encode(obs["bev"], obs["vec"]), h), priv)
     loss = -dist.log_prob(act).sum() + val.pow(2).sum()
     loss.backward()
     assert all(p.grad is not None for p in net.parameters())
+
+
+def test_geodesic_detours_around_wall():
+    sim = NavSim(SimConfig(num_envs=1, n_boxes=1, trap_prob=0.0), device=DEVICE, seed=0)
+    sim.reset()
+    sim.boxes[0, 0] = torch.tensor([0.0, 0.0, 0.1, 2.0, 1.0], device=DEVICE)  # wall x=0, y in [-2, 2]
+    sim.boxes[0, 1:] = 0
+    sim.goal[0] = torch.tensor([1.0, 0.0], device=DEVICE)
+    sim._geodesic(torch.tensor([0], device=DEVICE))
+    d = sim._geo_at(torch.tensor([0], device=DEVICE), torch.tensor([[-1.0, 0.0]], device=DEVICE))
+    straight, around = 2.0, 2 * math.hypot(1.0, 2.3)  # through vs around the inflated wall end
+    assert straight + 1.0 < float(d) < around + 0.6, float(d)
+    priv = sim.privileged()
+    assert priv.shape == (1, 9) and torch.isfinite(priv).all()

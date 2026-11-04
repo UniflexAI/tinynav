@@ -22,6 +22,10 @@ MAX_RAY_SAMPLES = 56  # past this many voxel steps a ray from the grid center is
 FAR_DEPTH = 65.5  # what the stereo depth reports for sky / out-of-range pixels
 N_TRAP = 3  # extra box slots for the wall / U-cup placed between start and goal
 NOVELTY_CELL = 0.5
+GEO_RES = 0.2  # geodesic distance field, training-only critic input
+GEO_INFLATE = 0.2  # robot half-width + margin
+GEO_UNREACHABLE = 30.0
+PRIV_DIM = 9  # geodesic distance here + its slope toward 8 robot-frame directions
 
 
 @dataclass
@@ -63,7 +67,9 @@ class SimConfig:
     goal_dist: tuple = (2.0, 8.0)
     goal_tol: float = 0.3
     clearance: float = 0.3
-    trap_prob: float = 0.3  # episodes with a wall (half of them a U-cup) between start and goal
+    trap_prob: float = 0.3  # episodes with a wall (or U-cup) between start and goal
+    trap_half: tuple = (1.5, 3.5)  # wall half-length range, grown by the curriculum
+    cup_prob: float = 0.5  # fraction of traps closed into a U around the start
     novelty_reward: float = 0.05  # per newly visited NOVELTY_CELL, keeps exploring when stuck
 
 
@@ -132,6 +138,12 @@ class NavSim:
         self.hist = torch.full((n, TRAIL_LEN, 2), math.nan, device=dev)  # own path, index = age in ticks
         self.nv = int(math.ceil((cfg.arena + 2) / NOVELTY_CELL))
         self.visited = torch.zeros((n, self.nv, self.nv), dtype=torch.bool, device=dev)
+        self.ng = int(math.ceil((cfg.arena + 2.4) / GEO_RES))
+        self.geo = torch.zeros((n, self.ng, self.ng), device=dev)
+        g = (torch.arange(self.ng, device=dev) + 0.5) * GEO_RES - self.ng * GEO_RES / 2
+        self.geo_x, self.geo_y = torch.meshgrid(g, g, indexing="ij")
+        a = torch.arange(8, device=dev) * math.pi / 4
+        self.priv_dirs = torch.stack([torch.cos(a), torch.sin(a)], -1)  # robot frame
 
     # ---------- randomness ----------
     def _rand(self, *shape, lo=0.0, hi=1.0):
@@ -186,7 +198,7 @@ class NavSim:
         dd, sign = d[ar, dom].abs(), d[ar, dom].sign()
         s_dom, s_lat, g_lat = s[ar, dom], s[ar, lat], g[ar, lat]
         dw = 0.8 + self._rand(k) * 0.5 * (dd - 0.8).clamp(min=0)
-        half = self._rand(k, lo=1.5, hi=3.5)
+        half = self._rand(k, lo=c.trap_half[0], hi=c.trap_half[1])
         lat_c = s_lat + self._rand(k) * (g_lat - s_lat)
         back = dw + self._rand(k, lo=0.3, hi=1.0)
         walls = torch.zeros((k, N_TRAP, 5), device=dev)
@@ -197,12 +209,50 @@ class NavSim:
         put(1, s_dom + sign * (dw - back / 2), lat_c + half, back / 2, torch.full_like(dw, 0.08))
         put(2, s_dom + sign * (dw - back / 2), lat_c - half, back / 2, torch.full_like(dw, 0.08))
         walls[:, 0, 4] = self._rand(k, lo=0.5, hi=1.5)
-        walls[:, 1:, 4] = (self._rand(k, 1) < 0.5) * walls[:, :1, 4]  # U-cup half the time
+        walls[:, 1:, 4] = (self._rand(k, 1) < c.cup_prob) * walls[:, :1, 4]
         walls[:, :, 4] *= ((self._rand(k) < c.trap_prob) & (dd > 1.5))[:, None]
         ok = ~self._footprint_hits(walls, s, self.yaw[idx], c.clearance).any(1) & self._point_clear(walls, g, c.clearance + 0.2)
         walls[:, :, 4] *= ok[:, None]
         self.boxes[idx, -N_TRAP:] = walls
         self.trap[idx] = walls[:, 0, 4] > 0
+
+    def _geodesic(self, idx):
+        """Shortest-path distance to the goal over the inflated boxes (8-connected relaxation).
+        Training-only: feeds the critic and rejects unsolvable scenes, never the policy."""
+        k, dev = len(idx), self.device
+        b = self.boxes[idx]
+        occ = torch.zeros((k, self.ng, self.ng), dtype=torch.bool, device=dev)
+        for j in range(b.shape[1]):
+            bj = b[:, j, :, None, None]
+            occ |= ((self.geo_x - bj[:, 0]).abs() <= bj[:, 2] + GEO_INFLATE) & ((self.geo_y - bj[:, 1]).abs() <= bj[:, 3] + GEO_INFLATE) & (bj[:, 4] > 0)
+        gi = ((self.goal[idx] + self.ng * GEO_RES / 2) / GEO_RES).long().clamp(0, self.ng - 1)
+        dist = torch.full((k, self.ng, self.ng), math.inf, device=dev)
+        dist[torch.arange(k, device=dev), gi[:, 0], gi[:, 1]] = 0
+        steps = [(dx, dy, GEO_RES * math.hypot(dx, dy)) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy]
+        for it in range(4 * self.ng):
+            p = torch.nn.functional.pad(dist, (1, 1, 1, 1), value=math.inf)
+            nd = dist
+            for dx, dy, cost in steps:
+                nd = torch.minimum(nd, p[:, 1 + dx:1 + dx + self.ng, 1 + dy:1 + dy + self.ng] + cost)
+            nd = torch.where(occ, math.inf, nd)
+            if it % 16 == 15 and torch.equal(nd, dist):
+                break
+            dist = nd
+        self.geo[idx] = dist.clamp(max=GEO_UNREACHABLE)
+
+    def _geo_at(self, idx, p):
+        i = ((p + self.ng * GEO_RES / 2) / GEO_RES).long().clamp(0, self.ng - 1)
+        return self.geo[idx[:, None], i[..., 0], i[..., 1]] if p.dim() == 3 else self.geo[idx, i[:, 0], i[:, 1]]
+
+    def privileged(self):
+        """Critic-only observation: geodesic distance here and its slope toward 8 directions 0.4m away."""
+        idx = torch.arange(self.cfg.num_envs, device=self.device)
+        c, s = torch.cos(self.yaw)[:, None], torch.sin(self.yaw)[:, None]
+        d = self.priv_dirs
+        pts = self.pos[:, None] + 0.4 * torch.stack([c * d[:, 0] - s * d[:, 1], s * d[:, 0] + c * d[:, 1]], -1)
+        here = self._geo_at(idx, self.pos)
+        slope = ((self._geo_at(idx, pts) - here[:, None]) / 0.4).clamp(-1.5, 1.5)
+        return torch.cat([(here / 10).clamp(max=3)[:, None], slope], 1)
 
     def _visit(self, idx):
         """Mark the current novelty cell; returns True where it was not visited before."""
@@ -235,6 +285,13 @@ class NavSim:
                 self._make_boxes(todo)  # too crowded, regenerate
         assert len(todo) == 0, "could not place start/goal"
         self._add_traps(idx)
+        self._geodesic(idx)
+        ok = self._geo_at(idx, self.pos[idx]) < GEO_UNREACHABLE
+        if not ok.all():  # walls closed the start off from the goal; draw those scenes again
+            self.reset(idx[~ok])
+            idx = idx[ok]
+            if len(idx) == 0:
+                return
         k = len(idx)
         self.cam_h[idx] = self._rand(k, lo=c.cam_height[0], hi=c.cam_height[1])
         self.pitch[idx] = torch.deg2rad(self._rand(k, lo=c.cam_pitch_deg[0], hi=c.cam_pitch_deg[1]))
