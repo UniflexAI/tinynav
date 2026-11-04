@@ -60,3 +60,17 @@ def test_sim_step_and_reset():
         done_any |= bool(done.any())
     assert done_any  # driving straight for 40 steps should hit something or a border
     assert (sim.steps < 40).any()  # finished envs were reset
+
+
+def test_policy_consumes_sim_obs():
+    from tinynav.rl.policy import ActorCritic
+    sim = NavSim(SimConfig(num_envs=4), device=DEVICE, seed=0)
+    sim.reset()
+    obs = sim.observe()
+    net = ActorCritic().to(DEVICE)
+    act = net(obs["bev"], obs["vec"])
+    assert act.shape == (4, 2) and act.abs().max() <= 1
+    dist, val = net.dist_value(obs["bev"], obs["vec"])
+    loss = -dist.log_prob(act).sum() + val.pow(2).sum()
+    loss.backward()
+    assert all(p.grad is not None for p in net.parameters())
