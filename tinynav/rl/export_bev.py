@@ -15,7 +15,7 @@ from rosidl_runtime_py.utilities import get_message
 from tinynav.core.math_utils import msg2np
 from tinynav.core.planning_node import update_occupancy_grid
 from tinynav.core.robot_specs import ROBOT_CONFIG
-from tinynav.rl.bev import CHANNELS, GRID_RES, GRID_SHAPE, RAY_STEP, camera_yaw, make_bev, to_robot_frame
+from tinynav.rl.bev import CHANNELS, GRID_RES, GRID_SHAPE, RAY_STEP, TRAIL_LEN, camera_yaw, make_bev, to_robot_frame, trail_channel
 
 DEPTH, ODOM, GOAL, IMAGE = "/slam/depth", "/slam/odometry_visual", "/control/target_pose", "/camera/camera/infra1/image_rect_raw"
 INFO_TOPICS = ("/camera/camera/infra2/camera_info", "/camera/camera/infra1/camera_info")
@@ -42,7 +42,7 @@ def export(bag, every):
     bridge = CvBridge()
     grid, origin = np.zeros(GRID_SHAPE), np.array(GRID_SHAPE) * GRID_RES / -2.
     K, goal, image, last = None, None, None, None
-    depths, odoms = {}, {}
+    depths, odoms, hist = {}, {}, []
     out = {k: [] for k in ("bev", "goal", "vel", "stamp", "image")}
     frame = 0
     for topic, msg in read_bag(bag):
@@ -72,10 +72,12 @@ def export(bag, every):
             vel = np.array([to_robot_frame(center, last[1], last[2])[0] / dt,
                             np.angle(np.exp(1j * (yaw - last[2]))) / dt], dtype=np.float32)
         last = (t, center, yaw)
+        hist = [center] + hist[:TRAIL_LEN - 1]
         frame += 1
         if frame % every:
             continue
-        out["bev"].append(make_bev(grid, origin, GRID_RES, center, yaw, ref_z=T[2, 3]))
+        trail = trail_channel(np.array(hist), np.arange(len(hist)), center, yaw)
+        out["bev"].append(np.concatenate([make_bev(grid, origin, GRID_RES, center, yaw, ref_z=T[2, 3]), trail[None]]))
         out["goal"].append(to_robot_frame(goal, center, yaw) if goal is not None else np.full(2, np.nan, np.float32))
         out["vel"].append(vel)
         out["stamp"].append(t)

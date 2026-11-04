@@ -14,19 +14,21 @@ from dataclasses import dataclass
 import torch
 
 from tinynav.core.robot_specs import ROBOT_CONFIG
-from tinynav.rl.bev import (BEV_SIZE, ELEV_RANGE, GRID_RES, GRID_SHAPE, GROUND_MAX, GROUND_PRIOR, GROUND_RING, KNOWN_EPS,
-                            OCC_THRESHOLD, RAY_STEP, robot_frame_cells)
+from tinynav.rl.bev import (BEV_RES, BEV_SIZE, ELEV_RANGE, GRID_RES, GRID_SHAPE, GROUND_MAX, GROUND_PRIOR, GROUND_RING,
+                            KNOWN_EPS, OCC_THRESHOLD, RAY_STEP, TRAIL_LEN, robot_frame_cells)
 
 GX, GY, GZ = GRID_SHAPE
 MAX_RAY_SAMPLES = 56  # past this many voxel steps a ray from the grid center is outside the grid
 FAR_DEPTH = 65.5  # what the stereo depth reports for sky / out-of-range pixels
+N_TRAP = 3  # extra box slots for the wall / U-cup placed between start and goal
+NOVELTY_CELL = 0.5
 
 
 @dataclass
 class SimConfig:
     num_envs: int = 256
     dt: float = 0.15  # planner runs at the depth rate, ~7Hz on the debug bags
-    max_steps: int = 300
+    max_steps: int = 400  # room to back out of a dead end
     env_chunk: int = 32  # envs per raycast chunk, bounds GPU memory
     # world
     arena: float = 16.0
@@ -61,6 +63,8 @@ class SimConfig:
     goal_dist: tuple = (2.0, 8.0)
     goal_tol: float = 0.3
     clearance: float = 0.3
+    trap_prob: float = 0.3  # episodes with a wall (half of them a U-cup) between start and goal
+    novelty_reward: float = 0.05  # per newly visited NOVELTY_CELL, keeps exploring when stuck
 
 
 def _ray_voxels(start, end, valid, o3):
@@ -113,7 +117,7 @@ class NavSim:
         self.grid = torch.zeros((n, GX, GY, GZ), device=dev)
         self.base = torch.zeros((n, 3), device=dev)  # world position of global voxel (0,0,0)
         self.o = torch.zeros((n, 2), dtype=torch.long, device=dev)  # grid window origin, global voxels
-        self.boxes = torch.zeros((n, cfg.n_boxes + 4, 5), device=dev)  # cx, cy, hx, hy, height
+        self.boxes = torch.zeros((n, cfg.n_boxes + 4 + N_TRAP, 5), device=dev)  # cx, cy, hx, hy, height
         self.pos = torch.zeros((n, 2), device=dev)
         self.yaw = torch.zeros(n, device=dev)
         self.vel = torch.zeros((n, 2), device=dev)
@@ -123,7 +127,11 @@ class NavSim:
         self.cam_h = torch.zeros(n, device=dev)
         self.pitch = torch.zeros(n, device=dev)
         self.steps = torch.zeros(n, dtype=torch.long, device=dev)
-        self.prev_dist = torch.zeros(n, device=dev)
+        self.best_dist = torch.zeros(n, device=dev)
+        self.trap = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.hist = torch.full((n, TRAIL_LEN, 2), math.nan, device=dev)  # own path, index = age in ticks
+        self.nv = int(math.ceil((cfg.arena + 2) / NOVELTY_CELL))
+        self.visited = torch.zeros((n, self.nv, self.nv), dtype=torch.bool, device=dev)
 
     # ---------- randomness ----------
     def _rand(self, *shape, lo=0.0, hi=1.0):
@@ -132,7 +140,7 @@ class NavSim:
     # ---------- world ----------
     def _make_boxes(self, idx):
         c, k = self.cfg, len(idx)
-        b = torch.zeros((k, c.n_boxes + 4, 5), device=self.device)
+        b = torch.zeros((k, c.n_boxes + 4 + N_TRAP, 5), device=self.device)
         half = c.arena / 2
         b[:, :c.n_boxes, 0:2] = self._rand(k, c.n_boxes, 2, lo=-half, hi=half)
         b[:, :c.n_boxes, 2:4] = self._rand(k, c.n_boxes, 2, lo=c.box_size[0], hi=c.box_size[1]) / 2
@@ -144,8 +152,8 @@ class NavSim:
         b[:, :c.n_boxes, 4] *= self._rand(k, c.n_boxes) < self._rand(k, 1, lo=c.density[0], hi=c.density[1])  # height 0 = absent
         border = torch.tensor([[half + 0.1, 0, 0.1, half + 0.2], [-half - 0.1, 0, 0.1, half + 0.2],
                                [0, half + 0.1, half + 0.2, 0.1], [0, -half - 0.1, half + 0.2, 0.1]], device=self.device)
-        b[:, c.n_boxes:, :4] = border
-        b[:, c.n_boxes:, 4] = 1.0
+        b[:, c.n_boxes:c.n_boxes + 4, :4] = border
+        b[:, c.n_boxes:c.n_boxes + 4, 4] = 1.0
         self.boxes[idx] = b
 
     def _footprint_hits(self, boxes, pos, yaw, margin=0.0):
@@ -166,6 +174,42 @@ class NavSim:
         d = (p[:, None] - boxes[..., :2]).abs()
         inside = (d[..., 0] <= boxes[..., 2] + margin) & (d[..., 1] <= boxes[..., 3] + margin) & (boxes[..., 4] > 0)
         return ~inside.any(1)
+
+    def _add_traps(self, idx):
+        """Axis-aligned wall across the start->goal line, half of them closed into a U around the start."""
+        c, k, dev = self.cfg, len(idx), self.device
+        s, g = self.pos[idx], self.goal[idx]
+        d = g - s
+        ax = (d[:, 0].abs() >= d[:, 1].abs()).long()  # 1: dominant axis is x
+        dom, lat = 1 - ax, ax  # column index of dominant / lateral coordinate
+        ar = torch.arange(k, device=dev)
+        dd, sign = d[ar, dom].abs(), d[ar, dom].sign()
+        s_dom, s_lat, g_lat = s[ar, dom], s[ar, lat], g[ar, lat]
+        dw = 0.8 + self._rand(k) * 0.5 * (dd - 0.8).clamp(min=0)
+        half = self._rand(k, lo=1.5, hi=3.5)
+        lat_c = s_lat + self._rand(k) * (g_lat - s_lat)
+        back = dw + self._rand(k, lo=0.3, hi=1.0)
+        walls = torch.zeros((k, N_TRAP, 5), device=dev)
+        def put(w, along, lateral, h_along, h_lat):
+            walls[ar, w, dom], walls[ar, w, lat] = along, lateral
+            walls[ar, w, 2 + dom], walls[ar, w, 2 + lat] = h_along, h_lat
+        put(0, s_dom + sign * dw, lat_c, torch.full_like(dw, 0.08), half)
+        put(1, s_dom + sign * (dw - back / 2), lat_c + half, back / 2, torch.full_like(dw, 0.08))
+        put(2, s_dom + sign * (dw - back / 2), lat_c - half, back / 2, torch.full_like(dw, 0.08))
+        walls[:, 0, 4] = self._rand(k, lo=0.5, hi=1.5)
+        walls[:, 1:, 4] = (self._rand(k, 1) < 0.5) * walls[:, :1, 4]  # U-cup half the time
+        walls[:, :, 4] *= ((self._rand(k) < c.trap_prob) & (dd > 1.5))[:, None]
+        ok = ~self._footprint_hits(walls, s, self.yaw[idx], c.clearance).any(1) & self._point_clear(walls, g, c.clearance + 0.2)
+        walls[:, :, 4] *= ok[:, None]
+        self.boxes[idx, -N_TRAP:] = walls
+        self.trap[idx] = walls[:, 0, 4] > 0
+
+    def _visit(self, idx):
+        """Mark the current novelty cell; returns True where it was not visited before."""
+        cell = ((self.pos[idx] + self.cfg.arena / 2 + 1) / NOVELTY_CELL).long().clamp(0, self.nv - 1)
+        new = ~self.visited[idx, cell[:, 0], cell[:, 1]]
+        self.visited[idx, cell[:, 0], cell[:, 1]] = True
+        return new
 
     def reset(self, idx=None):
         c = self.cfg
@@ -190,6 +234,7 @@ class NavSim:
             if attempt % 10 == 9:
                 self._make_boxes(todo)  # too crowded, regenerate
         assert len(todo) == 0, "could not place start/goal"
+        self._add_traps(idx)
         k = len(idx)
         self.cam_h[idx] = self._rand(k, lo=c.cam_height[0], hi=c.cam_height[1])
         self.pitch[idx] = torch.deg2rad(self._rand(k, lo=c.cam_pitch_deg[0], hi=c.cam_pitch_deg[1]))
@@ -202,7 +247,11 @@ class NavSim:
         # real grid starts centered on the first camera pose: origin = cam - shape*res/2
         self.base[idx] = cam - torch.tensor(GRID_SHAPE, device=self.device) * GRID_RES / 2
         self.o[idx] = 0
-        self.prev_dist[idx] = (self.goal[idx] - self.pos[idx]).norm(dim=1)
+        self.best_dist[idx] = (self.goal[idx] - self.pos[idx]).norm(dim=1)
+        self.hist[idx] = math.nan
+        self.hist[idx, 0] = self.pos[idx]
+        self.visited[idx] = False
+        self._visit(idx)
         self._sense(idx)
 
     # ---------- perception ----------
@@ -256,8 +305,9 @@ class NavSim:
         k, dev = len(idx), self.device
         origin = self.base[idx] + torch.cat([self.o[idx], torch.zeros((k, 1), dtype=torch.long, device=dev)], 1) * GRID_RES
         pts = cam[:, None] + torch.einsum("kij,kpj->kpi", R, self.pix_dir[None] * depth[..., None])
-        start = torch.floor((cam - origin) / GRID_RES).int()  # [k,3]
-        end = torch.floor((pts - origin[:, None]) / GRID_RES).nan_to_num(0).clamp(-10**6, 10**6).int()
+        # float64: the grid origin is cam - shape*res/2, so the camera sits exactly on a voxel edge
+        start = torch.floor((cam.double() - origin.double()) / GRID_RES).int()  # [k,3]
+        end = torch.floor((pts.double() - origin[:, None].double()) / GRID_RES).nan_to_num(0).clamp(-10**6, 10**6).int()
         o3 = torch.cat([self.o[idx], torch.zeros((k, 1), dtype=torch.long, device=dev)], 1).int()
         voxels = _ray_voxels_compiled if dev.type == "cuda" else _ray_voxels
         fi, inb, fe, e_inb = voxels(start, end, torch.isfinite(depth), o3)
@@ -300,7 +350,21 @@ class NavSim:
         ground = torch.nanmedian(torch.where(cand, h, math.nan).view(k, -1), dim=1).values  # lower median
         ground = torch.where(cand.view(k, -1).sum(1) >= 10, ground, GROUND_PRIOR)
         elev = torch.where(hit, (h - ground[:, None, None]).clamp(*ELEV_RANGE), 0.0)
-        return torch.stack([elev, torch.where(inside, kn, 0.0)], 1)
+        return torch.stack([elev, torch.where(inside, kn, 0.0), self._trail(idx)], 1)
+
+    def _trail(self, idx):
+        """Port of bev.trail_channel."""
+        k = len(idx)
+        rel = self.hist[idx] - self.pos[idx, None]
+        c, s = torch.cos(self.yaw[idx])[:, None], torch.sin(self.yaw[idx])[:, None]
+        fwd, left = c * rel[..., 0] + s * rel[..., 1], -s * rel[..., 0] + c * rel[..., 1]
+        i = torch.floor(BEV_SIZE / 2 - fwd / BEV_RES).nan_to_num(-1).long()
+        j = torch.floor(BEV_SIZE / 2 - left / BEV_RES).nan_to_num(-1).long()
+        ok = (i >= 0) & (i < BEV_SIZE) & (j >= 0) & (j < BEV_SIZE)
+        val = (1 - torch.arange(TRAIL_LEN, device=self.device) / TRAIL_LEN).expand(k, -1) * ok
+        trail = torch.zeros((k, BEV_SIZE * BEV_SIZE), device=self.device)
+        trail.scatter_reduce_(1, torch.where(ok, i * BEV_SIZE + j, 0), val, reduce="amax")
+        return torch.nn.functional.max_pool2d(trail.view(k, 1, BEV_SIZE, BEV_SIZE), 3, 1, 1)[:, 0]
 
     def unrolled_grid(self, i):
         """Env i's grid in the planner's local layout plus its world origin (for tests / numpy make_bev)."""
@@ -334,15 +398,19 @@ class NavSim:
         self.yaw = torch.atan2(torch.sin(self.yaw), torch.cos(self.yaw))
         self.steps += 1
 
+        self.hist = torch.cat([self.pos[:, None], self.hist[:, :-1]], 1)
+
         dist = (self.goal - self.pos).norm(dim=1)
         collided = self._footprint_hits(self.boxes, self.pos, self.yaw).any(1)
         reached = dist < c.goal_tol
         timeout = self.steps >= c.max_steps
-        reward = (self.prev_dist - dist) - 0.005 - 0.01 * ((action - self.last_action) ** 2).sum(1)
+        # progress only counts new closest approaches, so backing out of a dead end costs nothing
+        reward = (self.best_dist - dist).clamp(min=0) - 0.005 - 0.01 * ((action - self.last_action) ** 2).sum(1)
+        reward += c.novelty_reward * self._visit(torch.arange(c.num_envs, device=self.device))
         reward += 10.0 * reached - 10.0 * collided
-        self.prev_dist, self.last_action = dist, action
+        self.best_dist, self.last_action = torch.minimum(self.best_dist, dist), action
         done = collided | reached | timeout
-        info = {"collided": collided, "reached": reached, "timeout": timeout & ~collided & ~reached}
+        info = {"collided": collided, "reached": reached, "timeout": timeout & ~collided & ~reached, "trap": self.trap.clone()}
         self._sense(torch.nonzero(~done).squeeze(1))
         self.reset(torch.nonzero(done).squeeze(1))
         return self.observe(), reward, done, info

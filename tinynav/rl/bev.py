@@ -16,7 +16,8 @@ from tinynav.core.robot_specs import ROBOT_CONFIG
 GRID_SHAPE, GRID_RES, RAY_STEP = (100, 100, 40), 0.1, 10  # keep in sync with PlanningNode
 BEV_SIZE = 64
 BEV_RES = 0.1  # 6.4m square; its diagonal (9.05m) still fits in the 10m planning grid at any yaw
-CHANNELS = ("height", "known")
+CHANNELS = ("height", "known", "trail")
+TRAIL_LEN = 400  # planner ticks of own-path memory, ~60s at the ~7Hz depth rate
 OCC_THRESHOLD = 0.1  # same as ObstacleConfig.occ_threshold
 KNOWN_EPS = 0.02  # |occupancy| below this has decayed back to "never seen"
 GROUND_RING = (0.3, 1.5)  # ground hits cover 90%+ of cells this close, so its median is stable
@@ -48,7 +49,8 @@ def robot_frame_cells(size=BEV_SIZE, res=BEV_RES):
 
 
 def make_bev(occupancy_grid, origin, resolution, center_xy, yaw, ref_z, z_max=ROBOT_CONFIG.obstacle.robot_z_top):
-    """Sample the world-aligned grid into the robot frame. Returns [C, BEV_SIZE, BEV_SIZE]."""
+    """Sample the world-aligned grid into the robot frame. Returns the perception channels
+    (height, known) as [2, BEV_SIZE, BEV_SIZE]; the policy input appends trail_channel."""
     height, known, floor = column_features(occupancy_grid, origin, resolution, ref_z, z_max)
     fwd, left = robot_frame_cells()
     c, s = np.cos(yaw), np.sin(yaw)
@@ -67,6 +69,20 @@ def make_bev(occupancy_grid, origin, resolution, center_xy, yaw, ref_z, z_max=RO
     return np.stack([elev, np.where(inside, known[ix, iy], 0.0)]).astype(np.float32)
 
 
+def trail_channel(hist_xy, hist_age, center_xy, yaw):
+    """Where the robot itself has been: 1 - age/TRAIL_LEN at each visited cell (newest wins),
+    dilated by one cell. hist_xy [H, 2] past control-center positions, hist_age [H] in ticks.
+    Gives the memoryless policy a record of which way it already tried."""
+    rel = to_robot_frame(hist_xy.T, center_xy, yaw).T
+    i = np.floor(BEV_SIZE / 2 - rel[:, 0] / BEV_RES).astype(int)
+    j = np.floor(BEV_SIZE / 2 - rel[:, 1] / BEV_RES).astype(int)
+    ok = (i >= 0) & (i < BEV_SIZE) & (j >= 0) & (j < BEV_SIZE) & (hist_age < TRAIL_LEN)
+    trail = np.zeros((BEV_SIZE, BEV_SIZE), np.float32)
+    np.maximum.at(trail, (i[ok], j[ok]), (1 - hist_age[ok] / TRAIL_LEN).astype(np.float32))
+    p = np.pad(trail, 1)
+    return np.max([p[a:a + BEV_SIZE, b:b + BEV_SIZE] for a in range(3) for b in range(3)], axis=0)
+
+
 def camera_yaw(T):
     """World yaw of the robot heading; the camera optical axis (+z) points forward."""
     return float(np.arctan2(T[1, 2], T[0, 2]))
@@ -76,4 +92,4 @@ def to_robot_frame(p_world, center_xy, yaw):
     """World xy point -> (forward, left) in the robot frame."""
     dx, dy = p_world[0] - center_xy[0], p_world[1] - center_xy[1]
     c, s = np.cos(yaw), np.sin(yaw)
-    return np.array([c * dx + s * dy, -s * dx + c * dy], dtype=np.float32)
+    return np.array([c * dx + s * dy, -s * dx + c * dy], dtype=np.float32)  # also works on [2, H]
