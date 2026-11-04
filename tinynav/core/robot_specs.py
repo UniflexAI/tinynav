@@ -147,13 +147,18 @@ G1_CONFIG = RobotConfig(
 )
 
 #: This rig's measured camera offset, over the robot type's. `forward_m` / `left_m`
-#: in metres, in the body frame above; any other key is the writer's own record.
+#: in metres, in the body frame above; `up_m` the camera's height above the floor when
+#: `floor_at` says it was measured from the floor; any other key is the writer's own record.
 CAMERA_OFFSET_PATH = '/tinynav/tinynav_db/calib/camera_offset.json'
+#: How far above the floor the obstacle band starts once the camera's height is
+#: measured: what go2's -0.45 left on 65, whose camera is 0.515 m up (2026-11-04).
+FLOOR_CLEARANCE_M = 0.065
 
 
 def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
-    """`config` with the camera offset from `path`, or `config` itself when there is
-    no file or it cannot be read. An unreadable one is said on stderr, because every
+    """`config` with the camera offset from `path` and, when its height was measured
+    from the floor, the obstacle band's bottom FLOOR_CLEARANCE_M above that floor;
+    `config` itself when there is no file or it cannot be read. An unreadable one is said on stderr, because every
     process that plans imports this and none of them should fail to start over it."""
     try:
         with open(path) as f:
@@ -162,8 +167,12 @@ def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
         return config
     try:
         doc = json.loads(text)
-        return replace(config, camera_fwd=float(doc['forward_m']),
-                       camera_left=float(doc['left_m']))
+        out = replace(config, camera_fwd=float(doc['forward_m']),
+                      camera_left=float(doc['left_m']))
+        if 'floor_at' in doc:
+            out = replace(out, obstacle=replace(
+                out.obstacle, robot_z_bottom=-(float(doc['up_m']) - FLOOR_CLEARANCE_M)))
+        return out
     except (KeyError, TypeError, ValueError) as e:
         print(f"robot_specs: ignoring {path}, not a camera offset ({e!r})", file=sys.stderr)
         return config

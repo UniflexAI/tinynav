@@ -20,6 +20,17 @@ def test_a_measurement_moves_the_camera_and_nothing_else(tmp_path):
     assert got.name == GO2_CONFIG.name
 
 
+def test_a_floor_height_puts_the_band_bottom_above_that_floor(tmp_path):
+    path = tmp_path / 'camera_offset.json'
+    doc = {'forward_m': 0.3, 'left_m': 0.0, 'up_m': 0.6}
+    path.write_text(json.dumps(doc))
+    assert with_measured_camera(GO2_CONFIG, path).obstacle == GO2_CONFIG.obstacle
+    path.write_text(json.dumps({**doc, 'floor_at': '2026-11-04T08:04:32'}))
+    got = with_measured_camera(GO2_CONFIG, path).obstacle
+    assert got.robot_z_bottom == pytest.approx(-(0.6 - robot_specs.FLOOR_CLEARANCE_M))
+    assert replace(got, robot_z_bottom=GO2_CONFIG.obstacle.robot_z_bottom) == GO2_CONFIG.obstacle
+
+
 @pytest.mark.parametrize('body', ['{"forward_m": 0.3}', 'not json', '{"forward_m": "x", "left_m": 0}'])
 def test_an_unreadable_file_is_the_type_default_and_says_so(tmp_path, capsys, body):
     path = tmp_path / 'camera_offset.json'
