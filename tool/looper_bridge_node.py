@@ -15,6 +15,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
 from tinynav.core.math_utils import np2msg, pose_msg2np
@@ -47,6 +48,10 @@ class LooperBridgeNode(Node):
 
         self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
+        # The Looper latches its status, so the copy is latched too.
+        self.vio_status_pub = self.create_publisher(String, "/slam/vio_status", self.tf_static_qos)
+        self.vio_status_sub = self.create_subscription(
+            String, "/camera/camera/vio_status", self.vio_status_pub.publish, self.tf_static_qos)
 
         self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
