@@ -299,6 +299,17 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     updated_origin = old_origin + shift_voxels * resolution
     return rolled, updated_origin
 
+def update_occupancy_grid(occupancy_grid, origin, depth, T, K, resolution, step):
+    """Recenter the rolling grid on the camera, then fuse one depth frame. Returns (grid, origin)."""
+    grid_shape = occupancy_grid.shape
+    center = origin + np.array(grid_shape) * resolution / 2
+    if np.linalg.norm(T[:3, 3] - center) > .1:
+        new_origin = T[:3, 3] - np.array(grid_shape) * resolution / 2
+        occupancy_grid, origin = roll_occupancy_grid(occupancy_grid, origin, new_origin, resolution)
+    new_occ = run_raycasting_loopy(depth, T, grid_shape, K[0, 0], K[1, 1], K[0, 2], K[1, 2], origin, step, resolution)
+    occupancy_grid = np.clip(occupancy_grid * 0.99 + new_occ, -0.2, 0.2)
+    return occupancy_grid, origin
+
 
 def generate_trajectories(init_p, init_q):
     trajectories, params = generate_trajectory_library_3d(
@@ -338,8 +349,8 @@ class PlanningNode(Node):
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
-        self.grid_shape = (100, 100, 10)
-        self.resolution = 0.05
+        self.grid_shape = (100, 100, 10)  # 10m x 10m x 1m
+        self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
         self.occupancy_grid = np.zeros(self.grid_shape)
@@ -525,19 +536,6 @@ class PlanningNode(Node):
         velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
         self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
 
-    def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
-        center = self.origin + np.array(self.grid_shape) * self.resolution / 2
-        robot_pos = T[:3, 3]
-        delta = robot_pos - center
-        if np.linalg.norm(delta) > .1:
-            new_center = robot_pos
-            new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
-            self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
-        new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-        self.occupancy_grid *= 0.99
-        self.occupancy_grid += new_occ
-        self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
-
     def trajectory_cost(self, traj, param, score, target_pose, should_reverse):
         # predefined backward trajectory penalty
         is_backward_traj = param[0] < 0.0
@@ -593,11 +591,10 @@ class PlanningNode(Node):
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T,_ = msg2np(odom_msg)
             self.update_velocity_estimate(T, stamp)
-            fx, fy = self.K[0, 0], self.K[1, 1]
-            cx, cy = self.K[0, 2], self.K[1, 2]
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
+            self.occupancy_grid, self.origin = update_occupancy_grid(
+                self.occupancy_grid, self.origin, depth, T, self.K, self.resolution, self.step)
 
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 

@@ -14,7 +14,7 @@ class ObstacleConfig:
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.2
-    dilation_cells: int = 2
+    dilation_cells: int = 1  # cells at the 0.1m planning grid
 
 
 @dataclass
