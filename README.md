@@ -37,7 +37,7 @@ We’ve launched our bounty program! Check the [list](https://docs.google.com/sp
 # Optional feature matching
 
 LightGlue remains the default. An experimental [FlexGlue ONNX option](docs/flexglue.md)
-is available for mapping and relocalization, with offline corridor comparison GIFs.
+is available for mapping and relocalization, with offline corridor measurements.
 
 # Stereo Cameras
 

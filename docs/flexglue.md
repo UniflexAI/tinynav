@@ -57,10 +57,13 @@ Each matcher uses the same target-map VLAD Top-3 candidates and existing
 `rerank_by_pnp_inliers` acceptance rules. The target map's vocabulary is used to
 encode the query VLAD from stored patch tokens.
 
-| Matcher | Consistent with map reference | Inconsistent accepted | Not accepted |
-|---|---:|---:|---:|
-| LightGlue TensorRT | 31 | 24 | 9 |
-| FlexGlue ONNX CUDA | 31 | 2 | 31 |
+| Metric | LightGlue (TensorRT) | FlexGlue (ONNX CUDA) | Change |
+|---|---:|---:|---|
+| Map-reference-consistent poses | 31 / 64 | 31 / 64 | Same total, different requests |
+| Accepted map-reference mismatches | 24 / 64 | 2 / 64 | 91.7% fewer mismatches |
+| Requests with no accepted pose | 9 / 64 | 31 / 64 | More conservative acceptance |
+| Median pair-matching latency | 3.3 ms | 122.3 ms | 37.1x slower |
+| Median summed Top-3 pipeline cost | 41.6 ms | 433.5 ms | 10.4x slower |
 
 Consistency means position error below 0.75 m and full rotation error below
 10 degrees against the saved query keyframe pose, transformed to the common map
@@ -73,56 +76,11 @@ On the shared RTX 3070 Laptop GPU, median match-only latency was 3.3 ms for the
 existing TensorRT LightGlue and 122.3 ms for official FlexGlue ONNX CUDA. Summed
 Top-3 pipeline costs were 41.6 ms and 433.5 ms. Reference descriptors were cached;
 FlexGlue includes one query DINOv3 description in the summed cost. The latter
-excludes live DINOv2 image encoding, video decoding, ROS and planning. Individual
-GIF labels show timings for that illustrated pair, not the dataset median.
+excludes live DINOv2 image encoding, video decoding, ROS and planning.
 
 These correlated, deliberately challenging samples do not estimate a normal
 operating error rate. No continuous ROS mission, rear-camera or Orin validation
 is claimed. This PR does not change online localization acceptance thresholds.
-
-## GIFs and reproduction
-
-Each animation progressively reveals raw matches for a fixed pair; it is not
-live navigation or robot motion. Lines are not PnP-inlier labels. Each folder
-includes a PNG poster and JSON measurements alongside the GIF.
-
-### Similar corridor, wrong place rejected
-
-![Repeated corridor comparison](media/flexglue/corridor-rejection/comparison.gif)
-
-### Both pass PnP, different pose errors
-
-![Pose estimate comparison](media/flexglue/pose-comparison/comparison.gif)
-
-### A valid localization missed by FlexGlue
-
-![Missed localization comparison](media/flexglue/missed-localization/comparison.gif)
-
-Generate these materials read-only from your own saved maps:
-
-```bash
-python -m tool.benchmark.compare_matchers \
-  --maps_root /path/to/maps \
-  --reference 9/929497470776 --query 3/228997459025 \
-  --transforms /path/to/optimization.json \
-  --output /tmp/corridor-comparison
-```
-
-`--transforms` accepts an `optimized_transforms` object or a map-name-to-4x4-matrix
-JSON object. It puts both maps into a common coordinate frame for PnP and error
-measurement. Omit it for same-map tests; cross-map pose errors are unavailable
-without a shared frame. The tool opens feature/depth shelves and videos read-only,
-clears the LightGlue inference result cache, warms both matchers and measures
-seven actual calls per pair. Query and reference images retain their own sizes.
-
-## Suggested X copy
-
-> Repetitive corridors can fool visual localization. We added an opt-in FlexGlue
-> ONNX matcher to TinyNav. In 64 offline corridor requests, accepted map-reference
-> mismatches fell from 24 to 2 under the same depth/PnP rules. Higher compute cost;
-> Jetson validation next.
-
-The GIFs, posters and draft copy are materials for review, not a published post.
 
 ## Upstream models
 
