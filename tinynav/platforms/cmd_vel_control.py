@@ -8,8 +8,13 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
+import os
 import time
 from tinynav.core.robot_specs import ROBOT_CONFIG
+
+# Must match planning_node: with "rl" the planner publishes (v, w) on /planning/rl_cmd and this
+# node executes it directly instead of tracking /planning/trajectory_path.
+PLANNER = os.environ.get("TINYNAV_PLANNER", "library").strip().lower()
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
@@ -21,7 +26,10 @@ class CmdVelControlNode(Node):
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
-        self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
+        if PLANNER == "rl":
+            self.create_subscription(Twist, '/planning/rl_cmd', self.rl_cmd_callback, 10)
+        else:
+            self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
         self.T_robot_to_camera = np.array([
             [0, -1, 0, 0],
             [0, 0, -1, 0],
@@ -127,7 +135,7 @@ class CmdVelControlNode(Node):
         # Do not smooth or re-lock it here; just pass it through while stale/paused guards still work.
         if target_cmd.linear.x < 0.0:
             out.linear.x = target_cmd.linear.x
-            out.angular.z = 0.0
+            out.angular.z = target_cmd.angular.z if PLANNER == "rl" else 0.0  # the policy may reverse while turning
             self.cmd_pub.publish(out)
             self.prev_cmd = out
             return
@@ -158,6 +166,22 @@ class CmdVelControlNode(Node):
         self.cmd_pub.publish(out)
         self.prev_cmd = out
         
+    def _mark_planner_update(self):
+        now_mono = time.monotonic()
+        if self.last_path_update_time is not None:
+            period = np.clip(now_mono - self.last_path_update_time, 0.05, 0.5)
+            self.path_period_ema = 0.85 * self.path_period_ema + 0.15 * float(period)
+        self.last_path_update_time = now_mono
+
+    def rl_cmd_callback(self, msg):
+        """TINYNAV_PLANNER=rl: take the policy's (v, w) as is; the timer keeps the pause, stale-command,
+        acceleration and minimum-speed guards."""
+        if not self._nav_active:
+            return
+        self._mark_planner_update()
+        self.latest_cmd.linear.x = float(np.clip(msg.linear.x, -self.fixed_reverse_speed, self.max_forward_speed))
+        self.latest_cmd.angular.z = float(np.clip(msg.angular.z, -self.max_angular_speed, self.max_angular_speed))
+
     def path_callback(self, msg):
         if not self._nav_active:
             return
@@ -169,11 +193,7 @@ class CmdVelControlNode(Node):
 
         ros_now = self.get_clock().now().to_msg()
         self.last_path_time = ros_now.sec + ros_now.nanosec * 1e-9
-        now_mono = time.monotonic()
-        if self.last_path_update_time is not None:
-            period = np.clip(now_mono - self.last_path_update_time, 0.05, 0.5)
-            self.path_period_ema = 0.85 * self.path_period_ema + 0.15 * float(period)
-        self.last_path_update_time = now_mono
+        self._mark_planner_update()
 
         def msg2np(msg):
             T = np.eye(4)

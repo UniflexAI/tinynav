@@ -1,4 +1,5 @@
 import array
+import os
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -11,13 +12,19 @@ from numba import njit
 import message_filters
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
-from geometry_msgs.msg import PoseStamped, Point32
+from geometry_msgs.msg import PoseStamped, Point32, Twist
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
+
+# "library": sample + ESDF-score the trajectory library (default). "rl": the learned policy in
+# tinynav/rl picks (v, w) and publishes it on /planning/rl_cmd for cmd_vel_control.
+PLANNER = os.environ.get("TINYNAV_PLANNER", "library").strip().lower()
+if PLANNER not in ("library", "rl"):
+    raise ValueError(f"Unsupported TINYNAV_PLANNER: {PLANNER!r}")
 
 # === Helper functions ===
 @njit(cache=True)
@@ -377,6 +384,14 @@ class PlanningNode(Node):
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
+        self.rl = None
+        if PLANNER == "rl":
+            from tinynav.rl.rl_planner import RLPlanner, TRTPolicy
+            self.rl = RLPlanner(TRTPolicy())
+            self.rl_cmd_pub = self.create_publisher(Twist, '/planning/rl_cmd', 10)
+            self.rl_bev_pub = self.create_publisher(Image, '/planning/rl_bev', 10)
+            self.get_logger().info("TINYNAV_PLANNER=rl: learned policy replaces the trajectory library")
+
     def poi_change_callback(self, msg):
         self.target_pose = None
 
@@ -612,6 +627,12 @@ class PlanningNode(Node):
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
             self.publish_footprint(T, depth_msg.header.stamp)
 
+        if self.rl is not None:
+            self.last_T, self.last_stamp = T, stamp
+            with Timer(name='rl policy', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                self.rl_plan(T, stamp, ESDF_map, depth_msg.header)
+            return
+
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
@@ -641,6 +662,42 @@ class PlanningNode(Node):
                 return
 
             self.publish_selected_path(trajectories, top_indices, depth_msg.header)
+
+    def rl_plan(self, T, stamp, ESDF_map, header):
+        if self.target_pose is None:
+            self.rl.reset()  # next goal starts with fresh memory; no command -> cmd_vel_control stops
+            return
+        v, w, poses, bev, guard = self.rl.step(self.occupancy_grid, self.origin, T, stamp, self.target_pose[:2], ESDF_map)
+        if guard:
+            self.get_logger().warn("RL command would hit an obstacle within 1s: forward speed set to 0", throttle_duration_sec=1.0)
+        cmd = Twist()
+        cmd.linear.x, cmd.angular.z = v, w
+        self.rl_cmd_pub.publish(cmd)
+
+        # Same pose convention as the library path: control-center position, camera orientation.
+        path = Path()
+        path.header = header
+        path.header.frame_id = "world"
+        center = self.camera_to_robot_center(T)
+        for x, y, th in poses[::10]:
+            R_t = R.from_rotvec([0.0, 0.0, th - poses[0, 2]]).as_matrix() @ T[:3, :3]
+            q = R.from_matrix(R_t).as_quat()
+            pose = PoseStamped()
+            pose.header = path.header
+            pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = float(x), float(y), float(center[2])
+            pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = map(float, q)
+            path.poses.append(pose)
+        self.path_pub.publish(path)
+
+        # Debug view of the policy input: elevation colored, never-seen cells black, own trail red.
+        img = cv2.applyColorMap(np.uint8(np.clip((bev[0] + 0.5) / 1.5, 0, 1) * 255), cv2.COLORMAP_VIRIDIS)
+        img[bev[1] == 0] = 0
+        img[bev[2] > 0] = (img[bev[2] > 0] * 0.4 + np.array([0, 0, 255]) * 0.6).astype(np.uint8)
+        img = cv2.resize(img, (256, 256), interpolation=cv2.INTER_NEAREST)
+        msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
+        msg.header = header
+        self.rl_bev_pub.publish(msg)
+
 
 def main(args=None):
     rclpy.init(args=args)

@@ -16,6 +16,7 @@ import torch
 from tinynav.core.robot_specs import ROBOT_CONFIG
 from tinynav.rl.bev import (BEV_RES, BEV_SIZE, ELEV_RANGE, GRID_RES, GRID_SHAPE, GROUND_MAX, GROUND_PRIOR, GROUND_RING,
                             KNOWN_EPS, OCC_THRESHOLD, RAY_STEP, TRAIL_LEN, robot_frame_cells)
+from tinynav.rl.rl_planner import V_MAX, V_MIN, W_MAX
 
 GX, GY, GZ = GRID_SHAPE
 MAX_RAY_SAMPLES = 56  # past this many voxel steps a ray from the grid center is outside the grid
@@ -56,9 +57,9 @@ class SimConfig:
     disparity_noise_px: float = 0.1
     baseline: float = 0.05
     # robot
-    v_min: float = -0.3
-    v_max: float = ROBOT_CONFIG.max_linear_vel
-    w_max: float = ROBOT_CONFIG.max_angular_vel
+    v_min: float = V_MIN
+    v_max: float = V_MAX
+    w_max: float = W_MAX
     lin_acc: float = 1.0
     ang_acc: float = 2.0
     latency_steps: int = 1
