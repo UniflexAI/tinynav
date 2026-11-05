@@ -72,6 +72,10 @@ class SimConfig:
     trap_half: tuple = (1.5, 3.5)  # wall half-length range, grown by the curriculum
     cup_prob: float = 0.5  # fraction of traps closed into a U around the start
     novelty_reward: float = 0.05  # per newly visited NOVELTY_CELL, keeps exploring when stuck
+    clearance_margin: float = 0.3  # footprint-to-obstacle distance below which a penalty ramps in
+    clearance_penalty: float = 0.15  # per step at zero clearance; stops corner scraping
+    turn_penalty: float = 0.05  # per step at full yaw rate (scaled by (w / w_max)^2); stops weaving
+    efficiency_bonus: float = 5.0  # extra on arrival, scaled by geodesic start distance / path length
 
 
 def _ray_voxels(start, end, valid, o3):
@@ -135,6 +139,14 @@ class NavSim:
         self.pitch = torch.zeros(n, device=dev)
         self.steps = torch.zeros(n, dtype=torch.long, device=dev)
         self.best_dist = torch.zeros(n, device=dev)
+        # per-episode accumulators: path length, shortest-path length at start, min clearance, sum |w|
+        self.path_len, self.geo_start = torch.zeros(n, device=dev), torch.zeros(n, device=dev)
+        self.min_clear, self.abs_w = torch.zeros(n, device=dev), torch.zeros(n, device=dev)
+        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+        f = torch.arange(-rl, fl + 1e-6, 0.05, device=dev)
+        sd = torch.arange(-hw, hw + 1e-6, 0.05, device=dev)
+        self.fp_edge = torch.cat([torch.stack([f, torch.full_like(f, hw)], 1), torch.stack([f, torch.full_like(f, -hw)], 1),
+                                  torch.stack([torch.full_like(sd, fl), sd], 1), torch.stack([torch.full_like(sd, -rl), sd], 1)])
         self.trap = torch.zeros(n, dtype=torch.bool, device=dev)
         self.hist = torch.full((n, TRAIL_LEN, 2), math.nan, device=dev)  # own path, index = age in ticks
         self.nv = int(math.ceil((cfg.arena + 2) / NOVELTY_CELL))
@@ -255,6 +267,16 @@ class NavSim:
         slope = ((self._geo_at(idx, pts) - here[:, None]) / 0.4).clamp(-1.5, 1.5)
         return torch.cat([(here / 10).clamp(max=3)[:, None], slope], 1)
 
+    def clearance(self):
+        """Distance from the robot outline to the nearest box, per env (0 when touching)."""
+        c, s = torch.cos(self.yaw)[:, None], torch.sin(self.yaw)[:, None]
+        e = self.fp_edge
+        pts = self.pos[:, None] + torch.stack([c * e[:, 0] - s * e[:, 1], s * e[:, 0] + c * e[:, 1]], -1)  # [n,P,2]
+        b = self.boxes[:, None]  # [n,1,B,5]
+        d = ((pts[:, :, None] - b[..., :2]).abs() - b[..., 2:4]).clamp(min=0).norm(dim=-1)  # [n,P,B]
+        d = torch.where(b[..., 4] > 0, d, math.inf)
+        return d.amin((1, 2))
+
     def _visit(self, idx):
         """Mark the current novelty cell; returns True where it was not visited before."""
         cell = ((self.pos[idx] + self.cfg.arena / 2 + 1) / NOVELTY_CELL).long().clamp(0, self.nv - 1)
@@ -306,6 +328,9 @@ class NavSim:
         self.base[idx] = cam - torch.tensor(GRID_SHAPE, device=self.device) * GRID_RES / 2
         self.o[idx] = 0
         self.best_dist[idx] = (self.goal[idx] - self.pos[idx]).norm(dim=1)
+        self.geo_start[idx] = self._geo_at(idx, self.pos[idx])
+        self.path_len[idx], self.abs_w[idx] = 0, 0
+        self.min_clear[idx] = math.inf
         self.hist[idx] = math.nan
         self.hist[idx, 0] = self.pos[idx]
         self.visited[idx] = False
@@ -452,7 +477,10 @@ class NavSim:
         lim = torch.tensor([c.lin_acc, c.ang_acc], device=self.device) * c.dt
         self.vel = self.vel + (target - self.vel).clamp(-lim, lim)
         self.yaw = self.yaw + self.vel[:, 1] * c.dt
-        self.pos = self.pos + self.vel[:, :1] * c.dt * torch.stack([torch.cos(self.yaw), torch.sin(self.yaw)], -1)
+        move = self.vel[:, :1] * c.dt * torch.stack([torch.cos(self.yaw), torch.sin(self.yaw)], -1)
+        self.pos = self.pos + move
+        self.path_len += move.norm(dim=1)
+        self.abs_w += self.vel[:, 1].abs()
         self.yaw = torch.atan2(torch.sin(self.yaw), torch.cos(self.yaw))
         self.steps += 1
 
@@ -465,10 +493,16 @@ class NavSim:
         # progress only counts new closest approaches, so backing out of a dead end costs nothing
         reward = (self.best_dist - dist).clamp(min=0) - 0.005 - 0.01 * ((action - self.last_action) ** 2).sum(1)
         reward += c.novelty_reward * self._visit(torch.arange(c.num_envs, device=self.device))
-        reward += 10.0 * reached - 10.0 * collided
+        clear = self.clearance()
+        self.min_clear = torch.minimum(self.min_clear, clear)
+        reward -= c.clearance_penalty * ((c.clearance_margin - clear) / c.clearance_margin).clamp(0, 1)
+        reward -= c.turn_penalty * (self.vel[:, 1] / c.w_max) ** 2
+        efficiency = ((self.geo_start - c.goal_tol) / self.path_len.clamp(min=1e-3)).clamp(0, 1)
+        reward += (10.0 + c.efficiency_bonus * efficiency) * reached - 10.0 * collided
         self.best_dist, self.last_action = torch.minimum(self.best_dist, dist), action
         done = collided | reached | timeout
-        info = {"collided": collided, "reached": reached, "timeout": timeout & ~collided & ~reached, "trap": self.trap.clone()}
+        info = {"collided": collided, "reached": reached, "timeout": timeout & ~collided & ~reached, "trap": self.trap.clone(),
+                "min_clearance": self.min_clear.clone(), "efficiency": efficiency, "mean_abs_w": self.abs_w / self.steps.clamp(min=1)}
         self._sense(torch.nonzero(~done).squeeze(1))
         self.reset(torch.nonzero(done).squeeze(1))
         return self.observe(), reward, done, info

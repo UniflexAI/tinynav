@@ -103,3 +103,15 @@ def test_geodesic_detours_around_wall():
     assert straight + 1.0 < float(d) < around + 0.6, float(d)
     priv = sim.privileged()
     assert priv.shape == (1, 9) and torch.isfinite(priv).all()
+
+
+def test_clearance_and_efficiency():
+    sim = NavSim(SimConfig(num_envs=1, n_boxes=1, trap_prob=0.0), device=DEVICE, seed=0)
+    sim.reset()
+    sim.boxes[0, :] = 0
+    sim.boxes[0, 0] = torch.tensor([1.0, 0.0, 0.1, 1.0, 1.0], device=DEVICE)  # box face at x=0.9
+    sim.pos[0], sim.yaw[0] = torch.tensor([0.0, 0.0], device=DEVICE), torch.tensor(0.0, device=DEVICE)
+    fl = sim.fp[0]  # robot front at x=fl
+    assert abs(float(sim.clearance()[0]) - (0.9 - fl)) < 1e-4
+    sim.yaw[0] = math.pi / 2  # side now faces the box: clearance = 0.9 - half width
+    assert abs(float(sim.clearance()[0]) - (0.9 - sim.fp[2])) < 1e-4
