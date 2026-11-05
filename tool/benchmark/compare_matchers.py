@@ -120,7 +120,7 @@ def main():
             start=time.perf_counter();matches=run();times.append((time.perf_counter()-start)*1000)
         results[name] = dict(matches=matches, matching_ms=statistics.median(times), **solve(r, q, matches, transforms))
     export_media(r, q, results, args.output)
-    output = {name:{k:(v.tolist() if isinstance(v,np.ndarray) else v) for k,v in item.items()} for name,item in results.items()}
+    output = {name:{**{k:v for k,v in item.items() if k != "matches"}, "raw_matches":len(item["matches"])} for name,item in results.items()}
     output['input'] = {'reference': args.reference, 'query': args.query, 'image_sha256': [hashlib.sha256(x['image'].tobytes()).hexdigest() for x in (r,q)], 'note': 'Fixed pair; cached descriptors; match-only timings; map-derived reference, not surveyed truth.'}
     (args.output/'comparison.json').write_text(json.dumps(output, indent=2));loop.close()
 
