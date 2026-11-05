@@ -1010,7 +1010,14 @@ class MapNode(Node):
             int((target_poi[2] - occupancy_map_origin[2]) / resolution)
         ], dtype=np.int32)
 
-        if (
+        # POI z comes from where the editor clicked and often sits below the
+        # grid floor (z=-1.66 on a floor at -1.45): the costmap is 2D-slice
+        # semantics, so clamp the z cell instead of silently dropping a goal
+        # whose (x, y) is perfectly fine.
+        start_idx[2] = int(np.clip(start_idx[2], 0, self.occupancy_map.shape[2] - 1))
+        poi_goal_idx[2] = int(np.clip(poi_goal_idx[2], 0, self.occupancy_map.shape[2] - 1))
+
+        oob = (
             start_idx[0] < 0
             or start_idx[0] >= self.occupancy_map.shape[0]
             or start_idx[1] < 0
@@ -1023,23 +1030,39 @@ class MapNode(Node):
             or poi_goal_idx[1] >= self.occupancy_map.shape[1]
             or poi_goal_idx[2] < 0
             or poi_goal_idx[2] >= self.occupancy_map.shape[2]
-        ):
-            return None 
+        )
+        if oob:
+            self.get_logger().warning(
+                f"[navpath] bounds: start_idx={tuple(start_idx)} goal_idx={tuple(poi_goal_idx)} "
+                f"pose={np.round(pose_in_map[:3, 3], 2).tolist()} poi={np.round(target_poi, 2).tolist()} "
+                f"origin={np.round(occupancy_map_origin, 2).tolist()} shape={self.occupancy_map.shape}"
+            )
+            return None
         sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
         sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
-
+        if not sdf_start_path or not sdf_goal_path:
+            self.get_logger().warning(
+                f"[navpath] close search empty: start={tuple(start_idx)} len={len(sdf_start_path)} "
+                f"goal={tuple(poi_goal_idx)} len={len(sdf_goal_path)} "
+                f"sdf[start]={float(self.sdf_map[tuple(start_idx)]):.2f} sdf[goal]={float(self.sdf_map[tuple(poi_goal_idx)]):.2f} "
+                f"occ[start]={int(self.occupancy_map[tuple(start_idx)])} occ[goal]={int(self.occupancy_map[tuple(poi_goal_idx)])}"
+            )
+            return None
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
         path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
         if len(path_sdf) == 0:
             self.get_logger().warning(
-                f"search_within_sdf_map returned empty path: start_idx={tuple(sdf_start_sdf)}, goal_idx={tuple(sdf_goal_sdf)}"
+                f"[navpath] within search empty: start={tuple(sdf_start_sdf)} goal={tuple(sdf_goal_sdf)}"
             )
+            return None
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
-        if len(path) > 0:
-            converted_path = np.array(path) * resolution + occupancy_map_origin
-            return converted_path
-        return None
+        self.get_logger().info(
+            f"[navpath] ok: close_start={len(sdf_start_path)} within={len(path_sdf)} "
+            f"close_goal={len(sdf_goal_path)} total={len(path)}"
+        )
+        converted_path = np.array(path) * resolution + occupancy_map_origin
+        return converted_path
 
 def main(args=None):
     logging.basicConfig(
