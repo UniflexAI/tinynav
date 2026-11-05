@@ -52,7 +52,11 @@ def main():
     ap.add_argument("--clip", type=float, default=0.2)
     ap.add_argument("--ent", type=float, default=0.002)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--lr-end", type=float, help="linearly anneal the learning rate to this by --steps")
     ap.add_argument("--resume")
+    ap.add_argument("--init", help="start from this checkpoint's weights (fresh optimizer, step 0)")
+    ap.add_argument("--level", type=int, default=0, help="starting curriculum level")
+    ap.add_argument("--eval-every", type=int, default=100, help="updates between fixed-scene evals that keep best.pt")
     args = ap.parse_args()
     run, dev = Path(args.run), torch.device("cuda")
     run.mkdir(parents=True, exist_ok=True)
@@ -62,7 +66,9 @@ def main():
     sim = NavSim(SimConfig(num_envs=args.envs), device=dev, seed=args.seed)
     net = ActorCritic().to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
-    level, step = 0, 0
+    level, step = args.level, 0
+    if args.init:
+        net.load_state_dict(torch.load(args.init, map_location=dev)["model"])
     if args.resume:
         ck = torch.load(args.resume, map_location=dev)
         net.load_state_dict(ck["model"]), opt.load_state_dict(ck["opt"])
@@ -80,6 +86,7 @@ def main():
     h = net.initial_state(N, dev)
     update, t0, step0 = 0, time.time(), step
     window, level_since = [], 0  # per-update (reached, collided, episodes)
+    best_eval = -1.0
     while step < args.steps:
         stats = {"reached": 0, "collided": 0, "timeout": 0, "ret": [], "len": [], "trap_n": 0, "trap_ok": 0}
         h0 = h.clone()
@@ -91,6 +98,7 @@ def main():
                 buf["bev"][t], buf["vec"][t], buf["priv"][t], buf["act"][t] = obs["bev"].half(), obs["vec"], priv, act
                 buf["logp"][t], buf["val"][t] = dist.log_prob(act).sum(1), val
                 obs, rew, done, info = sim.step(act)
+                rew = rew + args.gamma * val * info["timeout"]  # bootstrap time-outs: cut off, not failed
                 priv = sim.privileged()
                 buf["rew"][t], buf["done"][t] = rew, done.float()
                 h = h * (~done)[:, None]
@@ -104,7 +112,7 @@ def main():
                     stats["ret"] += ep_ret[done].tolist()
                     stats["len"] += ep_len[done].tolist()
                     ep_ret[done], ep_len[done] = 0, 0
-            # GAE; a timeout is treated as terminal (small bias, keeps auto-reset simple)
+            # GAE; time-outs end the sequence but were bootstrapped with V(s_t) above
             next_val = net.heads(net.gru(net.encode(obs["bev"], obs["vec"]), h), priv)[1]
             adv, last = torch.zeros_like(buf["rew"]), torch.zeros(N, device=dev)
             for t in reversed(range(T)):
@@ -117,6 +125,9 @@ def main():
             adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         step += N * T
 
+        if args.lr_end is not None:
+            for g in opt.param_groups:
+                g["lr"] = args.lr + (args.lr_end - args.lr) * min(1.0, (step - step0) / max(args.steps - step0, 1))
         envs_per_mb = max(1, args.minibatch // T)
         for _ in range(args.epochs):
             for e in torch.randperm(N, device=dev).split(envs_per_mb):
@@ -156,7 +167,16 @@ def main():
                 and sum(w[1] for w in window) / w_ep <= 0.1 and level < len(CURRICULUM) - 1):
             level, level_since = level + 1, update
             set_level(sim, level)
-        for k, v in (("curriculum_level", level), ("policy_loss", pg.item()), ("value_loss", vf.item()),
+        if update % args.eval_every == 0 and level == len(CURRICULUM) - 1:
+            from tinynav.rl.eval_policy import PolicyActor, evaluate  # local: eval_policy imports this module
+            (e_succ, e_coll, _), (e_trap, _, _), _ = evaluate(lambda n: PolicyActor(net, n), level, 256, seed=999)
+            for k, v in (("success_rate", e_succ), ("collision_rate", e_coll), ("trap_success_rate", e_trap)):
+                writer.add_scalar(f"eval/{k}", v, step)
+            print(f"eval @ {step:,}: success {e_succ:.3f} collision {e_coll:.3f} trap {e_trap:.3f}", flush=True)
+            if e_succ > best_eval:
+                best_eval = e_succ
+                torch.save({"model": net.state_dict(), "level": level, "step": step, "eval": (e_succ, e_coll, e_trap)}, run / "best.pt")
+        for k, v in (("curriculum_level", level), ("lr", opt.param_groups[0]["lr"]), ("policy_loss", pg.item()), ("value_loss", vf.item()),
                      ("entropy", ent.item()), ("action_std", net.log_std.exp().mean().item()),
                      ("steps_per_sec", (step - step0) / (time.time() - t0))):
             writer.add_scalar(f"train/{k}", v, step)
