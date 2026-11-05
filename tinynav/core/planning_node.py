@@ -667,9 +667,12 @@ class PlanningNode(Node):
         if self.target_pose is None:
             self.rl.reset()  # next goal starts with fresh memory; no command -> cmd_vel_control stops
             return
-        v, w, poses, bev, guard = self.rl.step(self.occupancy_grid, self.origin, T, stamp, self.target_pose[:2], ESDF_map)
-        if guard:
-            self.get_logger().warn("RL command would hit an obstacle within 1s: forward speed set to 0", throttle_duration_sec=1.0)
+        v, w, poses, bev, status = self.rl.step(self.occupancy_grid, self.origin, T, stamp, self.target_pose[:2], ESDF_map)
+        if status == "stuck":
+            self.get_logger().error("RL planner stuck: commanded to move but no progress for 10s; stopped until the next goal",
+                                    throttle_duration_sec=5.0)
+        elif status != "ok":
+            self.get_logger().warn(f"RL command unsafe within 1s, guard chose: {status}", throttle_duration_sec=1.0)
         cmd = Twist()
         cmd.linear.x, cmd.angular.z = v, w
         self.rl_cmd_pub.publish(cmd)
