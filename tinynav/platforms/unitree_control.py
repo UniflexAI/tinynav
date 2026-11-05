@@ -39,14 +39,13 @@ from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import (
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import Header_ as SdkHeader_
 from enum import Enum
 
-from tinynav.core.robot_specs import CHASSIS_GAIT
+from tinynav.core.robot_specs import CHASSIS_GAIT, ROBOT_TYPE
 
 try:
     from .robot_profiles import require_profile
 except ImportError:
     from robot_profiles import require_profile
 
-ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
 require_profile(ROBOT_TYPE)
 
 # rt/lf/sportmodestate's error_code once ClassicWalk has taken, measured on go2 (it is
@@ -58,6 +57,38 @@ _WALKING_STATE = {'go2': 2010, 'go2w': 2010}
 class RobotStatus(Enum):
     STANDUP = "standup"
     SITTING = "sitting"
+
+
+#: Models whose firmware answers the vui brightness API. A model outside this
+#: set skips the client entirely: asking a service that is not there only
+#: burns the RPC timeout.
+_LIGHT_MODELS = ("as2", "as2w", "go2", "go2w")
+_BRIGHTNESS_MAX = 10
+
+
+class VuiLight:
+    """The headlight's brightness over the vui service: 1005 sets
+    `{"brightness": N}`, 1006 reads it back. Levels are 0-10."""
+
+    def __init__(self, channel_factory_ready: bool = True):
+        from unitree_sdk2py.rpc.client import Client
+        self._client = Client("vui", channel_factory_ready)
+
+    def Init(self):
+        self._client._SetApiVerson("1.0.0.1")
+        self._client._RegistApi(1005, 0)
+        self._client._RegistApi(1006, 0)
+
+    def set(self, level: int):
+        """code 0 = accepted; 100 = the firmware's value-range rejection."""
+        import json
+        return self._client._Call(1005, json.dumps({"brightness": int(level)}))[0]
+
+    def get(self):
+        """(code, brightness) -- brightness None unless the read answered 0."""
+        import json
+        code, data = self._client._Call(1006, "{}")
+        return (code, json.loads(data)["brightness"]) if code == 0 else (code, None)
 
 
 # A reply RPC slower than this is logged. ClassicWalk waits up to the client
@@ -367,6 +398,23 @@ class Ros2UnitreeManagerNode:
         self.sport_client = self.profile.client_factory()
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
+        # The headlight rides the manager's channel; an unsupported model
+        # leaves the light dead, with the refusal logged.
+        self._light_supported = self.robot_model in _LIGHT_MODELS
+        self.brightness = None
+        self.vui = None
+        if self._light_supported:
+            try:
+                self.vui = VuiLight()
+                self.vui._client.SetTimeout(3.0)
+                self.vui.Init()
+            except Exception:
+                self.logger.exception('vui light client init failed; light disabled')
+                self.vui = None
+        self.publisher_brightness = ChannelPublisher('rt/chassis/brightness', SdkString_)
+        self.publisher_brightness.Init()
+        if self.vui is not None:
+            self._light_refresh()
         self._robot_status = RobotStatus.SITTING
         self.battery = None
         self.last_twist_time = None
@@ -596,6 +644,9 @@ class Ros2UnitreeManagerNode:
         """One `play ...` command. `data` is the raw string (from ActionWorker) or a
         message carrying `.data` (the tests)."""
         words = (data if isinstance(data, str) else data.data).split(" ")
+        if words[0] == "light":
+            self._light_command(words)
+            return
         if words[0] != "play" or len(words) < 2:
             return
         action_key = words[1]
@@ -613,6 +664,41 @@ class Ros2UnitreeManagerNode:
         elif action_key == "gait" and self.gait is not None and len(words) > 2 \
                 and words[2] in self._gait_steps:
             self._switch_gait(words[2])
+
+    def _light_command(self, words):
+        """`light N` sets the headlight, bare `light` reads it back. Runs on the
+        action worker like every other RPC, so a 3 s timeout costs nothing hot."""
+        if not self._light_supported or self.vui is None:
+            self.logger.warning(f'light: {self.robot_model} has no vui service, dropped')
+            return
+        if len(words) > 1:
+            try:
+                level = int(words[1])
+            except ValueError:
+                self.logger.warning(f'light: not a level: {words[1]!r}')
+                return
+            if not 0 <= level <= _BRIGHTNESS_MAX:
+                self.logger.warning(f'light: {level} out of 0-{_BRIGHTNESS_MAX}')
+                return
+            code = self.vui.set(level)
+            if code != 0:
+                self.logger.error(f'light: set {level} refused, code {code}')
+                return
+            self.brightness = level
+            self.logger.info(f'light: brightness {level}')
+        else:
+            self._light_refresh()
+
+    def _light_refresh(self):
+        """Read the firmware's brightness and publish it (the only honest read:
+        the set's own reply carries no value)."""
+        code, level = self.vui.get()
+        if code == 0 and level is not None:
+            self.brightness = int(level)
+
+    def _publish_brightness(self):
+        if self.brightness is not None:
+            self.publisher_brightness.Write(SdkString_(data=str(self.brightness)))
 
     def _resolve_step(self, name: str):
         """Profile step name -> bound call. Names the sport/loco clients spell
@@ -670,6 +756,7 @@ class Ros2UnitreeManagerNode:
         /chassis/gait waits at most this long (class docstring)."""
         while True:
             self.publisher_robot_status.Write(SdkString_(data=self._robot_status.value))
+            self._publish_brightness()
             if self.gait is not None:
                 self._say_gait()
             time.sleep(_STATUS_PERIOD_S)
