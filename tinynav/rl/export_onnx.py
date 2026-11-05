@@ -3,7 +3,7 @@
 The GRU memory is an explicit input/output: feed h_out back as h on the next planner tick and
 zero it when a new goal starts. Inputs bev [1,3,64,64], vec [1,6], h [1,256] -> action [1,2], h_out.
 Usage:
-  uv run python -m tinynav.rl.export_onnx --ckpt tinynav_db/rl_runs/ppo_v5_clearance/best.pt --out tinynav/models/rl_nav_policy_v5.onnx
+  uv run python -m tinynav.rl.export_onnx --ckpt tinynav_db/rl_runs/ppo_v7_bigbody/best.pt --out tinynav/models/rl_nav_policy_v7.onnx
   cd tinynav/models && make rl_nav
 """
 import argparse

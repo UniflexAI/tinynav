@@ -18,8 +18,8 @@ RETINIFY_ONNX    := retinify_0_1_5_dynamic.onnx
 FOUNDATION_STEREO_ONNX := foundation_stereo_11-33-40_256x320_4.onnx
 SIGLIP_IMAGE_ONNX := siglip_vit_b_16_webli_image_fp16.onnx
 SIGLIP_TEXT_ONNX  := siglip_vit_b_16_webli_text_fp16.onnx
-# Older RL policies stay in this folder: make rl_nav RL_NAV_ONNX=rl_nav_policy_v4.onnx
-RL_NAV_ONNX       ?= rl_nav_policy_v5.onnx
+# Older RL policies stay in this folder: make rl_nav RL_NAV_ONNX=rl_nav_policy_v5.onnx
+RL_NAV_ONNX       ?= rl_nav_policy_v7.onnx
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
