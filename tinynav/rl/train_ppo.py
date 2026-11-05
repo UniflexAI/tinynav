@@ -56,7 +56,7 @@ def main():
     ap.add_argument("--resume")
     ap.add_argument("--init", help="start from this checkpoint's weights (fresh optimizer, step 0)")
     ap.add_argument("--level", type=int, default=0, help="starting curriculum level")
-    ap.add_argument("--eval-every", type=int, default=100, help="updates between fixed-scene evals that keep best.pt")
+    ap.add_argument("--eval-every", type=int, default=100, help="updates between fixed-scene evals that keep best.pt (success - 0.5 * near-miss)")
     args = ap.parse_args()
     run, dev = Path(args.run), torch.device("cuda")
     run.mkdir(parents=True, exist_ok=True)
@@ -88,7 +88,7 @@ def main():
     window, level_since = [], 0  # per-update (reached, collided, episodes)
     best_eval = -1.0
     while step < args.steps:
-        stats = {"reached": 0, "collided": 0, "timeout": 0, "ret": [], "len": [], "trap_n": 0, "trap_ok": 0}
+        stats = {"reached": 0, "collided": 0, "timeout": 0, "ret": [], "len": [], "trap_n": 0, "trap_ok": 0, "clear": [], "eff": [], "w": []}
         h0 = h.clone()
         with torch.no_grad():
             for t in range(T):
@@ -109,6 +109,9 @@ def main():
                         stats[k] += int(info[k].sum())
                     stats["trap_n"] += int((done & info["trap"]).sum())
                     stats["trap_ok"] += int((info["reached"] & info["trap"]).sum())
+                    stats["clear"] += info["min_clearance"][done & ~info["collided"]].tolist()
+                    stats["eff"] += info["efficiency"][info["reached"]].tolist()
+                    stats["w"] += info["mean_abs_w"][done].tolist()
                     stats["ret"] += ep_ret[done].tolist()
                     stats["len"] += ep_len[done].tolist()
                     ep_ret[done], ep_len[done] = 0, 0
@@ -161,6 +164,11 @@ def main():
                 writer.add_scalar(f"episode/{k}", v, step)
             if stats["trap_n"]:
                 writer.add_scalar("episode/trap_success_rate", trap, step)
+            if stats["clear"]:
+                writer.add_scalar("episode/near_miss_rate", float(np.mean(np.array(stats["clear"]) < 0.1)), step)
+            if stats["eff"]:
+                writer.add_scalar("episode/path_efficiency", float(np.mean(stats["eff"])), step)
+            writer.add_scalar("episode/mean_abs_yaw_rate", float(np.mean(stats["w"])), step)
         window = (window + [(stats["reached"], stats["collided"], n_ep)])[-10:]
         w_ep = sum(w[2] for w in window)
         if (update - level_since >= LEVEL_COOLDOWN and w_ep and sum(w[0] for w in window) / w_ep >= 0.8
@@ -169,12 +177,14 @@ def main():
             set_level(sim, level)
         if update % args.eval_every == 0 and level == len(CURRICULUM) - 1:
             from tinynav.rl.eval_policy import PolicyActor, evaluate  # local: eval_policy imports this module
-            (e_succ, e_coll, _), (e_trap, _, _), _ = evaluate(lambda n: PolicyActor(net, n), level, 256, seed=999)
-            for k, v in (("success_rate", e_succ), ("collision_rate", e_coll), ("trap_success_rate", e_trap)):
+            (e_succ, e_coll, _), (e_trap, _, _), q, _ = evaluate(lambda n: PolicyActor(net, n), level, 256, seed=999)
+            for k, v in (("success_rate", e_succ), ("collision_rate", e_coll), ("trap_success_rate", e_trap), *q.items()):
                 writer.add_scalar(f"eval/{k}", v, step)
-            print(f"eval @ {step:,}: success {e_succ:.3f} collision {e_coll:.3f} trap {e_trap:.3f}", flush=True)
-            if e_succ > best_eval:
-                best_eval = e_succ
+            print(f"eval @ {step:,}: success {e_succ:.3f} collision {e_coll:.3f} trap {e_trap:.3f} near_miss {q['near_miss']:.3f} "
+                  f"efficiency {q['efficiency']:.3f} |w| {q['mean_abs_w']:.3f}", flush=True)
+            score = e_succ - 0.5 * q["near_miss"]  # success alone would keep a policy that still scrapes walls
+            if score > best_eval:
+                best_eval = score
                 torch.save({"model": net.state_dict(), "level": level, "step": step, "eval": (e_succ, e_coll, e_trap)}, run / "best.pt")
         for k, v in (("curriculum_level", level), ("lr", opt.param_groups[0]["lr"]), ("policy_loss", pg.item()), ("value_loss", vf.item()),
                      ("entropy", ent.item()), ("action_std", net.log_std.exp().mean().item()),
