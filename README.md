@@ -34,6 +34,11 @@
 
 We’ve launched our bounty program! Check the [list](https://docs.google.com/spreadsheets/d/1fyFSkiyfSGVeO8uW97gS7-gIt9qTbGIpYaMcHcjPF4Q/edit?usp=sharing) to see how you can contribute and the reward values for each task.
 
+# Optional feature matching
+
+LightGlue remains the default. An experimental [FlexGlue ONNX option](docs/flexglue.md)
+is available for mapping and relocalization, with offline corridor comparison GIFs.
+
 # Stereo Cameras
 
 we’re excited to add [Looper](https://looper-robotics.com/?utm_source=blogger&utm_medium=social&utm_campaign=booking&promo=uIwjGxmJ) as a first-class supported camera, alongside RealSense.
