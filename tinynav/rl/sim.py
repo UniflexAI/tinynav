@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import torch
 
-from tinynav.core.robot_specs import ROBOT_CONFIG
+from tinynav.core.robot_specs import RL_FOOTPRINT, ROBOT_CONFIG
 from tinynav.rl.bev import (BEV_RES, BEV_SIZE, ELEV_RANGE, GRID_RES, GRID_SHAPE, GROUND_MAX, GROUND_PRIOR, GROUND_RING,
                             KNOWN_EPS, OCC_THRESHOLD, RAY_STEP, TRAIL_LEN, robot_frame_cells)
 from tinynav.rl.rl_planner import V_MAX, V_MIN, W_MAX
@@ -25,7 +25,7 @@ N_TRAP = 3  # extra box slots for the wall / U-cup placed between start and goal
 N_NARROW = 4  # wall with a doorway across start->goal, optionally extended into a corridor
 NOVELTY_CELL = 0.5
 GEO_RES = 0.2  # geodesic distance field, training-only critic input
-GEO_INFLATE = 0.15  # robot half-width, so 0.6m doorways stay open on the 0.2m geodesic grid
+GEO_INFLATE = RL_FOOTPRINT.half_width  # 0.8m doorways keep a free band wider than the 0.2m geodesic grid
 GEO_UNREACHABLE = 30.0
 PRIV_DIM = 9  # geodesic distance here + its slope toward 8 robot-frame directions
 
@@ -52,6 +52,7 @@ class SimConfig:
     cy: float = 312.66
     cam_height: tuple = (0.38, 0.48)
     cam_pitch_deg: tuple = (0.0, 5.0)
+    cam_forward: tuple = (0.1, 0.5)  # camera ahead of the control center; varies across robots
     pitch_jitter_deg: float = 0.7  # per-frame body sway of a walking robot
     height_jitter: float = 0.01
     depth_drop: float = 0.2  # fraction of invalid stereo pixels
@@ -73,11 +74,11 @@ class SimConfig:
     trap_half: tuple = (1.5, 3.5)  # wall half-length range, grown by the curriculum
     cup_prob: float = 0.5  # fraction of traps closed into a U around the start
     narrow_prob: float = 0.25  # non-trap episodes whose only way through is a doorway / corridor
-    door_width: tuple = (0.6, 1.0)
+    door_width: tuple = (0.8, 1.2)  # 0.15-0.35m each side of the 0.5m wide RL footprint
     corridor_prob: float = 0.5
     novelty_reward: float = 0.05  # per newly visited NOVELTY_CELL, keeps exploring when stuck
-    clearance_margin: float = 0.4  # footprint-to-obstacle distance below which a penalty ramps in
-    clearance_penalty: float = 0.3  # per step at zero clearance; a 0.6m doorway still costs < 0.2/step
+    clearance_margin: float = 0.25  # on top of the footprint's own margin; penalty ramps in below this
+    clearance_penalty: float = 0.3  # per step at zero clearance; a centered 0.8m doorway costs ~0.1/step
     turn_penalty: float = 0.1  # per step at full yaw rate (scaled by (w / w_max)^2); stops weaving
     efficiency_bonus: float = 5.0  # extra on arrival, scaled by geodesic start distance / path length
 
@@ -125,9 +126,8 @@ class NavSim:
         self.bev_fwd, self.bev_left = torch.tensor(fwd, device=dev).float(), torch.tensor(left, device=dev).float()
         d = self.bev_left.hypot(self.bev_fwd)
         self.ground_ring = (d >= GROUND_RING[0]) & (d <= GROUND_RING[1])
-        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
-        self.fp = (fl, rl, hw)
-        self.cam_off = float(ROBOT_CONFIG.cam_offset_3d[2])  # forward offset control -> camera
+        self.fp = (RL_FOOTPRINT.front, RL_FOOTPRINT.rear, RL_FOOTPRINT.half_width)
+        self.cam_off = torch.zeros(n, device=dev)  # forward offset control -> camera, per episode
 
         self.grid = torch.zeros((n, GX, GY, GZ), device=dev)
         self.base = torch.zeros((n, 3), device=dev)  # world position of global voxel (0,0,0)
@@ -147,7 +147,7 @@ class NavSim:
         # per-episode accumulators: path length, shortest-path length at start, min clearance, sum |w|
         self.path_len, self.geo_start = torch.zeros(n, device=dev), torch.zeros(n, device=dev)
         self.min_clear, self.abs_w = torch.zeros(n, device=dev), torch.zeros(n, device=dev)
-        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+        fl, rl, hw = self.fp
         f = torch.arange(-rl, fl + 1e-6, 0.05, device=dev)
         sd = torch.arange(-hw, hw + 1e-6, 0.05, device=dev)
         self.fp_edge = torch.cat([torch.stack([f, torch.full_like(f, hw)], 1), torch.stack([f, torch.full_like(f, -hw)], 1),
@@ -360,6 +360,7 @@ class NavSim:
         k = len(idx)
         self.cam_h[idx] = self._rand(k, lo=c.cam_height[0], hi=c.cam_height[1])
         self.pitch[idx] = torch.deg2rad(self._rand(k, lo=c.cam_pitch_deg[0], hi=c.cam_pitch_deg[1]))
+        self.cam_off[idx] = self._rand(k, lo=c.cam_forward[0], hi=c.cam_forward[1])
         self.vel[idx] = 0
         self.cmd_queue[idx] = 0
         self.last_action[idx] = 0
@@ -386,7 +387,7 @@ class NavSim:
             pitch = pitch + math.radians(self.cfg.pitch_jitter_deg) * torch.randn(pitch.shape, generator=self.gen, device=self.device)
             h = h + self.cfg.height_jitter * torch.randn(h.shape, generator=self.gen, device=self.device)
         R = _rot(self.yaw[idx], pitch)
-        return R, torch.cat([self.pos[idx], h[:, None]], 1) + R[..., 2] * self.cam_off
+        return R, torch.cat([self.pos[idx], h[:, None]], 1) + R[..., 2] * self.cam_off[idx, None]
 
     def _render(self, idx, R, cam):
         """Z-depth of the sampled pixels against ground + boxes. Returns [k, P] (nan = invalid)."""

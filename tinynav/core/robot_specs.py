@@ -107,6 +107,21 @@ G1_CONFIG = RobotConfig(
     obstacle=ObstacleConfig(robot_z_bottom=-0.8, robot_z_top=0.6),
 )
 
+@dataclass
+class RLFootprint:
+    """Collision rectangle of the RL policy, relative to the control center (+x forward).
+
+    Shared by the training sim (tinynav/rl/sim.py) and the runtime guard (tinynav/rl/rl_planner.py)
+    so the policy is trained and checked against the same body. It is a real size plus margin
+    chosen to cover every robot we deploy on (up to ~0.8 x 0.3m bodies), not one ROBOT_TYPE.
+    """
+    front: float = 0.5
+    rear: float = 0.5
+    half_width: float = 0.25
+
+
+RL_FOOTPRINT = RLFootprint()
+
 ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()
 try:
     ROBOT_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
