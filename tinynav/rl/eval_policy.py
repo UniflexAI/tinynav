@@ -94,13 +94,15 @@ def main():
     ap.add_argument("--envs", type=int, default=512)
     ap.add_argument("--gif")
     ap.add_argument("--seed", type=int, default=123)  # differs from training seeds
+    ap.add_argument("--trap-prob", type=float, default=0.3)
     args = ap.parse_args()
     net = ActorCritic().cuda().eval()
     ck = torch.load(args.ckpt, map_location="cuda")
     net.load_state_dict(ck["model"])
     print(f"checkpoint step {ck['step']:,}, trained up to level {ck['level']}; evaluating level {args.level} on {args.envs} episodes")
     for name, fn in (("policy", lambda n: PolicyActor(net, n)), ("straight-to-goal", lambda n: straight_to_goal)):
-        (succ, coll, tout), (ts, tc, tt), eps = evaluate(fn, args.level, args.envs, args.seed, record=4 if name == "policy" and args.gif else 0)
+        (succ, coll, tout), (ts, tc, tt), eps = evaluate(fn, args.level, args.envs, args.seed, record=4 if name == "policy" and args.gif else 0,
+                                                         trap_prob=args.trap_prob)
         print(f"{name:>17}: success {succ:.1%}  collision {coll:.1%}  timeout {tout:.1%}   | trap episodes: success {ts:.1%}  collision {tc:.1%}  timeout {tt:.1%}")
         if eps:
             render_gif(eps, args.gif)
