@@ -115,3 +115,12 @@ def test_clearance_and_efficiency():
     assert abs(float(sim.clearance()[0]) - (0.9 - fl)) < 1e-4
     sim.yaw[0] = math.pi / 2  # side now faces the box: clearance = 0.9 - half width
     assert abs(float(sim.clearance()[0]) - (0.9 - sim.fp[2])) < 1e-4
+
+
+def test_narrow_scenes_are_solvable():
+    from tinynav.rl.sim import GEO_UNREACHABLE
+    sim = NavSim(SimConfig(num_envs=32, trap_prob=0.0, narrow_prob=1.0), device=DEVICE, seed=2)
+    sim.reset()
+    idx = torch.arange(32, device=DEVICE)
+    assert sim.narrow.sum() > 16 and not (sim.narrow & sim.trap).any()
+    assert (sim._geo_at(idx, sim.pos) < GEO_UNREACHABLE).all()  # every doorway scene keeps a way to the goal
