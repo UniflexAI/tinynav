@@ -19,7 +19,8 @@ from planning_node import (run_raycasting_loopy, build_route_fields, score_traje
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
                            generate_trajectory_library_3d, heading_of_pose7, angle_between,
-                           route_left_at, around_obstacles, route_blocked_ahead)
+                           route_left_at, around_obstacles, route_blocked_ahead,
+                           goal_speed_cap)
 from types import SimpleNamespace
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
@@ -648,11 +649,11 @@ def test_the_report_names_where_the_hits_are():
 
 # --- sampling/execution decoupling: the execution half --------------------------
 
-def _sync_callback_src():
+def _plan_and_publish_src():
     src = open(os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core',
                             'planning_node.py')).read()
     return next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
-                and n.name == 'sync_callback')
+                and n.name == '_plan_and_publish')
 
 
 def test_the_all_collision_branch_publishes_nothing():
@@ -660,7 +661,7 @@ def test_the_all_collision_branch_publishes_nothing():
     is already on an obstacle cell and every trajectory is inf whichever way it
     points. There is no direction in the scores, so an escape there would be
     blind -- and a reverse row published from it was dead code."""
-    fn = _sync_callback_src()
+    fn = _plan_and_publish_src()
     allcoll = next(n for n in ast.walk(fn) if isinstance(n, ast.If)
                    and isinstance(n.test, ast.Call)
                    and getattr(n.test.func, 'id', None) == 'all')
@@ -1044,3 +1045,28 @@ def test_an_obstacle_beside_behind_or_past_the_stop_pose_does_not():
     assert not _blocked_with_box_at(0.6, 2.5)         # behind the robot
     assert not _blocked_with_box_at(4.0, 2.5)         # past the stop pose
 
+
+
+# --- goal-proximity trapezoid (the arrival brake) --------------------------------
+
+_FAR_M, _NEAR_M, _FAR_V, _NEAR_V = 1.0, 0.3, 0.6, 0.3
+
+
+def test_goal_speed_cap_holds_the_rig_anchors():
+    # the two numbers the schedule was tuned to: 1 m -> 0.6 m/s, 0.3 m -> 0.3 m/s
+    assert goal_speed_cap(1.0, _FAR_M, _NEAR_M, _FAR_V, _NEAR_V) == 0.6
+    assert goal_speed_cap(0.3, _FAR_M, _NEAR_M, _FAR_V, _NEAR_V) == 0.3
+
+
+def test_goal_speed_cap_floors_below_the_ramp_and_is_linear_on_it():
+    cap = lambda d: goal_speed_cap(d, _FAR_M, _NEAR_M, _FAR_V, _NEAR_V)
+    assert cap(0.05) == 0.3                      # the floor holds to the arrival circle
+    assert abs(cap(0.65) - 0.45) < 1e-9          # linear between the anchors
+    assert cap(0.9) > cap(0.5)
+
+
+def test_goal_speed_cap_leaves_the_open_to_the_clearance_schedule():
+    # beyond the ramp start there is no cap at all -- not 0.6: the capture
+    # prior / operator speed still governs the cruise
+    assert goal_speed_cap(1.5, _FAR_M, _NEAR_M, _FAR_V, _NEAR_V) is None
+    assert goal_speed_cap(1.01, _FAR_M, _NEAR_M, _FAR_V, _NEAR_V) is None

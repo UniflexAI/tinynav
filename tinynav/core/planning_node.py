@@ -799,6 +799,19 @@ def route_blocked_ahead(ESDF_map, path_dist_map, remaining_map, rem_here, stop_r
     return bool((ESDF_map[ahead] < half_w).any())
 
 
+def goal_speed_cap(dist_m, far_m, near_m, far_v, near_v):
+    """The goal-proximity trapezoid: the forward-speed cap (m/s) at `dist_m` from
+    the goal, or None for none. Full speed beyond `far_m`; linear from `far_v` at
+    `far_m` down to `near_v` at `near_m`; `near_v` held below that, to the arrival
+    circle -- a floor, not a crawl: below it the standstill rows win and the robot
+    stalls short of the goal. This rig anchors 1 m -> 0.6 m/s and 0.3 m -> 0.3 m/s
+    (the declare_parameter defaults)."""
+    if dist_m > far_m:
+        return None
+    # np.interp saturates: the floor holds for every dist_m <= near_m.
+    return float(np.interp(dist_m, [near_m, far_m], [near_v, far_v]))
+
+
 @njit(cache=True)
 def _grid_dijkstra(free, seed_i, seed_j, seed_m, need_i, need_j, resolution):
     """Metres from the seeds (cells, each at its own starting distance) to each cell
@@ -1146,6 +1159,15 @@ class PlanningNode(Node):
         # The front face sits ~2.5 m behind the grid's forward edge.
         self.declare_parameter('clear_scan_m', 2.4)  # forward clearance scan cap (m)
         self.declare_parameter('t_react_s', 0.2)     # perception+plan latency (s)
+        # The goal-proximity trapezoid (goal_speed_cap): the clearance schedule only
+        # knows obstacles, so without a goal term the lattice still offers full-speed
+        # rows one step from the goal -- the stop is then the arrival circle firing
+        # and the 0.6 m/s^2 limiter catching up, 0.8 m past the POI from 1 m/s. The
+        # ramp scales the lattice instead. Anchors: 1 m -> 0.6 m/s, 0.3 m -> 0.3 m/s.
+        self.declare_parameter('goal_slow_far_m', 1.0)   # ramp start, metres to the goal
+        self.declare_parameter('goal_slow_near_m', 0.3)  # ramp end; the floor holds from here in
+        self.declare_parameter('goal_slow_far_v', 0.6)   # speed at the ramp start (m/s)
+        self.declare_parameter('goal_slow_near_v', 0.3)  # speed at the ramp end / the floor
         # Lateral-acceleration cap, vx*omega (m/s^2). Binds only above
         # max_lat_acc/max_angular_vel; below that the omega range is unchanged. 1e9 is
         # no cap: a fast row may turn at the full rate, so a turn costs no speed.
@@ -1163,6 +1185,10 @@ class PlanningNode(Node):
         self._clear_open_m = float(self.get_parameter('clear_open_m').value)
         self._clear_scan_m = float(self.get_parameter('clear_scan_m').value)
         self._t_react_s = float(self.get_parameter('t_react_s').value)
+        self._goal_slow_far_m = float(self.get_parameter('goal_slow_far_m').value)
+        self._goal_slow_near_m = float(self.get_parameter('goal_slow_near_m').value)
+        self._goal_slow_far_v = float(self.get_parameter('goal_slow_far_v').value)
+        self._goal_slow_near_v = float(self.get_parameter('goal_slow_near_v').value)
         self._traj_max_lat_acc = float(self.get_parameter('traj_max_lat_acc').value)
         self._traj_turn_slowdown = float(self.get_parameter('traj_turn_slowdown').value)
         self._footprint_decay = float(self.get_parameter('footprint_decay').value)
@@ -1694,29 +1720,14 @@ class PlanningNode(Node):
                 self.occupancy_3d_pub.publish(self.bridge.cv2_to_imgmsg(
                     self.occupancy_grid.astype(np.float32), header=header))
 
-        with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            init_p = self.camera_to_robot_center(T)
-            # Forward clearance drives both the peak-speed schedule and the reverse gate.
-            front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
-            v_open = self._open_target_speed()
-            v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
-            # The library exists only to pick a trajectory toward a goal, so without
-            # one there is nothing to generate or score. The occupancy grid, the ESDF
-            # and the speed cap above are maintained either way.
-            if self.target_pose is None:
-                return
-            # Last frame's choice is offered again, rebuilt from here: a turn in place by
-            # what is left of it (the 15 deg grid has no row for a half-done turn), a
-            # lattice row as itself, and a finished turn as its straight go.
-            rem = None if self._turn_heading is None else turn_remainder(
-                init_q, self._turn_heading, ROBOT_CONFIG.max_angular_vel * self._traj_dt)
-            trajectories, params, durations, is_turn = self.generate_trajectories(
-                init_p, init_q, v_allow, rem)
-            if rem is not None:
-                carry = int(np.flatnonzero(is_turn)[-1])
-            else:
-                row = self.last_param if self._turn_heading is None else (self._vx_min, 0.0)
-                carry = carried_row(params, is_turn, row[0], row[1])
+        # The route fields come before the lattice: the goal-proximity ramp
+        # (goal_speed_cap) reads rem_here, the metres actually left to drive.
+        init_p = self.camera_to_robot_center(T)
+        # The library exists only to pick a trajectory toward a goal, so without
+        # one there is nothing to generate, score, or route-field. The occupancy
+        # grid, the ESDF and their publishes above are maintained either way.
+        if self.target_pose is None:
+            return
 
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
@@ -1750,6 +1761,33 @@ class PlanningNode(Node):
             # One value for the log and the gate topic: 0 the carrot, 1 the stop pose,
             # 2 standing.
             follow = 2 if route_blocked else int(aim_stop)
+
+        with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            # Forward clearance drives both the peak-speed schedule and the reverse gate.
+            front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
+            v_open = self._open_target_speed()
+            v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
+            # The goal trapezoid rides on the clearance schedule. Measured along the
+            # route when there is one -- the metres actually left to drive, so a goal
+            # around a corner does not slow the whole leg -- straight-line when not.
+            goal_d = (float(rem_here) if has_route
+                      else float(np.linalg.norm(init_p[:2] - self.target_pose[:2])))
+            cap = goal_speed_cap(goal_d, self._goal_slow_far_m, self._goal_slow_near_m,
+                                 self._goal_slow_far_v, self._goal_slow_near_v)
+            if cap is not None:
+                v_allow = min(v_allow, cap)
+            # Last frame's choice is offered again, rebuilt from here: a turn in place by
+            # what is left of it (the 15 deg grid has no row for a half-done turn), a
+            # lattice row as itself, and a finished turn as its straight go.
+            rem = None if self._turn_heading is None else turn_remainder(
+                init_q, self._turn_heading, ROBOT_CONFIG.max_angular_vel * self._traj_dt)
+            trajectories, params, durations, is_turn = self.generate_trajectories(
+                init_p, init_q, v_allow, rem)
+            if rem is not None:
+                carry = int(np.flatnonzero(is_turn)[-1])
+            else:
+                row = self.last_param if self._turn_heading is None else (self._vx_min, 0.0)
+                carry = carried_row(params, is_turn, row[0], row[1])
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             (scores, occ_points, path_costs, end_remainings, end_heading_errs, arrive_ts,
@@ -1834,7 +1872,7 @@ class PlanningNode(Node):
                 f'fwd_ok={n_fwd_ok} carried={int(sel == carry)} '
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[sel][0], target)):.0f}deg '
                 f'route_err={np.rad2deg(end_heading_errs[sel]):.0f}deg '
-                f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
+                f'v_allow={v_allow:.2f} goal_d={goal_d:.2f} front_clr={front_clearance:.2f} '
                 f'should_reverse={should_reverse} follow={follow} '
                 f'climb_cells={0 if min_span_map is None else int((min_span_map > self.obstacle_config.min_wall_span_m).sum())}'
             )
