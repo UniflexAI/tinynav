@@ -126,7 +126,16 @@ AS2_CONFIG = RobotConfig(
     front_len=0.20, rear_len=0.25, half_width=0.16,
     camera_fwd=0.20, camera_left=0.0,
     safety_radius=0.2,
+    # Operator's call 2026-11-04: the 0.2 m hard skirt turned every narrow lane into
+    # a worse-scoring detour (half_width 0.16 + skirt 0.2 = 0.36 m per side); 0.1 m
+    # keeps ~0.1 m of layout margin and lets DWA hold the lane. AS2W inherits it.
+    obstacle=ObstacleConfig(dilation_cells=2),
 )
+
+# AS2-W: the wheeled AS2. AS2_CONFIG carries no legged-only measurements (no
+# yaw deadband, default obstacle band), so the variant is the rename -- the
+# wheels change the chassis, not the plan.
+AS2W_CONFIG = replace(AS2_CONFIG, name='as2w')
 
 B2_CONFIG = RobotConfig(
     name='b2',
@@ -185,7 +194,7 @@ def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
 #: Every type this module carries. The names are the `*_CONFIG` globals below;
 #: pilot's /device/robot-type route validates against this list (imported from
 #: here), so one place owns the set.
-KNOWN_TYPES = ('go2', 'go2w', 'as2', 'b2', 'b2w', 'g1')
+KNOWN_TYPES = ('go2', 'go2w', 'as2', 'as2w', 'b2', 'b2w', 'g1')
 
 #: Which robot this process is. Resolution is **file over env**: the operator's
 #: choice (/looper/config/pilot_settings.json, written by pilot's settings page)

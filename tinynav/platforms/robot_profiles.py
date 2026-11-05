@@ -30,6 +30,7 @@ class RobotType(str, Enum):
     B2W = "b2w"
     G1 = "g1"
     AS2 = "as2"
+    AS2W = "as2w"
 
 
 class Family(str, Enum):
@@ -199,6 +200,18 @@ PROFILES: dict[RobotType, RobotProfile] = {
         # driver re-arms at every motion start -- an unconditional call would
         # walk NORMAL_WALK back to STAND_UP and the next Move gets -1. The
         # switch lives only in stand_steps, where the pre-state is known.
+        gait_assertion=None, needs_gait_worker=False,
+        stand_steps=("StandUp", "BalanceStand"),
+        sit_steps=("StandDown",)),
+    # AS2-W: the wheeled AS2 -- the as2_protocol.md reference covers both, same
+    # hg lowstate/bms and sport client family, and nothing in the AS2 profile
+    # is legged-only, so the wheels change only the family tag.
+    RobotType.AS2W: RobotProfile(
+        RobotType.AS2W, Family.QUADRUPED_WHEELED, "sport", _sport_client("as2"),
+        "unitree_hg",
+        BatterySpec("rt/lf/bmsstate", "unitree_hg", False,
+                    CurrentSignPolicy(AS2_EXTERNAL_POWER_THRESHOLD_MA)),
+        "sportmodestate",
         gait_assertion=None, needs_gait_worker=False,
         stand_steps=("StandUp", "BalanceStand"),
         sit_steps=("StandDown",)),

@@ -43,16 +43,33 @@ class TestProfileTable(unittest.TestCase):
         self.assertEqual(p.stand_steps, ('StandUp', 'BalanceStand'))
         self.assertEqual(p.sit_steps, ('StandDown',))
 
+    def test_as2w_mirrors_as2_on_the_wheeled_family(self):
+        a2 = rp.PROFILES[rp.RobotType.AS2]
+        w = rp.PROFILES[rp.RobotType.AS2W]
+        self.assertEqual(w.family, rp.Family.QUADRUPED_WHEELED)
+        for field in ('motion_api', 'lowstate_idl', 'odom',
+                      'gait_assertion', 'needs_gait_worker',
+                      'stand_steps', 'sit_steps'):
+            self.assertEqual(getattr(w, field), getattr(a2, field), field)
+        self.assertEqual(w.battery.topic, a2.battery.topic)
+        self.assertEqual(w.battery.idl, a2.battery.idl)
+        self.assertEqual(w.battery.has_status, a2.battery.has_status)
+        self.assertIsInstance(w.battery.policy, rp.CurrentSignPolicy)
+
     def test_go2_family_uses_the_go_surface(self):
-        for t in (rp.RobotType.GO2, rp.RobotType.GO2W, rp.RobotType.B2,
-                  rp.RobotType.B2W):
+        # GO2W's gait assertion is deliberately None: the wheeled base has no
+        # walk gait for the machinery to assert, so no gait worker either.
+        for t, gait, worker in ((rp.RobotType.GO2, 'classic_walk', True),
+                                (rp.RobotType.GO2W, None, False),
+                                (rp.RobotType.B2, 'classic_walk', True),
+                                (rp.RobotType.B2W, 'classic_walk', True)):
             p = rp.PROFILES[t]
             self.assertEqual(p.lowstate_idl, 'unitree_go', t)
             self.assertEqual(p.battery.topic, 'rt/lf/lowstate', t)
             self.assertTrue(p.battery.has_status, t)
             self.assertIsInstance(p.battery.policy, rp.StatusBitPolicy, t)
-            self.assertEqual(p.gait_assertion, 'classic_walk', t)
-            self.assertTrue(p.needs_gait_worker, t)
+            self.assertEqual(p.gait_assertion, gait, t)
+            self.assertEqual(p.needs_gait_worker, worker, t)
         # The real b2 never publishes rt/utlidar/robot_odom (2026-10-15 rig
         # probe), so its chassis odometry is republished from
         # rt/lf/sportmodestate like the AS2's. b2w is still unprobed.
@@ -60,9 +77,12 @@ class TestProfileTable(unittest.TestCase):
         self.assertEqual(rp.PROFILES[rp.RobotType.GO2].odom, 'robot_odom')
         self.assertEqual(rp.PROFILES[rp.RobotType.GO2W].odom, 'robot_odom')
         self.assertEqual(rp.PROFILES[rp.RobotType.B2W].odom, 'robot_odom')
-        self.assertIn('SwitchGait', rp.PROFILES[rp.RobotType.B2].stand_steps)
-        self.assertIn('SwitchGait', rp.PROFILES[rp.RobotType.B2W].stand_steps)
-        self.assertNotIn('SwitchGait', rp.PROFILES[rp.RobotType.GO2].stand_steps)
+        # SwitchGait must NOT be a stand row: the driver appends it to every
+        # stand, and a SwitchGait(1) there is what a b2 stand got wrong
+        # (2444767). The machinery appends the gait in force instead.
+        for t in (rp.RobotType.GO2, rp.RobotType.GO2W, rp.RobotType.B2,
+                  rp.RobotType.B2W):
+            self.assertNotIn('SwitchGait', rp.PROFILES[t].stand_steps, t)
 
     def test_g1_carries_no_battery_and_no_odom(self):
         p = rp.PROFILES[rp.RobotType.G1]
@@ -128,8 +148,17 @@ class TestStepResolution(unittest.TestCase):
 
     def test_b2_stand_tail_carries_switchgait_with_its_argument(self):
         node = self._node(rp.PROFILES[rp.RobotType.B2])
+        # a stand carries the gait in force only when a gait worker exists
+        # (`self.gait is not None` gates the append) -- set what __init__ and a
+        # first gait would have set
+        node.gait = object()
+        node.walk_gait = 'classic'
+        node._gait_steps = {'classic': ('SwitchGait',
+                                        lambda: node.sport_client.SwitchGait(1))}
         for name in node.profile.stand_steps:
             node._resolve_step(name)()
+        tail = node._gait_steps[node.walk_gait]
+        tail[1]()
         self.assertEqual(node.sport_client.calls[-1], ('SwitchGait', (1,)))
 
     def test_go2_classicwalk_asserts_true(self):

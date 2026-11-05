@@ -33,3 +33,16 @@ def test_only_the_free_gait_has_floors_of_its_own(tmp_path):
     classic, free = (robot_specs.robot_config(missing, gait) for gait in ('classic', 'free'))
     floors = robot_specs.FREE_GAIT_FLOORS.get(classic.name, {})
     assert replace(classic, **floors) == free
+
+
+def test_known_types_carry_a_config_each():
+    import tinynav.core.robot_specs as specs
+    for t in specs.KNOWN_TYPES:
+        assert hasattr(specs, f'{t.upper()}_CONFIG'), t
+    assert 'as2w' in specs.KNOWN_TYPES
+    # the wheeled AS2 keeps AS2's geometry and only the name changes
+    from dataclasses import fields as dc_fields
+    a2, w = specs.AS2_CONFIG, specs.AS2W_CONFIG
+    for f in dc_fields(a2):
+        if f.name != 'name':
+            assert getattr(a2, f.name) == getattr(w, f.name), f.name
