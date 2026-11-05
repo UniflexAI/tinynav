@@ -4,5 +4,13 @@
                    "planner.strict_follow", "planner.priors", "robot.measured_camera"],
   "processes": {"planning": "tinynav/core/planning_node.py",
                 "planning_vis": "tinynav/core/planning_vis_node.py",
-                "cmd_vel_control": "tinynav/platforms/cmd_vel_control.py"}
+                "cmd_vel_control": "tinynav/platforms/cmd_vel_control.py"},
+  "map_settings": {
+    "strict_follow": {"type": "boolean", "title": "Strict Follow",
+                      "description": "Stop at obstacles instead of going around",
+                      "topic": "/planning/strict_follow", "default": false},
+    "strict_stand": {"type": "boolean", "title": "Strict Stand",
+                     "description": "With strict follow, also stand before the stop pose",
+                     "topic": "/planning/strict_stand", "default": true}
+  }
 }
