@@ -383,7 +383,7 @@ class SigLIPTRT:
 
 class RLNavPolicyTRT(TRTBase):
     """Recurrent BEV navigation policy (tinynav/rl). Call reset() when a new goal starts."""
-    def __init__(self, engine_path=f"/tinynav/tinynav/models/rl_nav_policy_v4_{platform.machine()}.plan"):
+    def __init__(self, engine_path=f"/tinynav/tinynav/models/rl_nav_policy_v5_{platform.machine()}.plan"):
         super().__init__(engine_path)
         self.h = np.zeros((1, 256), dtype=np.float32)
 
