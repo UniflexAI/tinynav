@@ -4037,6 +4037,7 @@ lekiwi = [
     { name = "lerobot", extra = ["lekiwi"] },
 ]
 rl = [
+    { name = "onnx" },
     { name = "tensorboard" },
     { name = "torch" },
 ]
@@ -4069,6 +4070,7 @@ requires-dist = [
     { name = "numba", specifier = "==0.61.2" },
     { name = "numpy", specifier = "==1.26.1" },
     { name = "onnx" },
+    { name = "onnx", marker = "extra == 'rl'", specifier = ">=1.22.0" },
     { name = "opencv-python" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pillow", marker = "extra == '3dgs'", specifier = ">=10,<12" },
