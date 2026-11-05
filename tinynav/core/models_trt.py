@@ -381,6 +381,25 @@ class SigLIPTRT:
         return await self.text_encoder.infer(text)
 
 
+class RLNavPolicyTRT(TRTBase):
+    """Recurrent BEV navigation policy (tinynav/rl). Call reset() when a new goal starts."""
+    def __init__(self, engine_path=f"/tinynav/tinynav/models/rl_nav_policy_v4_{platform.machine()}.plan"):
+        super().__init__(engine_path)
+        self.h = np.zeros((1, 256), dtype=np.float32)
+
+    def reset(self):
+        self.h[:] = 0
+
+    async def infer(self, bev: np.ndarray, vec: np.ndarray) -> np.ndarray:
+        """bev [3, 64, 64], vec [6] -> action [2] in [-1, 1] (forward speed, yaw rate)."""
+        feed = {"bev": bev[None], "vec": vec[None], "h": self.h}
+        for inp in self.inputs:
+            np.copyto(inp["host"], feed[inp["name"]])
+        out = await self.run_graph()
+        self.h[:] = out["h_out"]
+        return out["action"][0]
+
+
 class FoundationStereoTRT(TRTBase):
     def __init__(
         self,

@@ -62,6 +62,7 @@ unitree = [
     "newrawpy<=1.0.0b0",
 ]
 rl = [
+    "onnx>=1.22.0",
     "tensorboard>=2.20.0",
     "torch>=2.4,<2.11",
 ]

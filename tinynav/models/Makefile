@@ -18,6 +18,7 @@ RETINIFY_ONNX    := retinify_0_1_5_dynamic.onnx
 FOUNDATION_STEREO_ONNX := foundation_stereo_11-33-40_256x320_4.onnx
 SIGLIP_IMAGE_ONNX := siglip_vit_b_16_webli_image_fp16.onnx
 SIGLIP_TEXT_ONNX  := siglip_vit_b_16_webli_text_fp16.onnx
+RL_NAV_ONNX       := rl_nav_policy_v4.onnx
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
@@ -31,10 +32,11 @@ RETINIFY_ENGINE   := $(basename $(RETINIFY_ONNX))_$(ARCH).plan
 FOUNDATION_STEREO_ENGINE := $(basename $(FOUNDATION_STEREO_ONNX))_$(ARCH).plan
 SIGLIP_IMAGE_ENGINE := $(basename $(SIGLIP_IMAGE_ONNX))_$(ARCH).plan
 SIGLIP_TEXT_ENGINE  := $(basename $(SIGLIP_TEXT_ONNX))_$(ARCH).plan
+RL_NAV_ENGINE       := $(basename $(RL_NAV_ONNX))_$(ARCH).plan
 
-ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE)
+ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) $(RL_NAV_ENGINE)
 
-.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo siglip clean
+.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo siglip rl_nav clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -48,6 +50,7 @@ lightglue: $(LIGHTGLUE_ENGINE) ## Build LightGlue engine
 retinify: $(RETINIFY_ENGINE) ## Build Retinify engine
 foundation_stereo: $(FOUNDATION_STEREO_ENGINE) ## Build FoundationStereo engine
 siglip: $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) ## Build SigLIP image/text engines
+rl_nav: $(RL_NAV_ENGINE) ## Build the RL local-navigation policy engine
 
 $(DINO_ENGINE): $(DINO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
@@ -92,6 +95,10 @@ $(SIGLIP_TEXT_ENGINE): $(SIGLIP_TEXT_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
         $(if $(SIGLIP_TEXT_SHAPES),--shapes=$(SIGLIP_TEXT_SHAPES),) --fp16
 
+
+# fp32: the policy is tiny (~0.8M params), so fp16 buys nothing and could shift the GRU state
+$(RL_NAV_ENGINE): $(RL_NAV_ONNX)
+	$(TRTEXEC) --onnx=$< --saveEngine=$@
 
 clean: ## Remove generated TensorRT plans for this architecture
 	rm -f *_$(ARCH).plan
