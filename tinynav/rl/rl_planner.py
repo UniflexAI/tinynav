@@ -6,6 +6,7 @@ GUARD_HORIZON seconds and drops the forward speed (keeping the turn) if the foot
 enter an obstacle.
 """
 import asyncio
+import os
 
 import numpy as np
 
@@ -20,10 +21,12 @@ GUARD_HORIZON = 1.0
 
 
 class TRTPolicy:
-    """Synchronous wrapper around models_trt.RLNavPolicyTRT for use inside ROS callbacks."""
+    """Synchronous wrapper around models_trt.RLNavPolicyTRT for use inside ROS callbacks.
+    TINYNAV_RL_ENGINE overrides the engine path, e.g. to go back to an older policy."""
     def __init__(self):
         from tinynav.core.models_trt import RLNavPolicyTRT
-        self.trt = RLNavPolicyTRT()
+        engine = os.environ.get("TINYNAV_RL_ENGINE")
+        self.trt = RLNavPolicyTRT(engine) if engine else RLNavPolicyTRT()
         self.loop = asyncio.new_event_loop()
 
     def reset(self):
