@@ -29,17 +29,17 @@ def straight_to_goal(obs, done):
     return torch.stack([torch.full_like(g[:, 0], 0.6), (torch.atan2(g[:, 1], g[:, 0]) * 1.5).clamp(-1, 1)], 1)
 
 
-def evaluate(make_actor, level, envs, seed, record=0, trap_prob=0.3):
+def evaluate(make_actor, level, envs, seed, record=0, trap_prob=0.3, narrow_prob=0.25):
     """One episode per env; returns outcome rates (all, trap-only), quality metrics and, for the first `record`
     envs, per-step frames."""
-    sim = NavSim(SimConfig(num_envs=envs, trap_prob=trap_prob), device="cuda", seed=seed)
+    sim = NavSim(SimConfig(num_envs=envs, trap_prob=trap_prob, narrow_prob=narrow_prob), device="cuda", seed=seed)
     set_level(sim, level)
     sim.reset()
     obs, act_fn, done = sim.observe(), make_actor(envs), torch.zeros(envs, dtype=torch.bool, device=sim.device)
     outcome = torch.full((envs,), -1, device=sim.device)  # 0 reached, 1 collided, 2 timeout
     min_clear, eff, abs_w = torch.zeros(envs, device=sim.device), torch.zeros(envs, device=sim.device), torch.zeros(envs, device=sim.device)
     frames = [[] for _ in range(record)]
-    trap = sim.trap.clone()
+    trap, narrow = sim.trap.clone(), sim.narrow.clone()
     boxes = [sim.boxes[i].cpu().numpy() for i in range(record)]
     while (outcome < 0).any():
         for i in range(record):
@@ -56,7 +56,8 @@ def evaluate(make_actor, level, envs, seed, record=0, trap_prob=0.3):
     trap_rates = [(outcome[trap] == k).float().mean().item() for k in range(3)]
     ok = outcome == 0
     quality = {"near_miss": (min_clear[outcome != 1] < 0.1).float().mean().item(),  # came within 10cm without colliding
-               "efficiency": eff[ok].mean().item(), "mean_abs_w": abs_w[ok].mean().item()}
+               "efficiency": eff[ok].mean().item(), "mean_abs_w": abs_w[ok].mean().item(),
+               "narrow_success": ok[narrow].float().mean().item() if narrow.any() else float("nan")}
     return rates, trap_rates, quality, list(zip(boxes, frames, outcome[:record].tolist()))
 
 
@@ -101,6 +102,7 @@ def main():
     ap.add_argument("--gif")
     ap.add_argument("--seed", type=int, default=123)  # differs from training seeds
     ap.add_argument("--trap-prob", type=float, default=0.3)
+    ap.add_argument("--narrow-prob", type=float, default=0.25)
     args = ap.parse_args()
     net = ActorCritic().cuda().eval()
     ck = torch.load(args.ckpt, map_location="cuda")
@@ -108,9 +110,10 @@ def main():
     print(f"checkpoint step {ck['step']:,}, trained up to level {ck['level']}; evaluating level {args.level} on {args.envs} episodes")
     for name, fn in (("policy", lambda n: PolicyActor(net, n)), ("straight-to-goal", lambda n: straight_to_goal)):
         (succ, coll, tout), (ts, tc, tt), q, eps = evaluate(fn, args.level, args.envs, args.seed, record=4 if name == "policy" and args.gif else 0,
-                                                            trap_prob=args.trap_prob)
+                                                            trap_prob=args.trap_prob, narrow_prob=args.narrow_prob)
         print(f"{name:>17}: success {succ:.1%}  collision {coll:.1%}  timeout {tout:.1%}   | trap episodes: success {ts:.1%}  collision {tc:.1%}  timeout {tt:.1%}")
-        print(f"{'':>17}  near-miss (<10cm) {q['near_miss']:.1%}  path efficiency {q['efficiency']:.1%}  mean |yaw rate| {q['mean_abs_w']:.3f} rad/s")
+        print(f"{'':>17}  near-miss (<10cm) {q['near_miss']:.1%}  path efficiency {q['efficiency']:.1%}  mean |yaw rate| {q['mean_abs_w']:.3f} rad/s"
+              f"  narrow-passage success {q['narrow_success']:.1%}")
         if eps:
             render_gif(eps, args.gif)
 

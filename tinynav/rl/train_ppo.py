@@ -88,7 +88,8 @@ def main():
     window, level_since = [], 0  # per-update (reached, collided, episodes)
     best_eval = -1.0
     while step < args.steps:
-        stats = {"reached": 0, "collided": 0, "timeout": 0, "ret": [], "len": [], "trap_n": 0, "trap_ok": 0, "clear": [], "eff": [], "w": []}
+        stats = {"reached": 0, "collided": 0, "timeout": 0, "ret": [], "len": [], "trap_n": 0, "trap_ok": 0, "narrow_n": 0, "narrow_ok": 0,
+                 "clear": [], "eff": [], "w": []}
         h0 = h.clone()
         with torch.no_grad():
             for t in range(T):
@@ -109,6 +110,8 @@ def main():
                         stats[k] += int(info[k].sum())
                     stats["trap_n"] += int((done & info["trap"]).sum())
                     stats["trap_ok"] += int((info["reached"] & info["trap"]).sum())
+                    stats["narrow_n"] += int((done & info["narrow"]).sum())
+                    stats["narrow_ok"] += int((info["reached"] & info["narrow"]).sum())
                     stats["clear"] += info["min_clearance"][done & ~info["collided"]].tolist()
                     stats["eff"] += info["efficiency"][info["reached"]].tolist()
                     stats["w"] += info["mean_abs_w"][done].tolist()
@@ -164,6 +167,8 @@ def main():
                 writer.add_scalar(f"episode/{k}", v, step)
             if stats["trap_n"]:
                 writer.add_scalar("episode/trap_success_rate", trap, step)
+            if stats["narrow_n"]:
+                writer.add_scalar("episode/narrow_success_rate", stats["narrow_ok"] / stats["narrow_n"], step)
             if stats["clear"]:
                 writer.add_scalar("episode/near_miss_rate", float(np.mean(np.array(stats["clear"]) < 0.1)), step)
             if stats["eff"]:

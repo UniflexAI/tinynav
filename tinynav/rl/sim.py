@@ -22,9 +22,10 @@ GX, GY, GZ = GRID_SHAPE
 MAX_RAY_SAMPLES = 56  # past this many voxel steps a ray from the grid center is outside the grid
 FAR_DEPTH = 65.5  # what the stereo depth reports for sky / out-of-range pixels
 N_TRAP = 3  # extra box slots for the wall / U-cup placed between start and goal
+N_NARROW = 4  # wall with a doorway across start->goal, optionally extended into a corridor
 NOVELTY_CELL = 0.5
 GEO_RES = 0.2  # geodesic distance field, training-only critic input
-GEO_INFLATE = 0.2  # robot half-width + margin
+GEO_INFLATE = 0.15  # robot half-width, so 0.6m doorways stay open on the 0.2m geodesic grid
 GEO_UNREACHABLE = 30.0
 PRIV_DIM = 9  # geodesic distance here + its slope toward 8 robot-frame directions
 
@@ -71,10 +72,13 @@ class SimConfig:
     trap_prob: float = 0.3  # episodes with a wall (or U-cup) between start and goal
     trap_half: tuple = (1.5, 3.5)  # wall half-length range, grown by the curriculum
     cup_prob: float = 0.5  # fraction of traps closed into a U around the start
+    narrow_prob: float = 0.25  # non-trap episodes whose only way through is a doorway / corridor
+    door_width: tuple = (0.6, 1.0)
+    corridor_prob: float = 0.5
     novelty_reward: float = 0.05  # per newly visited NOVELTY_CELL, keeps exploring when stuck
-    clearance_margin: float = 0.3  # footprint-to-obstacle distance below which a penalty ramps in
-    clearance_penalty: float = 0.15  # per step at zero clearance; stops corner scraping
-    turn_penalty: float = 0.05  # per step at full yaw rate (scaled by (w / w_max)^2); stops weaving
+    clearance_margin: float = 0.4  # footprint-to-obstacle distance below which a penalty ramps in
+    clearance_penalty: float = 0.3  # per step at zero clearance; a 0.6m doorway still costs < 0.2/step
+    turn_penalty: float = 0.1  # per step at full yaw rate (scaled by (w / w_max)^2); stops weaving
     efficiency_bonus: float = 5.0  # extra on arrival, scaled by geodesic start distance / path length
 
 
@@ -128,7 +132,8 @@ class NavSim:
         self.grid = torch.zeros((n, GX, GY, GZ), device=dev)
         self.base = torch.zeros((n, 3), device=dev)  # world position of global voxel (0,0,0)
         self.o = torch.zeros((n, 2), dtype=torch.long, device=dev)  # grid window origin, global voxels
-        self.boxes = torch.zeros((n, cfg.n_boxes + 4 + N_TRAP, 5), device=dev)  # cx, cy, hx, hy, height
+        self.n_slots = cfg.n_boxes + 4 + N_TRAP + N_NARROW  # random boxes, border, trap, doorway
+        self.boxes = torch.zeros((n, self.n_slots, 5), device=dev)  # cx, cy, hx, hy, height
         self.pos = torch.zeros((n, 2), device=dev)
         self.yaw = torch.zeros(n, device=dev)
         self.vel = torch.zeros((n, 2), device=dev)
@@ -148,6 +153,7 @@ class NavSim:
         self.fp_edge = torch.cat([torch.stack([f, torch.full_like(f, hw)], 1), torch.stack([f, torch.full_like(f, -hw)], 1),
                                   torch.stack([torch.full_like(sd, fl), sd], 1), torch.stack([torch.full_like(sd, -rl), sd], 1)])
         self.trap = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.narrow = torch.zeros(n, dtype=torch.bool, device=dev)
         self.hist = torch.full((n, TRAIL_LEN, 2), math.nan, device=dev)  # own path, index = age in ticks
         self.nv = int(math.ceil((cfg.arena + 2) / NOVELTY_CELL))
         self.visited = torch.zeros((n, self.nv, self.nv), dtype=torch.bool, device=dev)
@@ -165,7 +171,7 @@ class NavSim:
     # ---------- world ----------
     def _make_boxes(self, idx):
         c, k = self.cfg, len(idx)
-        b = torch.zeros((k, c.n_boxes + 4 + N_TRAP, 5), device=self.device)
+        b = torch.zeros((k, self.n_slots, 5), device=self.device)
         half = c.arena / 2
         b[:, :c.n_boxes, 0:2] = self._rand(k, c.n_boxes, 2, lo=-half, hi=half)
         b[:, :c.n_boxes, 2:4] = self._rand(k, c.n_boxes, 2, lo=c.box_size[0], hi=c.box_size[1]) / 2
@@ -226,8 +232,43 @@ class NavSim:
         walls[:, :, 4] *= ((self._rand(k) < c.trap_prob) & (dd > 1.5))[:, None]
         ok = ~self._footprint_hits(walls, s, self.yaw[idx], c.clearance).any(1) & self._point_clear(walls, g, c.clearance + 0.2)
         walls[:, :, 4] *= ok[:, None]
-        self.boxes[idx, -N_TRAP:] = walls
+        t0 = c.n_boxes + 4
+        self.boxes[idx, t0:t0 + N_TRAP] = walls
         self.trap[idx] = walls[:, 0, 4] > 0
+
+    def _add_narrow(self, idx):
+        """Wall across the start->goal line whose only opening is a door_width doorway, half the time
+        extended into a corridor. Teaches that a tight passage must be taken when it is the way."""
+        c, k, dev = self.cfg, len(idx), self.device
+        s, g = self.pos[idx], self.goal[idx]
+        d = g - s
+        ax = (d[:, 0].abs() >= d[:, 1].abs()).long()
+        dom, lat = 1 - ax, ax
+        ar = torch.arange(k, device=dev)
+        dd, sign = d[ar, dom].abs(), d[ar, dom].sign()
+        frac = self._rand(k, lo=0.3, hi=0.7)
+        along = s[ar, dom] + sign * frac * dd
+        door = s[ar, lat] + frac * d[ar, lat] + self._rand(k, lo=-1.0, hi=1.0)
+        w = self._rand(k, lo=c.door_width[0], hi=c.door_width[1])
+        span = self._rand(k, lo=4.0, hi=8.0)  # long enough that going round the wall end rarely pays
+        clen = self._rand(k, lo=1.0, hi=3.0) * (self._rand(k) < c.corridor_prob)
+        walls = torch.zeros((k, N_NARROW, 5), device=dev)
+        def put(j, a, lt, h_a, h_l):
+            walls[ar, j, dom], walls[ar, j, lat], walls[ar, j, 2 + dom], walls[ar, j, 2 + lat] = a, lt, h_a, h_l
+        thin = torch.full_like(w, 0.08)
+        put(0, along, door + w / 2 + span / 2, thin, span / 2)  # wall halves on either side of the door
+        put(1, along, door - w / 2 - span / 2, thin, span / 2)
+        put(2, along, door + w / 2 + 0.08, clen / 2, thin)  # corridor sides through the door
+        put(3, along, door - w / 2 - 0.08, clen / 2, thin)
+        on = ~self.trap[idx] & (self._rand(k) < c.narrow_prob) & (dd > 1.5)
+        walls[:, :2, 4] = 1.0
+        walls[:, 2:, 4] = (clen > 0)[:, None].float()
+        walls[:, :, 4] *= on[:, None]
+        ok = ~self._footprint_hits(walls, s, self.yaw[idx], c.clearance).any(1) & self._point_clear(walls, g, c.clearance + 0.2)
+        walls[:, :, 4] *= ok[:, None]
+        t0 = c.n_boxes + 4 + N_TRAP
+        self.boxes[idx, t0:t0 + N_NARROW] = walls
+        self.narrow[idx] = walls[:, 0, 4] > 0
 
     def _geodesic(self, idx):
         """Shortest-path distance to the goal over the inflated boxes (8-connected relaxation).
@@ -308,6 +349,7 @@ class NavSim:
                 self._make_boxes(todo)  # too crowded, regenerate
         assert len(todo) == 0, "could not place start/goal"
         self._add_traps(idx)
+        self._add_narrow(idx)
         self._geodesic(idx)
         ok = self._geo_at(idx, self.pos[idx]) < GEO_UNREACHABLE
         if not ok.all():  # walls closed the start off from the goal; draw those scenes again
@@ -501,7 +543,7 @@ class NavSim:
         reward += (10.0 + c.efficiency_bonus * efficiency) * reached - 10.0 * collided
         self.best_dist, self.last_action = torch.minimum(self.best_dist, dist), action
         done = collided | reached | timeout
-        info = {"collided": collided, "reached": reached, "timeout": timeout & ~collided & ~reached, "trap": self.trap.clone(),
+        info = {"collided": collided, "reached": reached, "timeout": timeout & ~collided & ~reached, "trap": self.trap.clone(), "narrow": self.narrow.clone(),
                 "min_clearance": self.min_clear.clone(), "efficiency": efficiency, "mean_abs_w": self.abs_w / self.steps.clamp(min=1)}
         self._sense(torch.nonzero(~done).squeeze(1))
         self.reset(torch.nonzero(done).squeeze(1))
