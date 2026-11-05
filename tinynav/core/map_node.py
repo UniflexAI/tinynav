@@ -69,6 +69,13 @@ X_MERGE_R = 1.0                   # hypothesis merge radius [m]
 X_PRUNE_W = 0.05                  # relative-weight prune floor
 X_Q_TIME = float(os.environ.get("TINYNAV_X_Q_TIME", 0.04))  # VIO drift [m/s] over update gaps
 X_REOPEN_AFTER = _x_env_int("TINYNAV_X_REOPEN_AFTER", 6)    # unanimous rejects before reopening gates
+# Calibration matrix mapping odometry-frame displacement vectors into the map
+# frame (estimated once per map, from the mapping-session trajectories).
+# Unset: hypotheses propagate by the full SE3 odometry delta (legacy form).
+# The odometry orientation channel can be unreliable; consuming only its
+# translation delta keeps the position prediction independent of it.
+_x_vio_m_raw = os.environ.get("TINYNAV_X_VIO_M", "")
+X_VIO_M = np.array([float(v) for v in _x_vio_m_raw.split(",")]).reshape(3, 3) if _x_vio_m_raw else None
 
 def _log6(T):
     rvec, _ = cv2.Rodrigues(T[:3, :3].astype(np.float64))
@@ -820,10 +827,25 @@ class MapNode(Node):
                 'w': w, 'n_acc': 0, 't': t}
 
     def _xg_predict(self, h, V, t):
-        dV = np.linalg.inv(h['V']) @ V
-        P = h['A'] @ dV
-        dist = float(np.linalg.norm(dV[:3, 3]))
-        ang = float(np.linalg.norm(_log6(dV)[:3]))
+        if X_VIO_M is None:
+            # legacy form: full SE3 odometry delta; exact for any constant
+            # rigid offset between the odometry and map frames, but its
+            # position prediction depends on the odometry orientation
+            dV = np.linalg.inv(h['V']) @ V
+            P = h['A'] @ dV
+            dist = float(np.linalg.norm(dV[:3, 3]))
+            ang = float(np.linalg.norm(_log6(dV)[:3]))
+        else:
+            # calibrated form: position advances by the odometry translation
+            # delta mapped into the map frame, so the position prediction
+            # never depends on the odometry orientation
+            d_map = (V[:3, 3] - h['V'][:3, 3]) @ X_VIO_M.T
+            P = h['A'].copy()
+            P[:3, 3] = h['A'][:3, 3] + d_map
+            P[:3, :3] = h['A'][:3, :3] @ (np.linalg.inv(h['V'][:3, :3]) @ V[:3, :3])
+            dist = float(np.linalg.norm(d_map))
+            dR = np.linalg.inv(h['V'][:3, :3]) @ V[:3, :3]
+            ang = float(np.linalg.norm(cv2.Rodrigues(dR.astype(np.float64))[0]))
         q = np.diag([(0.05 * ang + 0.02) ** 2] * 3 + [(0.08 * dist + 0.03) ** 2] * 3)
         # the VIO delta carries drift that motion terms do not model: a hypothesis
         # long without an accepted update must widen, or correct measurements
