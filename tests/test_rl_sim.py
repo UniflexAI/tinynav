@@ -173,3 +173,19 @@ def test_rollout_clearance_sees_the_wall_ahead():
     still = sim.rollout_clearance(torch.tensor([[0.0, 0.0]], device=DEVICE))
     ahead = sim.rollout_clearance(torch.tensor([[1.0, 0.0]], device=DEVICE))
     assert abs(float(still) - (1.4 - sim.fp[0])) < 1e-4 and float(ahead) == 0.0  # 1m/s for 1s reaches the wall
+
+
+def test_geodesic_progress_rewards_heading_for_the_doorway():
+    # Wall between robot and goal with a gap off to the side: stepping toward the gap lowers the
+    # geodesic distance even though the straight-line distance to the goal grows.
+    sim = NavSim(SimConfig(num_envs=1, n_boxes=2, trap_prob=0.0, narrow_prob=0.0), device=DEVICE, seed=0)
+    sim.reset()
+    sim.boxes[0, :] = 0
+    sim.boxes[0, 0] = torch.tensor([0.0, 2.5, 0.1, 2.0, 1.0], device=DEVICE)   # wall x=0, y in [0.5, 4.5]
+    sim.boxes[0, 1] = torch.tensor([0.0, -2.5, 0.1, 2.0, 1.0], device=DEVICE)  # wall x=0, y in [-4.5, -0.5]: gap at y=0
+    sim.goal[0] = torch.tensor([2.0, 2.0], device=DEVICE)
+    sim._geodesic(torch.tensor([0], device=DEVICE))
+    idx = torch.tensor([0], device=DEVICE)
+    here, toward_gap = torch.tensor([[-2.0, 2.0]], device=DEVICE), torch.tensor([[-2.0, 1.4]], device=DEVICE)  # straight down
+    assert float(sim._geo_smooth(idx, toward_gap)) < float(sim._geo_smooth(idx, here)) - 0.3
+    assert (toward_gap - sim.goal).norm() > (here - sim.goal).norm()

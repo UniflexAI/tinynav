@@ -79,6 +79,10 @@ class SimConfig:
     door_width: tuple = (0.8, 1.2)  # 0.15-0.35m each side of the 0.5m wide RL footprint
     corridor_prob: float = 0.5
     novelty_reward: float = 0.05  # per newly visited NOVELTY_CELL, keeps exploring when stuck
+    # Progress on the geodesic (around obstacles, through doorways) instead of straight-line distance.
+    # Straight-line progress gave no signal toward a doorway offset from the goal line, so the policy
+    # treated door walls like traps and went round them. Training-only, like the critic's input.
+    geodesic_progress: bool = True
     clearance_margin: float = 0.25  # on top of the footprint's own margin; penalty ramps in below this
     clearance_penalty: float = 0.15  # per step at zero clearance; the guard penalty below does the real work
     turn_penalty: float = 0.1  # per step at full yaw rate (scaled by (w / w_max)^2); stops weaving
@@ -304,6 +308,20 @@ class NavSim:
             dist = nd
         self.geo[idx] = dist.clamp(max=GEO_UNREACHABLE)
 
+    def _geo_smooth(self, idx, p):
+        """Bilinearly interpolated geodesic distance at points p [k,2] (the 0.2m grid would pay progress in steps)."""
+        g = (p + self.ng * GEO_RES / 2) / GEO_RES - 0.5
+        i0 = torch.floor(g).long()
+        f = g - i0
+        i0 = i0.clamp(0, self.ng - 2)
+        def at(dx, dy):
+            return self.geo[idx, i0[:, 0] + dx, i0[:, 1] + dy]
+        return ((1 - f[:, 0]) * (1 - f[:, 1]) * at(0, 0) + f[:, 0] * (1 - f[:, 1]) * at(1, 0)
+                + (1 - f[:, 0]) * f[:, 1] * at(0, 1) + f[:, 0] * f[:, 1] * at(1, 1))
+
+    def _progress_dist(self, idx):
+        return self._geo_smooth(idx, self.pos[idx]) if self.cfg.geodesic_progress else (self.goal[idx] - self.pos[idx]).norm(dim=1)
+
     def _geo_at(self, idx, p):
         i = ((p + self.ng * GEO_RES / 2) / GEO_RES).long().clamp(0, self.ng - 1)
         return self.geo[idx[:, None], i[..., 0], i[..., 1]] if p.dim() == 3 else self.geo[idx, i[:, 0], i[:, 1]]
@@ -391,7 +409,7 @@ class NavSim:
         # real grid starts centered on the first camera pose: origin = cam - shape*res/2
         self.base[idx] = cam - torch.tensor(GRID_SHAPE, device=self.device) * GRID_RES / 2
         self.o[idx] = 0
-        self.best_dist[idx] = (self.goal[idx] - self.pos[idx]).norm(dim=1)
+        self.best_dist[idx] = self._progress_dist(idx)
         self.geo_start[idx] = self._geo_at(idx, self.pos[idx])
         self.path_len[idx], self.abs_w[idx] = 0, 0
         self.min_clear[idx] = math.inf
@@ -563,7 +581,9 @@ class NavSim:
         reached = dist < c.goal_tol
         timeout = self.steps >= c.max_steps
         # progress only counts new closest approaches, so backing out of a dead end costs nothing
-        reward = (self.best_dist - dist).clamp(min=0) - c.time_penalty - 0.01 * ((action - self.last_action) ** 2).sum(1)
+        all_envs = torch.arange(c.num_envs, device=self.device)
+        prog = self._progress_dist(all_envs)
+        reward = (self.best_dist - prog).clamp(min=0) - c.time_penalty - 0.01 * ((action - self.last_action) ** 2).sum(1)
         reward += c.novelty_reward * self._visit(torch.arange(c.num_envs, device=self.device))
         clear = self.clearance()
         self.min_clear = torch.minimum(self.min_clear, clear)
@@ -578,7 +598,7 @@ class NavSim:
         reward -= c.reverse_penalty * (-cmd[:, 0] / -c.v_min).clamp(min=0) * torch.where(self.rear_on, 0.3, 1.0)
         efficiency = ((self.geo_start - c.goal_tol) / self.path_len.clamp(min=1e-3)).clamp(0, 1)
         reward += (10.0 + c.efficiency_bonus * efficiency) * reached - 10.0 * collided
-        self.best_dist, self.last_action = torch.minimum(self.best_dist, dist), action
+        self.best_dist, self.last_action = torch.minimum(self.best_dist, prog), action
         done = collided | reached | timeout
         info = {"collided": collided, "reached": reached, "timeout": timeout & ~collided & ~reached, "trap": self.trap.clone(), "narrow": self.narrow.clone(),
                 "min_clearance": self.min_clear.clone(), "efficiency": efficiency, "mean_abs_w": self.abs_w / self.steps.clamp(min=1)}
