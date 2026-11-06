@@ -124,3 +124,52 @@ def test_narrow_scenes_are_solvable():
     idx = torch.arange(32, device=DEVICE)
     assert sim.narrow.sum() > 16 and not (sim.narrow & sim.trap).any()
     assert (sim._geo_at(idx, sim.pos) < GEO_UNREACHABLE).all()  # every doorway scene keeps a way to the goal
+
+
+def test_rear_camera_fusion_matches_pilot():
+    """Front frame rolls/decays the grid, rear rays are then added and clipped (Pilot planning_cameras)."""
+    from tinynav.core.planning_node import run_raycasting_loopy
+    from tinynav.rl.bev import GRID_SHAPE
+    sim = NavSim(SimConfig(num_envs=1, n_boxes=16, rear_prob=1.0), device=DEVICE, seed=4)
+    sim.reset()
+    c = sim.cfg
+    K = np.array([[c.fx, 0, c.cx], [0, c.fy, c.cy], [0, 0, 1.0]])
+    idx = torch.tensor([0], device=DEVICE)
+    g_np, o_np = [x.double().cpu().numpy() for x in sim.unrolled_grid(0)]
+
+    def image(depth):
+        img = np.full((c.img_h, c.img_w), np.nan)
+        img[::RAY_STEP, ::RAY_STEP] = depth[0].cpu().double().numpy().reshape(img[::RAY_STEP, ::RAY_STEP].shape)
+        return img
+
+    def pose(R, cam):
+        T = np.eye(4)
+        T[:3, :3], T[:3, 3] = R[0].cpu().double().numpy(), cam[0].cpu().double().numpy()
+        return T
+    for f in range(12):
+        sim.pos[0] += 0.12 * torch.stack([torch.cos(sim.yaw[0]), torch.sin(sim.yaw[0])])
+        sim.yaw[0] += 0.2
+        R, cam = sim.camera_pose(idx)
+        depth = sim._render(idx, R, cam)
+        sim._recenter(idx, cam)
+        sim._fuse(idx, R, cam, depth)
+        g_np, o_np = update_occupancy_grid(g_np, o_np, image(depth), pose(R, cam), K, GRID_RES, RAY_STEP)
+        Rr, camr = sim.camera_pose(idx, rear=True)
+        depth_r = sim._render(idx, Rr, camr)
+        sim._fuse(idx, Rr, camr, depth_r, primary=False)
+        rays = run_raycasting_loopy(image(depth_r), pose(Rr, camr), GRID_SHAPE, c.fx, c.fy, c.cx, c.cy, o_np, RAY_STEP, GRID_RES)
+        g_np = np.clip(g_np + rays, -0.2, 0.2)
+    g_t = sim.unrolled_grid(0)[0].cpu().numpy()
+    assert np.isclose(g_t, g_np, atol=1e-4).mean() > 0.9995
+    assert sim.rear_on.all()
+
+
+def test_rollout_clearance_sees_the_wall_ahead():
+    sim = NavSim(SimConfig(num_envs=1, n_boxes=1, trap_prob=0.0, narrow_prob=0.0), device=DEVICE, seed=0)
+    sim.reset()
+    sim.boxes[0, :] = 0
+    sim.boxes[0, 0] = torch.tensor([1.5, 0.0, 0.1, 1.0, 1.0], device=DEVICE)  # face at x=1.4
+    sim.pos[0], sim.yaw[0] = torch.tensor([0.0, 0.0], device=DEVICE), torch.tensor(0.0, device=DEVICE)
+    still = sim.rollout_clearance(torch.tensor([[0.0, 0.0]], device=DEVICE))
+    ahead = sim.rollout_clearance(torch.tensor([[1.0, 0.0]], device=DEVICE))
+    assert abs(float(still) - (1.4 - sim.fp[0])) < 1e-4 and float(ahead) == 0.0  # 1m/s for 1s reaches the wall

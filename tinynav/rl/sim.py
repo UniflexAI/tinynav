@@ -16,7 +16,7 @@ import torch
 from tinynav.core.robot_specs import RL_FOOTPRINT, ROBOT_CONFIG
 from tinynav.rl.bev import (BEV_RES, BEV_SIZE, ELEV_RANGE, GRID_RES, GRID_SHAPE, GROUND_MAX, GROUND_PRIOR, GROUND_RING,
                             KNOWN_EPS, OCC_THRESHOLD, RAY_STEP, TRAIL_LEN, robot_frame_cells)
-from tinynav.rl.rl_planner import V_MAX, V_MIN, W_MAX
+from tinynav.rl.rl_planner import GUARD_MARGIN, V_MAX, V_MIN, W_MAX
 
 GX, GY, GZ = GRID_SHAPE
 MAX_RAY_SAMPLES = 56  # past this many voxel steps a ray from the grid center is outside the grid
@@ -53,6 +53,8 @@ class SimConfig:
     cam_height: tuple = (0.38, 0.48)
     cam_pitch_deg: tuple = (0.0, 5.0)
     cam_forward: tuple = (0.1, 0.5)  # camera ahead of the control center; varies across robots
+    rear_prob: float = 0.5  # episodes that also have a rear camera, so one policy serves 1- and 2-camera robots
+    rear_back: tuple = (0.1, 0.5)  # rear camera behind the control center, looking backwards
     pitch_jitter_deg: float = 0.7  # per-frame body sway of a walking robot
     height_jitter: float = 0.01
     depth_drop: float = 0.2  # fraction of invalid stereo pixels
@@ -73,13 +75,16 @@ class SimConfig:
     trap_prob: float = 0.3  # episodes with a wall (or U-cup) between start and goal
     trap_half: tuple = (1.5, 3.5)  # wall half-length range, grown by the curriculum
     cup_prob: float = 0.5  # fraction of traps closed into a U around the start
-    narrow_prob: float = 0.25  # non-trap episodes whose only way through is a doorway / corridor
+    narrow_prob: float = 0.35  # non-trap episodes whose only way through is a doorway / corridor
     door_width: tuple = (0.8, 1.2)  # 0.15-0.35m each side of the 0.5m wide RL footprint
     corridor_prob: float = 0.5
     novelty_reward: float = 0.05  # per newly visited NOVELTY_CELL, keeps exploring when stuck
     clearance_margin: float = 0.25  # on top of the footprint's own margin; penalty ramps in below this
     clearance_penalty: float = 0.3  # per step at zero clearance; a centered 0.8m doorway costs ~0.1/step
     turn_penalty: float = 0.1  # per step at full yaw rate (scaled by (w / w_max)^2); stops weaving
+    guard_margin: float = GUARD_MARGIN  # the runtime guard refuses commands whose 1s rollout comes closer
+    guard_penalty: float = 0.2  # per step at contact for the commanded motion's 1s rollout; learn the guard's limit
+    reverse_penalty: float = 0.05  # per step at full reverse without a rear camera (x0.3 with one)
     efficiency_bonus: float = 5.0  # extra on arrival, scaled by geodesic start distance / path length
 
 
@@ -128,6 +133,8 @@ class NavSim:
         self.ground_ring = (d >= GROUND_RING[0]) & (d <= GROUND_RING[1])
         self.fp = (RL_FOOTPRINT.front, RL_FOOTPRINT.rear, RL_FOOTPRINT.half_width)
         self.cam_off = torch.zeros(n, device=dev)  # forward offset control -> camera, per episode
+        self.rear_on = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.rear_off = torch.zeros(n, device=dev)
 
         self.grid = torch.zeros((n, GX, GY, GZ), device=dev)
         self.base = torch.zeros((n, 3), device=dev)  # world position of global voxel (0,0,0)
@@ -308,15 +315,24 @@ class NavSim:
         slope = ((self._geo_at(idx, pts) - here[:, None]) / 0.4).clamp(-1.5, 1.5)
         return torch.cat([(here / 10).clamp(max=3)[:, None], slope], 1)
 
-    def clearance(self):
-        """Distance from the robot outline to the nearest box, per env (0 when touching)."""
-        c, s = torch.cos(self.yaw)[:, None], torch.sin(self.yaw)[:, None]
+    def clearance(self, pos=None, yaw=None):
+        """Distance from the robot outline to the nearest box (0 when touching). pos [n,(T,)2], yaw [n,(T)]."""
+        pos = self.pos if pos is None else pos
+        yaw = self.yaw if yaw is None else yaw
+        c, s = torch.cos(yaw)[..., None], torch.sin(yaw)[..., None]
         e = self.fp_edge
-        pts = self.pos[:, None] + torch.stack([c * e[:, 0] - s * e[:, 1], s * e[:, 0] + c * e[:, 1]], -1)  # [n,P,2]
-        b = self.boxes[:, None]  # [n,1,B,5]
-        d = ((pts[:, :, None] - b[..., :2]).abs() - b[..., 2:4]).clamp(min=0).norm(dim=-1)  # [n,P,B]
+        pts = pos[..., None, :] + torch.stack([c * e[:, 0] - s * e[:, 1], s * e[:, 0] + c * e[:, 1]], -1)  # [n,(T,)P,2]
+        b = self.boxes.view(self.boxes.shape[0], *([1] * (pts.dim() - 2)), *self.boxes.shape[1:])  # [n,(1,)1,B,5]
+        d = ((pts[..., None, :] - b[..., :2]).abs() - b[..., 2:4]).clamp(min=0).norm(dim=-1)  # [n,(T,)P,B]
         d = torch.where(b[..., 4] > 0, d, math.inf)
-        return d.amin((1, 2))
+        return d.amin((-2, -1))
+
+    def rollout_clearance(self, cmd, horizon=1.0, dt=0.1):
+        """Smallest clearance along a constant-command unicycle rollout, like the runtime guard's check."""
+        k = int(horizon / dt)
+        th = self.yaw[:, None] + cmd[:, 1:2] * dt * torch.arange(1, k + 1, device=self.device)
+        step = cmd[:, 0, None, None] * dt * torch.stack([torch.cos(th), torch.sin(th)], -1)  # [n,T,2]
+        return self.clearance(self.pos[:, None] + step.cumsum(1), th).amin(1)
 
     def _visit(self, idx):
         """Mark the current novelty cell; returns True where it was not visited before."""
@@ -361,6 +377,8 @@ class NavSim:
         self.cam_h[idx] = self._rand(k, lo=c.cam_height[0], hi=c.cam_height[1])
         self.pitch[idx] = torch.deg2rad(self._rand(k, lo=c.cam_pitch_deg[0], hi=c.cam_pitch_deg[1]))
         self.cam_off[idx] = self._rand(k, lo=c.cam_forward[0], hi=c.cam_forward[1])
+        self.rear_on[idx] = self._rand(k) < c.rear_prob
+        self.rear_off[idx] = self._rand(k, lo=c.rear_back[0], hi=c.rear_back[1])
         self.vel[idx] = 0
         self.cmd_queue[idx] = 0
         self.last_action[idx] = 0
@@ -381,13 +399,16 @@ class NavSim:
         self._sense(idx)
 
     # ---------- perception ----------
-    def camera_pose(self, idx, jitter=False):
+    def camera_pose(self, idx, jitter=False, rear=False):
+        """Front camera (or, with rear=True, the backward-looking rear camera) pose for envs idx."""
         pitch, h = self.pitch[idx], self.cam_h[idx]
         if jitter:
             pitch = pitch + math.radians(self.cfg.pitch_jitter_deg) * torch.randn(pitch.shape, generator=self.gen, device=self.device)
             h = h + self.cfg.height_jitter * torch.randn(h.shape, generator=self.gen, device=self.device)
-        R = _rot(self.yaw[idx], pitch)
-        return R, torch.cat([self.pos[idx], h[:, None]], 1) + R[..., 2] * self.cam_off[idx, None]
+        yaw = self.yaw[idx] + math.pi if rear else self.yaw[idx]
+        R = _rot(yaw, pitch)
+        off = self.rear_off[idx, None] if rear else self.cam_off[idx, None]
+        return R, torch.cat([self.pos[idx], h[:, None]], 1) + R[..., 2] * off
 
     def _render(self, idx, R, cam):
         """Z-depth of the sampled pixels against ground + boxes. Returns [k, P] (nan = invalid)."""
@@ -426,8 +447,9 @@ class NavSim:
         self.grid[idx] *= keep
         self.o[idx] = new_o
 
-    def _fuse(self, idx, R, cam, depth):
-        """Port of run_raycasting_loopy + decay/clip, written in local window coordinates."""
+    def _fuse(self, idx, R, cam, depth, primary=True):
+        """Port of run_raycasting_loopy + decay/clip, written in local window coordinates. The primary
+        (front) frame decays the grid; a rear frame is only added, like the Pilot's dual-camera planner."""
         k, dev = len(idx), self.device
         origin = self.base[idx] + torch.cat([self.o[idx], torch.zeros((k, 1), dtype=torch.long, device=dev)], 1) * GRID_RES
         pts = cam[:, None] + torch.einsum("kij,kpj->kpi", R, self.pix_dir[None] * depth[..., None])
@@ -441,13 +463,17 @@ class NavSim:
         new.scatter_add_(1, fi, inb.float() * -0.05)
         new.scatter_add_(1, fe, e_inb.float() * 0.2)
         new = new.clamp(-0.1, 0.1).view(k, GX, GY, GZ)
-        self.grid[idx] = (self.grid[idx] * 0.99 + new).clamp(-0.2, 0.2)
+        self.grid[idx] = ((self.grid[idx] * 0.99 if primary else self.grid[idx]) + new).clamp(-0.2, 0.2)
 
     def _sense(self, idx):
         for ch in torch.split(idx, self.cfg.env_chunk):
             R, cam = self.camera_pose(ch, jitter=True)
             self._recenter(ch, cam)
             self._fuse(ch, R, cam, self._render(ch, R, cam))
+            rear = ch[self.rear_on[ch]]
+            if len(rear):
+                R, cam = self.camera_pose(rear, jitter=True, rear=True)
+                self._fuse(rear, R, cam, self._render(rear, R, cam), primary=False)
 
     def bev(self, idx=None):
         """Port of bev.make_bev on the toroidal grid. Returns [k, 2, BEV_SIZE, BEV_SIZE]."""
@@ -540,6 +566,8 @@ class NavSim:
         self.min_clear = torch.minimum(self.min_clear, clear)
         reward -= c.clearance_penalty * ((c.clearance_margin - clear) / c.clearance_margin).clamp(0, 1)
         reward -= c.turn_penalty * (self.vel[:, 1] / c.w_max) ** 2
+        reward -= c.guard_penalty * ((c.guard_margin - self.rollout_clearance(cmd)) / c.guard_margin).clamp(0, 1)
+        reward -= c.reverse_penalty * (-cmd[:, 0] / -c.v_min).clamp(min=0) * torch.where(self.rear_on, 0.3, 1.0)
         efficiency = ((self.geo_start - c.goal_tol) / self.path_len.clamp(min=1e-3)).clamp(0, 1)
         reward += (10.0 + c.efficiency_bonus * efficiency) * reached - 10.0 * collided
         self.best_dist, self.last_action = torch.minimum(self.best_dist, dist), action
