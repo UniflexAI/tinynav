@@ -22,6 +22,7 @@ V_MAX, V_MIN, W_MAX = 1.0, -0.3, 0.75
 ROLLOUT_DT, ROLLOUT_STEPS = 0.1, 20  # 2s path for visualization / path-following controllers
 GUARD_HORIZON = 1.0
 GUARD_MARGIN = 0.05  # m between the footprint edge and the (already dilated) obstacle mask
+CREEP_V = 0.2  # m/s, forward escape when turning in place is blocked (e.g. backed against a wall)
 STUCK_WINDOW, STUCK_MOVE, STUCK_TURN = 10.0, 0.2, 0.3  # s, m, rad
 
 
@@ -78,21 +79,25 @@ def footprint_clearance(poses, esdf, origin, res):
 
 
 def safe_command(center, yaw, v, w, esdf, origin, res):
-    """First command in (policy, turn in place, turn the other way, straight back, stop) whose swept
-    footprint keeps GUARD_MARGIN over GUARD_HORIZON. When the robot is already closer than the
-    margin, a command also passes if it never gets closer and ends with more room (escape)."""
+    """First command in (policy, turn in place, turn the other way, creep forward, creep forward
+    turning either way, straight back, stop) whose swept footprint keeps GUARD_MARGIN over
+    GUARD_HORIZON. When the robot is already closer than the margin, a command also passes if it
+    never gets closer and ends with more room (escape). Creeping forward covers a robot backed
+    against a wall, where every turn sweeps a rear corner into it."""
     n = int(GUARD_HORIZON / ROLLOUT_DT)
     now = float(footprint_clearance(rollout(center, yaw, 0.0, 0.0, steps=0), esdf, origin, res)[0])
     turn = np.sign(w) * max(abs(w), 0.3) if w != 0.0 else 0.3
-    for k, (cv, cw) in enumerate(((v, w), (0.0, turn), (0.0, -turn), (V_MIN, 0.0))):
+    options = ((v, w), (0.0, turn), (0.0, -turn), (CREEP_V, 0.0), (CREEP_V, turn), (CREEP_V, -turn), (V_MIN, 0.0))
+    for k, (cv, cw) in enumerate(options):
         clr = footprint_clearance(rollout(center, yaw, cv, cw, steps=n), esdf, origin, res)[1:]
         if clr.min() >= GUARD_MARGIN or (now < GUARD_MARGIN and clr.min() >= now - 1e-3 and clr[-1] > now):
             return cv, cw, k
-    return 0.0, 0.0, 4
+    return 0.0, 0.0, len(options)
 
 
 class RLPlanner:
-    GUARD_REASONS = ("ok", "turn in place", "turn the other way", "back off", "stop")
+    GUARD_REASONS = ("ok", "turn in place", "turn the other way", "creep forward", "creep forward turning",
+                     "creep forward turning the other way", "back off", "stop")
 
     def __init__(self, policy):
         self.policy = policy
@@ -135,10 +140,12 @@ class RLPlanner:
         self.last_action = a
         v = float(a[0] * V_MAX if a[0] >= 0 else -a[0] * V_MIN)
         w = float(a[1] * W_MAX)
+        requested = abs(v) > 0.05 or abs(w) > 0.1
 
         v, w, reason = safe_command(center, yaw, v, w, esdf, origin, GRID_RES)
         status = self.GUARD_REASONS[reason]
-        self.stuck = self.stuck or self._check_stuck(stamp, center, yaw, abs(v) > 0.05 or abs(w) > 0.1)
-        if self.stuck:  # latched until reset(): commanded but not moving means blocked or oscillating
+        # Judged on what the policy asks for, so "keeps asking, guard keeps refusing" counts as stuck too.
+        self.stuck = self.stuck or self._check_stuck(stamp, center, yaw, requested)
+        if self.stuck:  # latched until reset(): asking to move but not moving means blocked or oscillating
             v, w, status = 0.0, 0.0, "stuck"
         return v, w, rollout(center, yaw, v, w), bev, status

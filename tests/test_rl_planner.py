@@ -2,7 +2,7 @@ import numpy as np
 
 from tinynav.core.robot_specs import ROBOT_CONFIG
 from tinynav.rl.bev import GRID_RES, GRID_SHAPE
-from tinynav.rl.rl_planner import V_MAX, V_MIN, W_MAX, RLPlanner
+from tinynav.rl.rl_planner import V_MAX, W_MAX, RLPlanner
 
 
 class FakePolicy:
@@ -67,13 +67,31 @@ def test_wall_ahead_turns_in_place_instead():
 
 def test_turning_in_place_is_checked_too():
     # Wall 0.15m beside the robot: driving straight along it is fine, but rotating either way swings
-    # a corner of the 1.0 x 0.5m footprint into it, so the guard backs off straight instead.
+    # a corner of the 1.0 x 0.5m footprint into it, so the guard creeps forward along the wall instead.
     grid, origin, esdf = _scene(wall_y=-0.25 - 0.2)
     planner = RLPlanner(FakePolicy([0.0, 1.0]))
     v, w, _, _, status = planner.step(grid, origin, _camera_pose(CAM, 0.0, 0.0), 0.0, np.array([3.0, 0.0]), esdf)
-    assert status == "back off" and np.isclose(v, V_MIN) and w == 0.0
+    assert status == "creep forward" and v > 0 and w == 0.0
     v, w, _, _, status = RLPlanner(FakePolicy([1.0, 0.0])).step(grid, origin, _camera_pose(CAM, 0.0, 0.0), 0.0, np.array([3.0, 0.0]), esdf)
     assert status == "ok" and np.isclose(v, V_MAX)
+
+
+def test_backed_against_a_wall_creeps_forward():
+    # Wall right behind the 1.0m footprint: reversing hits it and turning either way sweeps a rear
+    # corner (reach 0.56m) into it, so the guard creeps forward instead of standing still forever.
+    grid, origin, esdf = _scene(wall_x=-0.5 - 0.03 - 0.2)
+    planner = RLPlanner(FakePolicy([-1.0, 1.0]))
+    v, w, _, _, status = planner.step(grid, origin, _camera_pose(CAM, 0.0, 0.0), 0.0, np.array([3.0, 0.0]), esdf)
+    assert status.startswith("creep forward") and v > 0
+
+
+def test_guard_refusals_count_as_stuck():
+    # Boxed in on all sides: the policy keeps asking to move, the guard keeps stopping it.
+    grid, origin, esdf = _scene()
+    esdf[:] = 0.02
+    planner = RLPlanner(FakePolicy([1.0, 0.0]))
+    statuses = [planner.step(grid, origin, _camera_pose(0.0, 0.0, 0.0), 0.15 * k, np.array([3.0, 0.0]), esdf)[4] for k in range(80)]
+    assert statuses[0] == "stop" and statuses[-1] == "stuck"
 
 
 def test_stuck_robot_is_stopped_until_reset():
