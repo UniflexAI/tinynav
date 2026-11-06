@@ -94,10 +94,11 @@ def _field(origin, fn):
 
 
 def test_hugging_a_wall_can_drive_along_it():
-    # Left edge (y=0.25) only 3cm from a wall, under the 5cm margin: driving along the wall keeps that
-    # clearance and passes; turning into it would lose clearance and is refused.
+    # Left edge (y=0.25) only 3cm from a wall surface, under the 10cm margin: driving along the wall
+    # keeps that clearance and passes; turning into it would lose clearance and is refused. The ESDF
+    # is center-to-center, so a 3cm surface gap reads 3cm + half a cell.
     grid, origin, _ = _scene()
-    esdf = _field(origin, lambda X, Y: np.clip(0.28 - Y, 0, None))
+    esdf = _field(origin, lambda X, Y: np.clip(0.28 + GRID_RES / 2 - Y, 0, None))
     v, w, _, _, status = RLPlanner(FakePolicy([1.0, 0.0])).step(grid, origin, _camera_pose(CAM, 0.0, 0.0), 0.0, np.array([3.0, 0.0]), esdf)
     assert status == "ok" and np.isclose(v, V_MAX)
     _, _, _, _, status = RLPlanner(FakePolicy([1.0, 1.0])).step(grid, origin, _camera_pose(CAM, 0.0, 0.0), 0.0, np.array([3.0, 0.0]), esdf)

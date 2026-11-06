@@ -21,11 +21,13 @@ from tinynav.rl.bev import GRID_RES, TRAIL_LEN, camera_yaw, make_bev, to_robot_f
 V_MAX, V_MIN, W_MAX = 1.0, -0.3, 0.75
 ROLLOUT_DT, ROLLOUT_STEPS = 0.1, 20  # 2s path for visualization / path-following controllers
 GUARD_HORIZON = 1.0
-GUARD_MARGIN = 0.05  # m between the footprint edge and the (already dilated) obstacle mask
+# m between the footprint edge and the obstacle cell surface. Not relying on the obstacle mask being
+# dilated: planning_node dilates by one cell, the Pilot's planner does not.
+GUARD_MARGIN = 0.10
 CREEP_V = 0.2  # m/s, forward escape when turning in place is blocked (e.g. backed against a wall)
 STUCK_WINDOW, STUCK_MOVE, STUCK_TURN = 10.0, 0.2, 0.3  # s, m, rad
 STUCK_HOLD, STUCK_RETRIES = 3.0, 3  # stop this long, then retry with fresh GRU memory; give up after this many
-ESCAPE_TOL = 0.01  # m an escape move may lose to ESDF noise; never below 0 (inside the dilated obstacle)
+ESCAPE_TOL = 0.01  # m an escape move may lose to ESDF noise; never below 0 (touching the obstacle)
 
 
 class TRTPolicy:
@@ -65,8 +67,9 @@ EDGE = _edge_points()
 
 
 def footprint_clearance(poses, esdf, origin, res):
-    """Per pose, the smallest bilinearly interpolated ESDF value along the footprint outline (m).
-    Interpolation avoids the up-to-half-cell error of reading the 10cm grid at cell centers."""
+    """Per pose, the smallest distance from the footprint outline to an obstacle cell's surface (m).
+    The ESDF holds center-to-center distances, so half a cell is subtracted; bilinear interpolation
+    avoids the up-to-half-cell error of reading the 10cm grid at cell centers."""
     c, sn = np.cos(poses[:, 2:3]), np.sin(poses[:, 2:3])
     gx = (poses[:, :1] + c * EDGE[:, 0] - sn * EDGE[:, 1] - origin[0]) / res - 0.5
     gy = (poses[:, 1:2] + sn * EDGE[:, 0] + c * EDGE[:, 1] - origin[1]) / res - 0.5
@@ -77,7 +80,7 @@ def footprint_clearance(poses, esdf, origin, res):
         return np.where(ok, esdf[np.clip(i, 0, esdf.shape[0] - 1), np.clip(j, 0, esdf.shape[1] - 1)], np.inf)
     d = ((1 - fx) * (1 - fy) * at(x0, y0) + fx * (1 - fy) * at(x0 + 1, y0)
          + (1 - fx) * fy * at(x0, y0 + 1) + fx * fy * at(x0 + 1, y0 + 1))
-    return np.nan_to_num(d, nan=np.inf).min(axis=1)
+    return np.nan_to_num(d, nan=np.inf).min(axis=1) - res / 2
 
 
 def safe_command(center, yaw, v, w, esdf, origin, res):
