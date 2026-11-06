@@ -161,7 +161,6 @@ async def ws_planning(ws: WebSocket):
     if node is None:
         await ws.close(code=1013)
         return
-    node.add_planning_watcher()
     try:
         while True:
             payload = json.dumps(node.get_planning_snapshot())
@@ -169,8 +168,6 @@ async def ws_planning(ws: WebSocket):
             await asyncio.sleep(0.2)
     except WebSocketDisconnect:
         pass
-    finally:
-        node.remove_planning_watcher()
 
 
 # --------------------------------------------------------------------------- #

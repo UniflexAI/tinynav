@@ -54,7 +54,7 @@ class _Recorder:
 def _bare_node(rec):
     node = BackendNode.__new__(BackendNode)
     node._lock = threading.Lock()
-    node._subs_lock = threading.Lock()
+    node._image_sub_lock = threading.Lock()
     node.preview_callbacks = {TOPIC: []}
     node._image_subs = {}
     node.create_subscription = rec.create_subscription

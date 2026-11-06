@@ -1,6 +1,7 @@
 import argparse
 import copy
 
+import cv2
 import message_filters
 import numpy as np
 import rclpy
@@ -15,7 +16,6 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
 from tinynav.core.math_utils import np2msg, pose_msg2np
@@ -28,10 +28,6 @@ class LooperBridgeNode(Node):
         self.bridge = CvBridge()
 
         self.cached_camera_info = None
-        # What has been said once. Not the logger's once=True: rclpy resolves the
-        # caller's source file before it checks, on every call, and these callbacks
-        # run at 10-100Hz.
-        self._said = set()
         self.last_keyframe_pose = None
         self.last_keyframe_time = None
         self.last_pose = None
@@ -48,15 +44,14 @@ class LooperBridgeNode(Node):
 
         self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
-        # The Looper latches its status, so the copy is latched too.
-        self.vio_status_pub = self.create_publisher(String, "/slam/vio_status", self.tf_static_qos)
-        self.vio_status_sub = self.create_subscription(
-            String, "/camera/camera/vio_status", self.vio_status_pub.publish, self.tf_static_qos)
+
+        self.vio_100hz_sub = self.create_subscription(
+            PoseStamped, "/camera/camera/vio_100hz", self.vio_100hz_callback, 50
+        )
 
         self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
         self.image_sub = message_filters.Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.sensor_qos)
-        self.pose_sub.registerCallback(self.publish_visual_odom)
         self.sync = message_filters.TimeSynchronizer(
             [self.depth_sub, self.pose_sub, self.image_sub], queue_size=20
         )
@@ -67,6 +62,7 @@ class LooperBridgeNode(Node):
             Odometry, "/slam/odometry_visual", 10
         )
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
+        self.disparity_pub_vis = self.create_publisher(Image, "/slam/disparity_vis", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.camera_info_alias_pub = self.create_publisher(
             CameraInfo, "/camera/camera/infra2/camera_info", 10
@@ -81,24 +77,29 @@ class LooperBridgeNode(Node):
             "Bridging /camera/camera/vio_image + /camera/camera/depth/image_rect_raw + /camera/camera/infra1/image_rect_raw into TinyNav /slam topics."
         )
         self.get_logger().info(
-            "Bridging /camera/camera/vio_image into /slam/odometry and /slam/odometry_visual."
+            "Bridging /camera/camera/vio_100hz into /slam/odometry."
+        )
+
+    def vio_100hz_callback(self, pose_msg: PoseStamped):
+        # /camera/camera/vio_100hz already reports T_world_camera.
+        T_world_camera = pose_msg2np(pose_msg)
+        odom_msg = np2msg(T_world_camera, pose_msg.header.stamp, "world", "camera")
+        self.odom_pub.publish(odom_msg)
+        self.get_logger().info(
+            f"Bridged first /camera/camera/vio_100hz message at "
+            f"{pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d} to /slam/odometry.",
+            once=True,
         )
 
     def camera_info_callback(self, msg: CameraInfo):
         self.cached_camera_info = msg
-        if self._first('camera_info'):
-            self.get_logger().info(
-                f"Received camera info from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}.")
-
-    def _first(self, what) -> bool:
-        if what in self._said:
-            return False
-        self._said.add(what)
-        return True
+        self.get_logger().info(
+            f"Received camera info from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}.",
+            once=True,
+        )
 
     def tf_callback(self, msg: TFMessage):
-        if self._first('tf_static'):
-            self.get_logger().info("Received TF_STATIC for Looper bridge.")
+        self.get_logger().info("Received TF_STATIC for Looper bridge.", once=True)
 
     def log_missing_inputs(self):
         self._missing_input_counter += 1
@@ -162,15 +163,31 @@ class LooperBridgeNode(Node):
         depth_out.header.frame_id = "camera"
         return depth_out
 
-    def publish_visual_odom(self, pose_msg: PoseStamped):
-        """The 20Hz image-rate pose, on both odometry topics."""
-        odom_msg = self.build_odom(pose_msg2np(pose_msg), pose_msg.header.stamp)
-        self.odom_visual_pub.publish(odom_msg)
-        self.odom_pub.publish(odom_msg)
-        if self._first('odometry'):
-            self.get_logger().info(
-                f"Bridged first /camera/camera/vio_image pose at "
-                f"{pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d} to /slam/odometry.")
+    def build_disparity_vis(self, depth_m: np.ndarray, stamp) -> Image:
+        depth = np.asarray(depth_m, dtype=np.float32)
+
+        valid = np.isfinite(depth) & (depth > 1e-3)
+        disparity_u8 = np.zeros(depth.shape, dtype=np.uint8)
+        if np.any(valid):
+            inv_depth = np.zeros(depth.shape, dtype=np.float32)
+            inv_depth[valid] = 1.0 / depth[valid]
+            disp_min = float(np.min(inv_depth[valid]))
+            disp_max = float(np.max(inv_depth[valid]))
+            if disp_max > disp_min:
+                disparity_u8[valid] = np.clip(
+                    255.0 * (inv_depth[valid] - disp_min) / (disp_max - disp_min),
+                    0.0,
+                    255.0,
+                ).astype(np.uint8)
+            else:
+                disparity_u8[valid] = 255
+
+        disp_color = cv2.applyColorMap(disparity_u8, cv2.COLORMAP_PLASMA)
+        disp_color[~valid] = 0
+        disp_color_msg = self.bridge.cv2_to_imgmsg(disp_color, encoding="bgr8")
+        disp_color_msg.header.stamp = stamp
+        disp_color_msg.header.frame_id = "camera"
+        return disp_color_msg
 
     def sync_callback(self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image):
         if self.cached_camera_info is None:
@@ -181,14 +198,16 @@ class LooperBridgeNode(Node):
         stamp = pose_msg.header.stamp
 
         odom_msg = self.build_odom(T_world_camera, stamp)
+        self.odom_visual_pub.publish(odom_msg)
         depth_m = self.decode_depth_meters(depth_msg)
         depth_out = self.build_depth_msg(depth_m, stamp)
+        disparity_vis_msg = self.build_disparity_vis(depth_m, stamp)
 
-        if self._first('sync'):
-            self.get_logger().info(
-                "sync_callback: first frame "
-                f"t={self.stamp_to_sec(stamp):.3f}, "
-                f"depth={depth_m.shape}, image={image_msg.height}x{image_msg.width}")
+        self.get_logger().info(
+            "sync_callback: "
+            f"t={self.stamp_to_sec(stamp):.3f}, "
+            f"depth={depth_m.shape}, image={image_msg.height}x{image_msg.width}"
+        )
 
         image_out = copy.deepcopy(image_msg)
         image_out.header.stamp = stamp
@@ -199,6 +218,7 @@ class LooperBridgeNode(Node):
         camera_info_out.header.frame_id = "camera"
 
         self.depth_pub.publish(depth_out)
+        self.disparity_pub_vis.publish(disparity_vis_msg)
         self.slam_camera_info_pub.publish(camera_info_out)
         self.camera_info_alias_pub.publish(camera_info_out)
 
