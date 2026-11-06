@@ -16,7 +16,7 @@ import torch
 from tinynav.core.robot_specs import RL_FOOTPRINT, ROBOT_CONFIG
 from tinynav.rl.bev import (BEV_RES, BEV_SIZE, ELEV_RANGE, GRID_RES, GRID_SHAPE, GROUND_MAX, GROUND_PRIOR, GROUND_RING,
                             KNOWN_EPS, OCC_THRESHOLD, RAY_STEP, TRAIL_LEN, robot_frame_cells)
-from tinynav.rl.rl_planner import GUARD_MARGIN, V_MAX, V_MIN, W_MAX
+from tinynav.rl.rl_planner import ESCAPE_TOL, GUARD_MARGIN, V_MAX, V_MIN, W_MAX
 
 GX, GY, GZ = GRID_SHAPE
 MAX_RAY_SAMPLES = 56  # past this many voxel steps a ray from the grid center is outside the grid
@@ -80,10 +80,11 @@ class SimConfig:
     corridor_prob: float = 0.5
     novelty_reward: float = 0.05  # per newly visited NOVELTY_CELL, keeps exploring when stuck
     clearance_margin: float = 0.25  # on top of the footprint's own margin; penalty ramps in below this
-    clearance_penalty: float = 0.3  # per step at zero clearance; a centered 0.8m doorway costs ~0.1/step
+    clearance_penalty: float = 0.15  # per step at zero clearance; the guard penalty below does the real work
     turn_penalty: float = 0.1  # per step at full yaw rate (scaled by (w / w_max)^2); stops weaving
     guard_margin: float = GUARD_MARGIN  # the runtime guard refuses commands whose 1s rollout comes closer
-    guard_penalty: float = 0.2  # per step at contact for the commanded motion's 1s rollout; learn the guard's limit
+    guard_penalty: float = 0.2  # per step at contact, only for commands the runtime guard would refuse
+    time_penalty: float = 0.01  # per step; standing still must not be free
     reverse_penalty: float = 0.05  # per step at full reverse without a rear camera (x0.3 with one)
     efficiency_bonus: float = 5.0  # extra on arrival, scaled by geodesic start distance / path length
 
@@ -560,13 +561,18 @@ class NavSim:
         reached = dist < c.goal_tol
         timeout = self.steps >= c.max_steps
         # progress only counts new closest approaches, so backing out of a dead end costs nothing
-        reward = (self.best_dist - dist).clamp(min=0) - 0.005 - 0.01 * ((action - self.last_action) ** 2).sum(1)
+        reward = (self.best_dist - dist).clamp(min=0) - c.time_penalty - 0.01 * ((action - self.last_action) ** 2).sum(1)
         reward += c.novelty_reward * self._visit(torch.arange(c.num_envs, device=self.device))
         clear = self.clearance()
         self.min_clear = torch.minimum(self.min_clear, clear)
         reward -= c.clearance_penalty * ((c.clearance_margin - clear) / c.clearance_margin).clamp(0, 1)
         reward -= c.turn_penalty * (self.vel[:, 1] / c.w_max) ** 2
-        reward -= c.guard_penalty * ((c.guard_margin - self.rollout_clearance(cmd)) / c.guard_margin).clamp(0, 1)
+        # Same rule as rl_planner.safe_command: a command is refused if its 1s rollout comes within the
+        # margin, unless the robot is already that close and the move gets no closer (escape). Penalizing
+        # every close rollout instead made standing still the cheapest option and the policy froze.
+        roll = self.rollout_clearance(cmd)
+        refused = (roll < c.guard_margin) & ~((clear < c.guard_margin) & (roll >= (clear - ESCAPE_TOL).clamp(min=0)))
+        reward -= c.guard_penalty * refused * ((c.guard_margin - roll) / c.guard_margin).clamp(0, 1)
         reward -= c.reverse_penalty * (-cmd[:, 0] / -c.v_min).clamp(min=0) * torch.where(self.rear_on, 0.3, 1.0)
         efficiency = ((self.geo_start - c.goal_tol) / self.path_len.clamp(min=1e-3)).clamp(0, 1)
         reward += (10.0 + c.efficiency_bonus * efficiency) * reached - 10.0 * collided
