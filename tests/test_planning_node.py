@@ -294,7 +294,7 @@ if __name__ == "__main__":
     print("Route field tests passed.")
 
 
-# --- climb region: per-cell relaxation of the obstacle span filter -----------
+# --- climb region: cells judged by height above the map's ground -------------
 
 def _riser_grid(height_m, config, resolution=0.05):
     """3x3 cells; the centre one holds occupancy from the ground up to height_m."""
@@ -304,13 +304,13 @@ def _riser_grid(height_m, config, resolution=0.05):
     return grid, np.array([0.0, 0.0, config.robot_z_bottom])
 
 
-def _span_map(config, relaxed_cell, relaxed=0.3):
-    m = np.full((3, 3), config.min_wall_span_m)
-    m[relaxed_cell] = relaxed
+def _ground(cell, z):
+    m = np.full((3, 3), np.nan)
+    m[cell] = z
     return m
 
 
-def test_min_span_map_relaxes_only_the_cells_it_covers():
+def test_a_riser_on_the_known_ground_is_a_step_and_only_there():
     from planning_node import build_obstacle_map
     from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
@@ -318,49 +318,51 @@ def test_min_span_map_relaxes_only_the_cells_it_covers():
     args = (grid, origin, 0.05)
     assert build_obstacle_map(*args, robot_z=0.0, config=config)[1, 1]
     assert not build_obstacle_map(*args, robot_z=0.0, config=config,
-                                  min_span_map=_span_map(config, (1, 1)))[1, 1]
-    # relaxing somewhere else must not relax this cell -- the whole point of going
-    # per-cell instead of switching the threshold globally
+                                  ground_map=_ground((1, 1), origin[2]))[1, 1]
+    # a ground known somewhere else leaves this cell to the span filter
     assert build_obstacle_map(*args, robot_z=0.0, config=config,
-                              min_span_map=_span_map(config, (0, 0)))[1, 1]
+                              ground_map=_ground((0, 0), origin[2]))[1, 1]
 
 
-def test_min_span_map_still_blocks_taller_verticals():
+def test_what_rises_a_step_above_the_ground_blocks():
     from planning_node import build_obstacle_map
     from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
-    grid, origin = _riser_grid(0.35, config)   # above the relaxed threshold
+    grid, origin = _riser_grid(0.35, config)
     assert build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config,
-                              min_span_map=_span_map(config, (1, 1)))[1, 1]
+                              ground_map=_ground((1, 1), origin[2]), step_m=0.2)[1, 1]
 
 
-def test_min_span_map_relaxes_steps_above_the_ground_band():
-    """Mid-climb the next riser starts above robot_z_bottom + ground_band_m; a relaxed
-    cell must still read it as a step, not as a floating obstacle."""
+def test_mid_climb_a_riser_above_the_robot_is_a_step_on_its_own_ground():
+    """The next riser starts above robot_z_bottom + ground_band_m, where the span
+    filter reads it as floating; on its own ground it is a step."""
     from planning_node import build_obstacle_map
     from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
     resolution = 0.05
     grid, origin = _riser_grid(0.0, config, resolution)
-    base = config.ground_band_m + resolution        # above the ground band
-    lo = int(round(base / resolution))
-    hi = int(round((base + 0.15) / resolution))     # 0.15m riser, below the relaxed threshold
-    grid[1, 1, lo:hi] = 0.2
+    base = config.ground_band_m + resolution
+    grid[1, 1, int(round(base / resolution)):int(round((base + 0.15) / resolution))] = 0.2
     args = (grid, origin, resolution)
     assert build_obstacle_map(*args, robot_z=0.0, config=config)[1, 1]
     assert not build_obstacle_map(*args, robot_z=0.0, config=config,
-                                  min_span_map=_span_map(config, (1, 1)))[1, 1]
+                                  ground_map=_ground((1, 1), origin[2] + base))[1, 1]
 
 
-def test_no_min_span_map_is_the_strict_default():
-    from planning_node import build_obstacle_map
-    from tinynav.core.robot_specs import ObstacleConfig
-    config = ObstacleConfig()
-    grid, origin = _riser_grid(0.15, config)
-    assert np.array_equal(
-        build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config),
-        build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config,
-                           min_span_map=None))
+def test_ground_map_takes_the_nearest_climb_point_less_the_camera_height():
+    from planning_node import PlanningNode
+    node = PlanningNode.__new__(PlanningNode)
+    node._signal_fresh = lambda stamp, window: stamp is not None
+    node._climb_stamp_ns, node._climb_region_ttl_ns = 1, 1
+    node._climb_region_cells = 2
+    node._camera_height_m = 0.5
+    node._climb_points = np.array([[0.025, 0.025, 1.0], [0.425, 0.025, 2.0]])
+    g = node._ground_map(np.zeros(3), 0.05, (20, 20))
+    assert g[0, 0] == 0.5 and g[2, 0] == 0.5      # nearest is the first point
+    assert g[7, 0] == 1.5 and g[8, 2] == 1.5      # nearest is the second
+    assert np.isnan(g[0, 5]) and np.isnan(g[19, 19])    # beyond the radius
+    node._climb_stamp_ns = None
+    assert node._ground_map(np.zeros(3), 0.05, (20, 20)) is None
 
 
 # --- published Path: the stride cmd_vel_control's dt assumption rests on -----
