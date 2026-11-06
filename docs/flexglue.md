@@ -49,38 +49,59 @@ This costs approximately 4 MiB per keyframe and permits matching while scratch
 videos are still being written. Their SuperPoint features remain available, so
 these maps can also be used with LightGlue. No pose, depth or ROS schema changes.
 
-## Offline corridor experiment
+## Implementation-specific corridor diagnostic
+
+This experiment compares the existing LightGlue TensorRT FP16 implementation
+with the official FlexGlue ONNX CUDA implementation. It is **not a controlled
+comparison of model speed or intrinsic accuracy**: execution backends and
+optimization paths differ. In particular, latency ratios cannot be attributed
+to the matcher architectures. Both timing and pose outcomes below apply only to
+these specific implementations and settings.
 
 64 localization requests from front-camera maps 3-10: 32 requests against an
 overlapping map and 32 against maps selected using distant similar frames.
-Each matcher uses the same target-map VLAD Top-3 candidates and existing
-`rerank_by_pnp_inliers` acceptance rules. The target map's vocabulary is used to
-encode the query VLAD from stored patch tokens.
+Both implementations use the same images, SuperPoint keypoints, target-map VLAD
+Top-3 candidates and existing `rerank_by_pnp_inliers` acceptance rules. FlexGlue
+uses its own dense descriptor. The target map's vocabulary encodes query VLAD
+from stored patch tokens.
 
-| Metric | LightGlue (TensorRT) | FlexGlue (ONNX CUDA) | Change |
-|---|---:|---:|---|
-| Map-reference-consistent poses | 31 / 64 | 31 / 64 | Same total, different requests |
-| Accepted map-reference mismatches | 24 / 64 | 2 / 64 | 91.7% fewer mismatches |
-| Requests with no accepted pose | 9 / 64 | 31 / 64 | More conservative acceptance |
-| Median pair-matching latency | 3.3 ms | 122.3 ms | 37.1x slower |
-| Median summed Top-3 pipeline cost | 41.6 ms | 433.5 ms | 10.4x slower |
+| Outcome | LightGlue TensorRT | FlexGlue ONNX CUDA |
+|---|---:|---:|
+| Map-reference-consistent poses | 31 / 64 | 31 / 64 |
+| Accepted map-reference mismatches | 24 / 64 | 2 / 64 |
+| Requests with no accepted pose | 9 / 64 | 31 / 64 |
+
+The lower mismatch count accompanies more requests without an accepted pose;
+there is no increase in the total consistent-pose count. This does not establish
+general accuracy superiority. Two LightGlue-consistent requests are rejected by
+FlexGlue, while two other requests change from inconsistent to consistent.
 
 Consistency means position error below 0.75 m and full rotation error below
-10 degrees against the saved query keyframe pose, transformed to the common map
-frame. This is map-derived reference, not surveyed ground truth. The query's
-saved pose is used only for evaluation, not to solve its PnP pose. Two originally
-correct LightGlue requests are rejected by FlexGlue, while two other requests
-change from inconsistent to consistent. Equal totals do not mean identical cases.
+10 degrees against saved query keyframe poses in the common map frame. These are
+map-derived references, not surveyed ground truth. Saved query poses are used
+only for evaluation. Samples are correlated and deliberately challenging, so
+they do not estimate normal operating error rates.
 
-On the shared RTX 3070 Laptop GPU, median match-only latency was 3.3 ms for the
-existing TensorRT LightGlue and 122.3 ms for official FlexGlue ONNX CUDA. Summed
-Top-3 pipeline costs were 41.6 ms and 433.5 ms. Reference descriptors were cached;
-FlexGlue includes one query DINOv3 description in the summed cost. The latter
-excludes live DINOv2 image encoding, video decoding, ROS and planning.
+| Implementation cost on shared RTX 3070 Laptop GPU | LightGlue TensorRT | FlexGlue ONNX CUDA |
+|---|---:|---:|
+| Median pair-matching time, cached descriptors | 3.3 ms | 122.3 ms |
+| Median summed Top-3 computation | 41.6 ms | 433.5 ms |
 
-These correlated, deliberately challenging samples do not estimate a normal
-operating error rate. No continuous ROS mission, rear-camera or Orin validation
-is claimed. This PR does not change online localization acceptance thresholds.
+These are deployment-implementation costs, **not an equal-backend speed
+benchmark**. Reference descriptors are cached; FlexGlue's summed computation
+includes one query DINOv3 description. The sum excludes live DINOv2 image
+encoding, video decoding, ROS, queueing and planning, and is not measured
+end-to-end application latency.
+
+A controlled follow-up must compare ONNX CUDA with ONNX CUDA, or TensorRT with
+TensorRT after validating conversion parity, on the same device, precision,
+input/keypoint counts, warmup and cache policy. Descriptor extraction, matching
+and full-request latency must be reported separately. Backend parity and
+independent-capture validation remain outstanding; the experimental TensorRT
+conversion is not evidence of a model-level speed ranking.
+
+No continuous ROS mission, rear-camera or Orin validation is claimed by this
+experiment. This PR does not change online localization acceptance thresholds.
 
 ## Upstream models
 
