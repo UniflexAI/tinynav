@@ -41,16 +41,17 @@ class Demos:
     def __init__(self, pattern, seq, dev, narrow_weight=3.0, burn=16):
         bev, vec, act, wt = [], [], [], []
         for path in sorted(glob.glob(pattern)):
-            d = np.load(path)
+            d = dict(np.load(path))  # npz members decompress on every access; read each once
             w = (d["moving"] & d["safe"]) * (1 + (narrow_weight - 1) * d["narrow"])
             for s0 in range(0, len(w) - seq + 1, seq // 2):
                 sl = slice(s0, s0 + seq)
                 bev.append(d["bev"][sl]), vec.append(d["vec"][sl]), act.append(d["action"][sl]), wt.append(w[sl])
         if not bev:
             raise SystemExit(f"no demonstrations matched {pattern}")
-        self.bev = torch.tensor(np.stack(bev), dtype=torch.float16, device=dev)  # [S,T,3,64,64]
-        self.vec, self.act = torch.tensor(np.stack(vec), device=dev), torch.tensor(np.stack(act), device=dev)
-        self.wt = torch.tensor(np.stack(wt), dtype=torch.float32, device=dev)
+        # kept in (pinned) host memory, ~1GB for 20k frames; only the sampled batch goes to the GPU
+        self.bev = torch.tensor(np.stack(bev), dtype=torch.float16).pin_memory()  # [S,T,3,64,64]
+        self.vec, self.act = torch.tensor(np.stack(vec)), torch.tensor(np.stack(act))
+        self.wt = torch.tensor(np.stack(wt), dtype=torch.float32)
         self.wt[:, :burn] = 0
         self.burn, self.dev = burn, dev
         print(f"demos: {len(bev)} sequences of {seq} frames, weighted frames {self.wt.gt(0).sum().item():,} "
@@ -58,8 +59,8 @@ class Demos:
 
     def loss(self, net, batch):
         """Weighted squared error between the actor's mean action and the driver's, through the GRU."""
-        i = torch.randint(len(self.bev), (batch,), device=self.dev)
-        bev, vec, act, wt = self.bev[i], self.vec[i], self.act[i], self.wt[i]  # [B,T,...]
+        i = torch.randint(len(self.bev), (batch,))
+        bev, vec, act, wt = (x[i].to(self.dev, non_blocking=True) for x in (self.bev, self.vec, self.act, self.wt))  # [B,T,...]
         B, T = wt.shape
         feats = net.encode(bev.flatten(0, 1).float(), vec.flatten(0, 1)).view(B, T, -1)
         h, means = net.initial_state(B, self.dev), []
