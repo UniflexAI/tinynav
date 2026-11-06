@@ -85,13 +85,35 @@ def test_backed_against_a_wall_creeps_forward():
     assert status.startswith("creep forward") and v > 0
 
 
-def test_guard_refusals_count_as_stuck():
-    # Boxed in on all sides: the policy keeps asking to move, the guard keeps stopping it.
-    grid, origin, esdf = _scene()
-    esdf[:] = 0.02
-    planner = RLPlanner(FakePolicy([1.0, 0.0]))
-    statuses = [planner.step(grid, origin, _camera_pose(0.0, 0.0, 0.0), 0.15 * k, np.array([3.0, 0.0]), esdf)[4] for k in range(80)]
-    assert statuses[0] == "stop" and statuses[-1] == "stuck"
+def _field(origin, fn):
+    """ESDF given as a function of world (x, y) at cell centers."""
+    xs = origin[0] + (np.arange(GRID_SHAPE[0]) + 0.5) * GRID_RES
+    ys = origin[1] + (np.arange(GRID_SHAPE[1]) + 0.5) * GRID_RES
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
+    return fn(X, Y).astype(np.float32)
+
+
+def test_hugging_a_wall_can_drive_along_it():
+    # Left edge (y=0.25) only 3cm from a wall, under the 5cm margin: driving along the wall keeps that
+    # clearance and passes; turning into it would lose clearance and is refused.
+    grid, origin, _ = _scene()
+    esdf = _field(origin, lambda X, Y: np.clip(0.28 - Y, 0, None))
+    v, w, _, _, status = RLPlanner(FakePolicy([1.0, 0.0])).step(grid, origin, _camera_pose(CAM, 0.0, 0.0), 0.0, np.array([3.0, 0.0]), esdf)
+    assert status == "ok" and np.isclose(v, V_MAX)
+    _, _, _, _, status = RLPlanner(FakePolicy([1.0, 1.0])).step(grid, origin, _camera_pose(CAM, 0.0, 0.0), 0.0, np.array([3.0, 0.0]), esdf)
+    assert status != "ok"
+
+
+def test_guard_refusals_count_as_stuck_and_retry():
+    # Pocket barely larger than the footprint: every translation is refused, the policy keeps asking
+    # to drive. Each stuck holds STUCK_HOLD then retries with fresh memory; the third stops for good.
+    grid, origin, _ = _scene()
+    esdf = _field(origin, lambda X, Y: np.clip(0.6 - np.hypot(X, Y), 0, None))
+    pol = FakePolicy([1.0, 0.0])
+    planner = RLPlanner(pol)
+    statuses = [planner.step(grid, origin, _camera_pose(CAM, 0.0, 0.0), 0.15 * k, np.array([3.0, 0.0]), esdf)[4] for k in range(400)]
+    assert statuses[0] != "ok" and "stuck, retry 1/2" in statuses and "stuck, retry 2/2" in statuses
+    assert statuses[-1] == "stuck" and pol.resets == 3  # reset at start + one per retry
 
 
 def test_stuck_robot_is_stopped_until_reset():
@@ -100,7 +122,7 @@ def test_stuck_robot_is_stopped_until_reset():
     grid, origin, esdf = _scene()
     T = _camera_pose(0.0, 0.0, 0.0)  # commanded forward, but the pose never changes
     statuses = [planner.step(grid, origin, T, 0.15 * k, np.array([3.0, 0.0]), esdf)[4] for k in range(80)]
-    assert statuses[0] == "ok" and statuses[-1] == "stuck" and "stuck" not in statuses[:55]
+    assert statuses[0] == "ok" and statuses[-1].startswith("stuck") and not any(x.startswith("stuck") for x in statuses[:55])
     planner.reset()
     assert planner.step(grid, origin, T, 20.0, np.array([3.0, 0.0]), esdf)[4] == "ok"
 
