@@ -9,6 +9,7 @@ right after a level change the finished episodes still come from the easier leve
 Each env's rollout is one GRU sequence; minibatches split by env so sequences stay whole.
 """
 import argparse
+import glob
 import time
 from pathlib import Path
 
@@ -31,6 +32,42 @@ CURRICULUM = [
 
 
 LEVEL_COOLDOWN = 20
+
+
+class Demos:
+    """Human-driven demonstrations (tinynav.rl.demos) cut into GRU sequences for a behaviour-cloning loss.
+    Only frames where the driver was moving and the RL footprint stayed clear count; narrow passages
+    weigh narrow_weight times more. The first `burn` frames of a sequence only warm up the memory."""
+    def __init__(self, pattern, seq, dev, narrow_weight=3.0, burn=16):
+        bev, vec, act, wt = [], [], [], []
+        for path in sorted(glob.glob(pattern)):
+            d = np.load(path)
+            w = (d["moving"] & d["safe"]) * (1 + (narrow_weight - 1) * d["narrow"])
+            for s0 in range(0, len(w) - seq + 1, seq // 2):
+                sl = slice(s0, s0 + seq)
+                bev.append(d["bev"][sl]), vec.append(d["vec"][sl]), act.append(d["action"][sl]), wt.append(w[sl])
+        if not bev:
+            raise SystemExit(f"no demonstrations matched {pattern}")
+        self.bev = torch.tensor(np.stack(bev), dtype=torch.float16, device=dev)  # [S,T,3,64,64]
+        self.vec, self.act = torch.tensor(np.stack(vec), device=dev), torch.tensor(np.stack(act), device=dev)
+        self.wt = torch.tensor(np.stack(wt), dtype=torch.float32, device=dev)
+        self.wt[:, :burn] = 0
+        self.burn, self.dev = burn, dev
+        print(f"demos: {len(bev)} sequences of {seq} frames, weighted frames {self.wt.gt(0).sum().item():,} "
+              f"(narrow {self.wt.gt(1).sum().item():,})", flush=True)
+
+    def loss(self, net, batch):
+        """Weighted squared error between the actor's mean action and the driver's, through the GRU."""
+        i = torch.randint(len(self.bev), (batch,), device=self.dev)
+        bev, vec, act, wt = self.bev[i], self.vec[i], self.act[i], self.wt[i]  # [B,T,...]
+        B, T = wt.shape
+        feats = net.encode(bev.flatten(0, 1).float(), vec.flatten(0, 1)).view(B, T, -1)
+        h, means = net.initial_state(B, self.dev), []
+        for t in range(T):
+            h = net.gru(feats[:, t], h)
+            means.append(net.actor(h))
+        err = ((torch.stack(means, 1) - act) ** 2).sum(-1)
+        return (err * wt).sum() / wt.sum().clamp(min=1)
 
 
 def set_level(sim, level):
@@ -57,6 +94,10 @@ def main():
     ap.add_argument("--init", help="start from this checkpoint's weights (fresh optimizer, step 0)")
     ap.add_argument("--level", type=int, default=0, help="starting curriculum level")
     ap.add_argument("--eval-every", type=int, default=100, help="updates between fixed-scene evals that keep best.pt (success - 0.5 * near-miss)")
+    ap.add_argument("--demos", help="glob of tinynav.rl.demos npz files for a behaviour-cloning loss")
+    ap.add_argument("--bc-coef", type=float, default=1.0, help="BC loss weight at the start, annealed to --bc-coef-end")
+    ap.add_argument("--bc-coef-end", type=float, default=0.1)
+    ap.add_argument("--bc-batch", type=int, default=16, help="demo sequences per PPO minibatch")
     args = ap.parse_args()
     run, dev = Path(args.run), torch.device("cuda")
     run.mkdir(parents=True, exist_ok=True)
@@ -64,6 +105,7 @@ def main():
     writer = SummaryWriter(run)
 
     sim = NavSim(SimConfig(num_envs=args.envs), device=dev, seed=args.seed)
+    demos = Demos(args.demos, args.horizon, dev) if args.demos else None
     net = ActorCritic().to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     level, step = args.level, 0
@@ -152,6 +194,10 @@ def main():
                 vf = 0.5 * ((val - r_mb) ** 2).mean()
                 ent = dist.entropy().sum(1).mean()
                 loss = pg + 0.5 * vf - args.ent * ent
+                if demos is not None:
+                    frac = min(1.0, (step - step0) / max(args.steps - step0, 1))
+                    bc = demos.loss(net, args.bc_batch)
+                    loss = loss + (args.bc_coef + (args.bc_coef_end - args.bc_coef) * frac) * bc
                 opt.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -191,6 +237,8 @@ def main():
             if score > best_eval:
                 best_eval = score
                 torch.save({"model": net.state_dict(), "level": level, "step": step, "eval": (e_succ, e_coll, e_trap)}, run / "best.pt")
+        if demos is not None:
+            writer.add_scalar("train/bc_loss", bc.item(), step)
         for k, v in (("curriculum_level", level), ("lr", opt.param_groups[0]["lr"]), ("policy_loss", pg.item()), ("value_loss", vf.item()),
                      ("entropy", ent.item()), ("action_std", net.log_std.exp().mean().item()),
                      ("steps_per_sec", (step - step0) / (time.time() - t0))):

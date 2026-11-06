@@ -83,7 +83,9 @@ class SimConfig:
     clearance_penalty: float = 0.15  # per step at zero clearance; the guard penalty below does the real work
     turn_penalty: float = 0.1  # per step at full yaw rate (scaled by (w / w_max)^2); stops weaving
     guard_margin: float = GUARD_MARGIN  # the runtime guard refuses commands whose 1s rollout comes closer
-    guard_penalty: float = 0.2  # per step at contact, only for commands the runtime guard would refuse
+    # Per step at contact, only for commands the runtime guard would refuse. Off: both v8 runs that used
+    # it (0.2) ended below v7, while v7 at the real 1 m/s already rarely triggers the guard.
+    guard_penalty: float = 0.0
     time_penalty: float = 0.01  # per step; standing still must not be free
     reverse_penalty: float = 0.05  # per step at full reverse without a rear camera (x0.3 with one)
     efficiency_bonus: float = 5.0  # extra on arrival, scaled by geodesic start distance / path length
