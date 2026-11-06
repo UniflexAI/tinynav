@@ -16,7 +16,7 @@ import torch
 from tinynav.core.robot_specs import RL_FOOTPRINT, ROBOT_CONFIG
 from tinynav.rl.bev import (BEV_RES, BEV_SIZE, ELEV_RANGE, GRID_RES, GRID_SHAPE, GROUND_MAX, GROUND_PRIOR, GROUND_RING,
                             KNOWN_EPS, OCC_THRESHOLD, RAY_STEP, TRAIL_LEN, robot_frame_cells)
-from tinynav.rl.rl_planner import ESCAPE_TOL, GUARD_MARGIN, V_MAX, V_MIN, W_MAX
+from tinynav.rl.rl_planner import CREEP_V, ESCAPE_TOL, GUARD_MARGIN, V_MAX, V_MIN, W_MAX
 
 GX, GY, GZ = GRID_SHAPE
 MAX_RAY_SAMPLES = 56  # past this many voxel steps a ray from the grid center is outside the grid
@@ -83,6 +83,10 @@ class SimConfig:
     # Straight-line progress gave no signal toward a doorway offset from the goal line, so the policy
     # treated door walls like traps and went round them. Training-only, like the critic's input.
     geodesic_progress: bool = True
+    # Run the runtime guard (rl_planner.safe_command) on every command, as on the robot. Without it a
+    # slightly misaligned doorway approach ended at -10, so the policy learned to avoid narrow doors
+    # that the guard would have let it through on the robot.
+    guard_in_loop: bool = True
     clearance_margin: float = 0.25  # on top of the footprint's own margin; penalty ramps in below this
     clearance_penalty: float = 0.15  # per step at zero clearance; the guard penalty below does the real work
     turn_penalty: float = 0.1  # per step at full yaw rate (scaled by (w / w_max)^2); stops weaving
@@ -348,6 +352,25 @@ class NavSim:
         d = torch.where(b[..., 4] > 0, d, math.inf)
         return d.amin((-2, -1))
 
+    def guard(self, cmd):
+        """Vectorized rl_planner.safe_command on the true boxes: the first of (command, turn in place,
+        turn the other way, creep forward, creep turning either way, back off) whose 1s rollout keeps
+        GUARD_MARGIN (or, when already closer, never gets closer); otherwise stop. Returns (cmd, option)."""
+        now = self.clearance()
+        w = cmd[:, 1]
+        turn = torch.where(w != 0, torch.sign(w) * w.abs().clamp(min=0.3), torch.full_like(w, 0.3))
+        z, creep = torch.zeros_like(w), torch.full_like(w, CREEP_V)
+        options = (cmd, torch.stack([z, turn], 1), torch.stack([z, -turn], 1), torch.stack([creep, z], 1),
+                   torch.stack([creep, turn], 1), torch.stack([creep, -turn], 1), torch.stack([torch.full_like(w, V_MIN), z], 1))
+        out, chosen = torch.zeros_like(cmd), torch.full_like(w, len(options), dtype=torch.long)
+        open_ = torch.ones_like(w, dtype=torch.bool)
+        for k, opt in enumerate(options):
+            clr = self.rollout_clearance(opt)
+            ok = open_ & ((clr >= GUARD_MARGIN) | ((now < GUARD_MARGIN) & (clr >= (now - ESCAPE_TOL).clamp(min=0))))
+            out[ok], chosen[ok] = opt[ok], k
+            open_ &= ~ok
+        return out, chosen
+
     def rollout_clearance(self, cmd, horizon=1.0, dt=0.1):
         """Smallest clearance along a constant-command unicycle rollout, like the runtime guard's check."""
         k = int(horizon / dt)
@@ -562,7 +585,8 @@ class NavSim:
         c = self.cfg
         action = action.clamp(-1, 1)
         cmd = torch.stack([torch.where(action[:, 0] >= 0, action[:, 0] * c.v_max, -action[:, 0] * c.v_min), action[:, 1] * c.w_max], 1)
-        self.cmd_queue = torch.cat([self.cmd_queue[:, 1:], cmd[:, None]], 1)
+        executed, guard_option = self.guard(cmd) if c.guard_in_loop else (cmd, torch.zeros_like(cmd[:, 0], dtype=torch.long))
+        self.cmd_queue = torch.cat([self.cmd_queue[:, 1:], executed[:, None]], 1)
         target = self.cmd_queue[:, 0] * (1 + c.act_noise * torch.randn(cmd.shape, generator=self.gen, device=self.device))
         lim = torch.tensor([c.lin_acc, c.ang_acc], device=self.device) * c.dt
         self.vel = self.vel + (target - self.vel).clamp(-lim, lim)
@@ -601,7 +625,8 @@ class NavSim:
         self.best_dist, self.last_action = torch.minimum(self.best_dist, prog), action
         done = collided | reached | timeout
         info = {"collided": collided, "reached": reached, "timeout": timeout & ~collided & ~reached, "trap": self.trap.clone(), "narrow": self.narrow.clone(),
-                "min_clearance": self.min_clear.clone(), "efficiency": efficiency, "mean_abs_w": self.abs_w / self.steps.clamp(min=1)}
+                "min_clearance": self.min_clear.clone(), "efficiency": efficiency, "mean_abs_w": self.abs_w / self.steps.clamp(min=1),
+                "guard": guard_option > 0}
         self._sense(torch.nonzero(~done).squeeze(1))
         self.reset(torch.nonzero(done).squeeze(1))
         return self.observe(), reward, done, info

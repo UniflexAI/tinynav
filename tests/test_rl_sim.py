@@ -64,7 +64,7 @@ def test_trail_matches_numpy():
 
 
 def test_sim_step_and_reset():
-    sim = NavSim(SimConfig(num_envs=8), device=DEVICE, seed=0)
+    sim = NavSim(SimConfig(num_envs=8, guard_in_loop=False), device=DEVICE, seed=0)  # let it crash to test resets
     sim.reset()
     obs = sim.observe()
     assert obs["bev"].shape == (8, 3, 64, 64) and obs["vec"].shape == (8, 6)
@@ -189,3 +189,15 @@ def test_geodesic_progress_rewards_heading_for_the_doorway():
     here, toward_gap = torch.tensor([[-2.0, 2.0]], device=DEVICE), torch.tensor([[-2.0, 1.4]], device=DEVICE)  # straight down
     assert float(sim._geo_smooth(idx, toward_gap)) < float(sim._geo_smooth(idx, here)) - 0.3
     assert (toward_gap - sim.goal).norm() > (here - sim.goal).norm()
+
+
+def test_guard_in_loop_matches_runtime_rules():
+    sim = NavSim(SimConfig(num_envs=1, n_boxes=1, trap_prob=0.0, narrow_prob=0.0), device=DEVICE, seed=0)
+    sim.reset()
+    sim.boxes[0, :] = 0
+    sim.boxes[0, 0] = torch.tensor([1.2, 0.0, 0.1, 2.0, 1.0], device=DEVICE)  # wall face at x=1.1, front edge at 0.5
+    sim.pos[0], sim.yaw[0] = torch.tensor([0.0, 0.0], device=DEVICE), torch.tensor(0.0, device=DEVICE)
+    fwd, opt = sim.guard(torch.tensor([[1.0, 0.0]], device=DEVICE))  # 1m/s for 1s would hit it
+    assert int(opt) == 1 and float(fwd[0, 0]) == 0.0 and abs(float(fwd[0, 1]) - 0.3) < 1e-6  # turn in place
+    slow, opt = sim.guard(torch.tensor([[0.0, 0.5]], device=DEVICE))  # turning in place is clear
+    assert int(opt) == 0 and torch.allclose(slow, torch.tensor([[0.0, 0.5]], device=DEVICE))
