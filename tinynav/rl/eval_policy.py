@@ -34,6 +34,7 @@ def evaluate(make_actor, level, envs, seed, record=0, trap_prob=0.3, narrow_prob
     envs, per-step frames."""
     sim = NavSim(SimConfig(num_envs=envs, trap_prob=trap_prob, narrow_prob=narrow_prob), device="cuda", seed=seed)
     set_level(sim, level)
+    sim.cfg.trap_prob, sim.cfg.narrow_prob = trap_prob, narrow_prob  # set_level picks the level's doorway share
     sim.reset()
     obs, act_fn, done = sim.observe(), make_actor(envs), torch.zeros(envs, dtype=torch.bool, device=sim.device)
     outcome = torch.full((envs,), -1, device=sim.device)  # 0 reached, 1 collided, 2 timeout

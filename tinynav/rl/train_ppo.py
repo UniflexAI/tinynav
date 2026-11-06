@@ -21,14 +21,18 @@ from tinynav.rl.bev import CHANNELS
 from tinynav.rl.policy import VEC_DIM, ActorCritic
 from tinynav.rl.sim import PRIV_DIM, NavSim, SimConfig
 
-# level -> (max goal distance m, obstacle density range, trap wall half-length range, U-cup share)
+# level -> (max goal distance m, obstacle density range, trap wall half-length range, U-cup share,
+#           doorway width range m, share of non-trap episodes with a doorway)
+# Doorways start wide and shrink: at 0.8-1.2m from the start the policy almost never tried a door
+# (a clipped frame ends the episode at -10) and learned to walk around the wall instead.
 CURRICULUM = [
-    (3.0, (0.0, 0.2), (0.6, 1.0), 0.0),
-    (4.0, (0.1, 0.4), (0.8, 1.5), 0.0),
-    (5.5, (0.2, 0.6), (1.0, 2.0), 0.2),
-    (7.0, (0.3, 0.8), (1.2, 2.8), 0.35),
-    (8.0, (0.3, 1.0), (1.5, 3.5), 0.5),
+    (3.0, (0.0, 0.2), (0.6, 1.0), 0.0, (1.4, 2.0), 0.5),
+    (4.0, (0.1, 0.4), (0.8, 1.5), 0.0, (1.2, 1.7), 0.5),
+    (5.5, (0.2, 0.6), (1.0, 2.0), 0.2, (1.0, 1.4), 0.45),
+    (7.0, (0.3, 0.8), (1.2, 2.8), 0.35, (0.9, 1.3), 0.4),
+    (8.0, (0.3, 1.0), (1.5, 3.5), 0.5, (0.8, 1.2), 0.35),
 ]
+NARROW_PROMOTE = 0.6  # doorway success needed to level up, on top of overall success / collisions
 
 
 LEVEL_COOLDOWN = 20
@@ -72,8 +76,9 @@ class Demos:
 
 
 def set_level(sim, level):
-    goal_max, density, trap_half, cup = CURRICULUM[level]
+    goal_max, density, trap_half, cup, door, narrow = CURRICULUM[level]
     sim.cfg.goal_dist, sim.cfg.density, sim.cfg.trap_half, sim.cfg.cup_prob = (2.0, goal_max), density, trap_half, cup
+    sim.cfg.door_width, sim.cfg.narrow_prob = door, narrow
 
 
 def main():
@@ -221,10 +226,11 @@ def main():
             if stats["eff"]:
                 writer.add_scalar("episode/path_efficiency", float(np.mean(stats["eff"])), step)
             writer.add_scalar("episode/mean_abs_yaw_rate", float(np.mean(stats["w"])), step)
-        window = (window + [(stats["reached"], stats["collided"], n_ep)])[-10:]
-        w_ep = sum(w[2] for w in window)
+        window = (window + [(stats["reached"], stats["collided"], n_ep, stats["narrow_ok"], stats["narrow_n"])])[-10:]
+        w_ep, w_nar = sum(w[2] for w in window), sum(w[4] for w in window)
         if (update - level_since >= LEVEL_COOLDOWN and w_ep and sum(w[0] for w in window) / w_ep >= 0.8
-                and sum(w[1] for w in window) / w_ep <= 0.1 and level < len(CURRICULUM) - 1):
+                and sum(w[1] for w in window) / w_ep <= 0.1 and w_nar and sum(w[3] for w in window) / w_nar >= NARROW_PROMOTE
+                and level < len(CURRICULUM) - 1):
             level, level_since = level + 1, update
             set_level(sim, level)
         if update % args.eval_every == 0 and level == len(CURRICULUM) - 1:
