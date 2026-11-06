@@ -136,7 +136,7 @@ def main():
     window, level_since = [], 0  # per-update (reached, collided, episodes)
     best_eval = -1.0
     while step < args.steps:
-        stats = {"reached": 0, "collided": 0, "timeout": 0, "ret": [], "len": [], "trap_n": 0, "trap_ok": 0, "narrow_n": 0, "narrow_ok": 0,
+        stats = {"reached": 0, "collided": 0, "timeout": 0, "ret": [], "len": [], "trap_n": 0, "trap_ok": 0, "narrow_n": 0, "narrow_ok": 0, "guard": 0.0,
                  "clear": [], "eff": [], "w": []}
         h0 = h.clone()
         with torch.no_grad():
@@ -150,6 +150,7 @@ def main():
                 rew = rew + args.gamma * val * info["timeout"]  # bootstrap time-outs: cut off, not failed
                 priv = sim.privileged()
                 buf["rew"][t], buf["done"][t] = rew, done.float()
+                stats["guard"] += info["guard"].float().mean().item() / T
                 h = h * (~done)[:, None]
                 ep_ret += rew
                 ep_len += 1
@@ -226,6 +227,7 @@ def main():
             if stats["eff"]:
                 writer.add_scalar("episode/path_efficiency", float(np.mean(stats["eff"])), step)
             writer.add_scalar("episode/mean_abs_yaw_rate", float(np.mean(stats["w"])), step)
+        writer.add_scalar("train/guard_intervention", stats["guard"], step)
         window = (window + [(stats["reached"], stats["collided"], n_ep, stats["narrow_ok"], stats["narrow_n"])])[-10:]
         w_ep, w_nar = sum(w[2] for w in window), sum(w[4] for w in window)
         if (update - level_since >= LEVEL_COOLDOWN and w_ep and sum(w[0] for w in window) / w_ep >= 0.8
