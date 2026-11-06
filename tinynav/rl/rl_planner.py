@@ -24,6 +24,8 @@ GUARD_HORIZON = 1.0
 GUARD_MARGIN = 0.05  # m between the footprint edge and the (already dilated) obstacle mask
 CREEP_V = 0.2  # m/s, forward escape when turning in place is blocked (e.g. backed against a wall)
 STUCK_WINDOW, STUCK_MOVE, STUCK_TURN = 10.0, 0.2, 0.3  # s, m, rad
+STUCK_HOLD, STUCK_RETRIES = 3.0, 3  # stop this long, then retry with fresh GRU memory; give up after this many
+ESCAPE_TOL = 0.01  # m an escape move may lose to ESDF noise; never below 0 (inside the dilated obstacle)
 
 
 class TRTPolicy:
@@ -82,15 +84,16 @@ def safe_command(center, yaw, v, w, esdf, origin, res):
     """First command in (policy, turn in place, turn the other way, creep forward, creep forward
     turning either way, straight back, stop) whose swept footprint keeps GUARD_MARGIN over
     GUARD_HORIZON. When the robot is already closer than the margin, a command also passes if it
-    never gets closer and ends with more room (escape). Creeping forward covers a robot backed
-    against a wall, where every turn sweeps a rear corner into it."""
+    never gets closer than now (within ESCAPE_TOL, and never below 0), so it can drive along a wall
+    it is hugging instead of freezing. Creeping forward covers a robot backed against a wall, where
+    every turn sweeps a rear corner into it."""
     n = int(GUARD_HORIZON / ROLLOUT_DT)
     now = float(footprint_clearance(rollout(center, yaw, 0.0, 0.0, steps=0), esdf, origin, res)[0])
     turn = np.sign(w) * max(abs(w), 0.3) if w != 0.0 else 0.3
     options = ((v, w), (0.0, turn), (0.0, -turn), (CREEP_V, 0.0), (CREEP_V, turn), (CREEP_V, -turn), (V_MIN, 0.0))
     for k, (cv, cw) in enumerate(options):
         clr = footprint_clearance(rollout(center, yaw, cv, cw, steps=n), esdf, origin, res)[1:]
-        if clr.min() >= GUARD_MARGIN or (now < GUARD_MARGIN and clr.min() >= now - 1e-3 and clr[-1] > now):
+        if clr.min() >= GUARD_MARGIN or (now < GUARD_MARGIN and clr.min() >= max(0.0, now - ESCAPE_TOL)):
             return cv, cw, k
     return 0.0, 0.0, len(options)
 
@@ -110,6 +113,7 @@ class RLPlanner:
         self.vel = np.zeros(2, np.float32)
         self.last_action = np.zeros(2, np.float32)
         self.motion, self.stuck = [], False  # (stamp, x, y, yaw, commanded) for stuck detection
+        self.stuck_count, self.stuck_since = 0, None
 
     def _check_stuck(self, stamp, center, yaw, commanded):
         self.motion = [m for m in self.motion if stamp - m[0] <= STUCK_WINDOW] + [(stamp, center[0], center[1], yaw, commanded)]
@@ -145,7 +149,13 @@ class RLPlanner:
         v, w, reason = safe_command(center, yaw, v, w, esdf, origin, GRID_RES)
         status = self.GUARD_REASONS[reason]
         # Judged on what the policy asks for, so "keeps asking, guard keeps refusing" counts as stuck too.
-        self.stuck = self.stuck or self._check_stuck(stamp, center, yaw, requested)
-        if self.stuck:  # latched until reset(): asking to move but not moving means blocked or oscillating
-            v, w, status = 0.0, 0.0, "stuck"
+        if self.stuck_since is None and not self.stuck and self._check_stuck(stamp, center, yaw, requested):
+            self.stuck_count += 1
+            self.stuck_since = stamp
+            self.stuck = self.stuck_count >= STUCK_RETRIES  # out of retries: stop until the next goal
+        if self.stuck_since is not None and not self.stuck and stamp - self.stuck_since >= STUCK_HOLD:
+            self.policy.reset()  # retry: let the policy decide afresh instead of repeating itself
+            self.motion, self.stuck_since = [], None
+        if self.stuck or self.stuck_since is not None:
+            v, w, status = 0.0, 0.0, "stuck" if self.stuck else f"stuck, retry {self.stuck_count}/{STUCK_RETRIES - 1}"
         return v, w, rollout(center, yaw, v, w), bev, status
