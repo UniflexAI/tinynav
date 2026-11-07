@@ -7,9 +7,11 @@ directly; a deterministic guard checks every command before it reaches the robot
 Branch: `xiaole/rl-nav`. Code: `tinynav/rl/`, plus the `TINYNAV_PLANNER=rl` hooks in
 `tinynav/core/planning_node.py` and `tinynav/platforms/cmd_vel_control.py`.
 
-Status (2026-11-07): works end to end on the robot stack and in the corridor simulator; v7 is the
-best model validated in the corridor simulator, v12 is better in the training simulator but not in
-the corridor (see [Results](#results) and [Open issues](#open-issues)).
+Status (2026-11-07): works end to end on the robot stack and in the corridor simulator. The default
+model is **v7** (`tinynav/models/rl_nav_policy_v7.onnx`), the best one validated in the corridor
+simulator. **v12** (`rl_nav_policy_v12.onnx`) is kept in the repo: it is better in the training
+simulator, especially in narrow passages, but slower and less goal-following in the corridor (see
+[Results](#results), [v12](#v12) and [Open issues](#open-issues)).
 
 ## How it works
 
@@ -158,6 +160,36 @@ Corridor simulator (Gazebo reconstruction of a real site, Pilot stack, sim colli
 Random spawns sometimes fail to relocalize within 6 minutes; that is `map_node` relocalization, not
 the planner.
 
+## v12
+
+Kept as `tinynav/models/rl_nav_policy_v12.onnx` (from `tinynav_db/rl_runs/ppo_v12_guarded/best.pt`,
+18.0M steps) for comparison and as the starting point for the next round. Build it with
+`make rl_nav RL_NAV_ONNX=rl_nav_policy_v12.onnx` and set
+`TINYNAV_RL_ENGINE=/tinynav/tinynav/models/rl_nav_policy_v12_<arch>.plan`.
+
+How it was trained (on top of v7, which was v5 retrained on the 1.0 x 0.5m footprint):
+
+| Step | Run | Change | Outcome |
+|---|---|---|---|
+| v8 | `ppo_v8_rear_froze` | rear camera in half the episodes, reverse penalty, 35% doorways, penalty on any command whose 1s rollout came within the guard margin | froze near walls: time-outs 10% -> 20%, stopped at 5M steps |
+| v8 | `ppo_v8_rear` | penalty only for commands the guard would refuse, clearance penalty halved, time penalty doubled | still below v7 at 8M (75.8% / 11.3% collisions), stopped; guard penalty turned off |
+| v9 | `ppo_v9_demos` | behaviour cloning on ~19.7k frames of human driving (narrow frames x3) | narrow 53% -> ~57%, collisions doubled, stopped |
+| v10 | `ppo_v10_geoprog` | progress on geodesic instead of straight-line distance | no change on doorways (56% / 33% time-out), stopped |
+| v11 | `ppo_v11_doors` | doorway-width curriculum (1.4-2.0m down to 0.8-1.2m), level-up needs 60% doorway success | used wide doors, still walked round 0.8-1.2m doors |
+| v12 | `ppo_v12_guarded` | runtime guard applied in the training sim (from v11 at 5.7M) | doorways 56% -> 71%, success 89.1%, 0 collisions |
+
+Diagnosis that led to v11 / v12: on doorway-only scenes failures were mostly time-outs that never
+came within 1.5m of the door (even successes walked round the wall end at 0.8-1.2m). The geodesic
+went through the door in 86% of scenes, driving straight through the door center succeeded in 69/80,
+and the 0.8m gap was clearly visible in the BEV, so the door was avoided rather than missed: in
+training a slightly misaligned approach clipped the frame and ended the episode at -10, while on the
+robot the guard would have corrected it.
+
+In the corridor simulator (1 m/s, guard on, same trials as v7): fixed spawn 1->2->3 in 175s (v7
+102s) and 3->1->2 in 128s (v7 104s); one random spawn timed out after wandering 74m on its last leg;
+median speed 0.36-0.39 m/s vs 0.50 for v7, and legs up to 60% longer. The likely causes are open
+issues 1 and 2 below.
+
 ## Lessons learned
 
 - **One footprint everywhere.** Training on 0.4 x 0.3 while the guard used 0.6 x 0.3 and the
@@ -187,10 +219,7 @@ the planner.
    driving and training with the guard. Next: lower or drop the BC weight.
 3. **Narrow doors (0.8-1.2m)** still time out ~28% of the time; most failures give up on the door
    from a distance.
-4. **Default model.** `make rl_nav` / `RLNavPolicyTRT` currently default to v12
-   (`rl_nav_policy_v12.onnx`); v7 (`rl_nav_policy_v7.onnx`) is the better-validated choice for the
-   corridor: `make rl_nav RL_NAV_ONNX=rl_nav_policy_v7.onnx` and point `TINYNAV_RL_ENGINE` at its plan.
-5. Only one corridor scene was tested; no real-robot runs with v7/v12 yet.
+4. Only one corridor scene was tested; no real-robot runs with v7/v12 yet.
 
 ## Files
 
