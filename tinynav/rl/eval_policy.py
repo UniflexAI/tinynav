@@ -29,10 +29,10 @@ def straight_to_goal(obs, done):
     return torch.stack([torch.full_like(g[:, 0], 0.6), (torch.atan2(g[:, 1], g[:, 0]) * 1.5).clamp(-1, 1)], 1)
 
 
-def evaluate(make_actor, level, envs, seed, record=0, trap_prob=0.3, narrow_prob=0.25):
+def evaluate(make_actor, level, envs, seed, record=0, trap_prob=0.3, narrow_prob=0.25, carrot_distance=0.0):
     """One episode per env; returns outcome rates (all, trap-only), quality metrics and, for the first `record`
     envs, per-step frames."""
-    sim = NavSim(SimConfig(num_envs=envs, trap_prob=trap_prob, narrow_prob=narrow_prob), device="cuda", seed=seed)
+    sim = NavSim(SimConfig(num_envs=envs, trap_prob=trap_prob, narrow_prob=narrow_prob, carrot_distance=carrot_distance), device="cuda", seed=seed)
     set_level(sim, level)
     sim.cfg.trap_prob, sim.cfg.narrow_prob = trap_prob, narrow_prob  # set_level picks the level's doorway share
     sim.reset()
@@ -97,6 +97,7 @@ def render_gif(episodes, path, stride=2):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--carrot-distance", type=float, default=0.0)
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--level", type=int, default=len(CURRICULUM) - 1)
     ap.add_argument("--envs", type=int, default=512)
@@ -111,7 +112,7 @@ def main():
     print(f"checkpoint step {ck['step']:,}, trained up to level {ck['level']}; evaluating level {args.level} on {args.envs} episodes")
     for name, fn in (("policy", lambda n: PolicyActor(net, n)), ("straight-to-goal", lambda n: straight_to_goal)):
         (succ, coll, tout), (ts, tc, tt), q, eps = evaluate(fn, args.level, args.envs, args.seed, record=4 if name == "policy" and args.gif else 0,
-                                                            trap_prob=args.trap_prob, narrow_prob=args.narrow_prob)
+                                                            trap_prob=args.trap_prob, narrow_prob=args.narrow_prob, carrot_distance=args.carrot_distance)
         print(f"{name:>17}: success {succ:.1%}  collision {coll:.1%}  timeout {tout:.1%}   | trap episodes: success {ts:.1%}  collision {tc:.1%}  timeout {tt:.1%}")
         print(f"{'':>17}  near-miss (<10cm) {q['near_miss']:.1%}  path efficiency {q['efficiency']:.1%}  mean |yaw rate| {q['mean_abs_w']:.3f} rad/s"
               f"  narrow-passage success {q['narrow_success']:.1%}")
