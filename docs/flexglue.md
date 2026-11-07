@@ -49,6 +49,83 @@ This costs approximately 4 MiB per keyframe and permits matching while scratch
 videos are still being written. Their SuperPoint features remain available, so
 these maps can also be used with LightGlue. No pose, depth or ROS schema changes.
 
+## Corridor replay on Orin Nano
+
+Measured 2026-11-07 on Jetson Orin Nano Super 8GB in its existing 15W mode.
+This replays the **original real-corridor maps 3-10 and exact 64 requests** from
+the desktop diagnostic: 32 overlapping-map requests and 32 requests against
+maps selected using distant similar frames. It does not use the separate home
+simulation bag. The 211 involved images, stored SuperPoint features, reference
+depths, Top-3 candidate lists and PnP acceptance rules are fixed. Source map
+pose/link/intrinsic hashes were checked against the original manifest.
+
+Both the FlexGlue descriptor and matcher were converted to TensorRT on this
+Nano. The descriptor uses an FP16-enabled build; the matcher uses the
+FP16-preserving attention conversion and a strongly typed TensorRT build.
+The accuracy replay uses the adapter from commit
+`a9660347165a6a03364302f5f8152567e24e8bf7` on `xiaole/flexglue-matcher`, with
+experimental TensorRT sessions substituted for its ONNX sessions.
+
+### Localization outcomes
+
+| Outcome / 64 requests | LightGlue TensorRT | FlexGlue TensorRT |
+|---|---:|---:|
+| Map-reference-consistent poses | 32 | 31 |
+| Accepted map-reference mismatches | 22 | 2 |
+| Requests with no accepted pose | 10 | 31 |
+
+For these repetitive-corridor samples, FlexGlue substantially reduces wrong
+accepted poses, which is useful when an incorrect map-to-odometry correction
+can misdirect navigation. It gives up more requests instead: consistent poses
+decrease by one and requests without a pose increase by 21. It still accepts
+two inconsistent poses, so this is risk reduction, not elimination of wrong fixes.
+
+Consistency means position error below 0.75 m and full rotation error below
+10 degrees against optimized map poses. These references are not independent
+surveyed truth. The 64 requests are correlated, deliberately difficult samples;
+the counts do not estimate a robot's normal operating error rate.
+
+**Conversion check:** FlexGlue TensorRT and Nano ONNX CUDA agree on the
+accepted/rejected and consistent/inconsistent classification of all 64 requests.
+Nano ONNX also agrees request-by-request with the original desktop FlexGlue
+results (31 consistent, 2 inconsistent, 31 without a pose). This does not imply
+bitwise-identical matches or floating-point outputs. Nano LightGlue differs from
+the original desktop diagnostic on two requests, indices 0 and 21; the table
+preserves the Nano measurements rather than substituting the desktop counts.
+
+### Matched TensorRT timing
+
+To control execution-wrapper differences, both matchers use the same synchronous
+TensorRT host-to-host session wrapper, with CUDA Graph disabled for both.
+24 image pairs are selected uniformly from the original 192 candidate pairs,
+without selecting by either matcher's outcome. Each pair has two warmups and
+three alternating measured repetitions: 72 measurements per matcher.
+Descriptors are prepared before timing. LightGlue's matches from this wrapper
+were checked against its existing CUDA Graph wrapper on the selected pairs.
+
+| Pair-matching time | LightGlue TensorRT | FlexGlue TensorRT |
+|---|---:|---:|
+| Median | 12.7 ms | 501.8 ms |
+| P95 | 13.6 ms | 504.2 ms |
+
+These times include host/device transfers and matcher postprocessing. They
+exclude descriptor extraction, SuperPoint, retrieval, PnP, disk, ROS, queueing
+and planning. Three FlexGlue candidate matches alone take about 1.5 seconds
+under these settings; this is not full-request latency. The descriptor was also
+converted to TensorRT, but its execution is outside this matching-only table.
+The main 64-request replay uses the existing LightGlue CUDA Graph wrapper for
+its classifications; its timings are not substituted into the controlled table.
+
+Environment: TensorRT 10.3.0, CUDA 12.6, ONNX Runtime GPU 1.23.0, OpenCV 4.11.0,
+NumPy 1.26.1. Device-specific engines were built on the Nano rather than copied
+from the desktop GPU.
+
+**Integration status:** the TensorRT build/runner used here is an offline
+experiment, not an enabled backend in this PR. The documented
+`--feature_matcher flexglue` command still loads ONNX Runtime CUDA. This replay
+does not validate live sensor scheduling, physical navigation, rear-camera
+coverage or independent-capture generalization.
+
 ## Implementation-specific corridor diagnostic
 
 This experiment compares the existing LightGlue TensorRT FP16 implementation
@@ -93,15 +170,11 @@ includes one query DINOv3 description. The sum excludes live DINOv2 image
 encoding, video decoding, ROS, queueing and planning, and is not measured
 end-to-end application latency.
 
-A controlled follow-up must compare ONNX CUDA with ONNX CUDA, or TensorRT with
-TensorRT after validating conversion parity, on the same device, precision,
-input/keypoint counts, warmup and cache policy. Descriptor extraction, matching
-and full-request latency must be reported separately. Backend parity and
-independent-capture validation remain outstanding; the experimental TensorRT
-conversion is not evidence of a model-level speed ranking.
-
-No continuous ROS mission, rear-camera or Orin validation is claimed by this
-experiment. This PR does not change online localization acceptance thresholds.
+The Orin Nano section above supplies a separate matched-TensorRT timing test
+and per-request conversion checks on this same dataset. Do not combine its
+numbers with these mixed-backend desktop timings to infer a universal model
+speed ratio. Independent-capture accuracy and live scheduling validation remain
+outstanding. This PR does not change online localization acceptance thresholds.
 
 ## Upstream models
 
