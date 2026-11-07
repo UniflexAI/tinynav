@@ -34,6 +34,25 @@
 
 We’ve launched our bounty program! Check the [list](https://docs.google.com/spreadsheets/d/1fyFSkiyfSGVeO8uW97gS7-gIt9qTbGIpYaMcHcjPF4Q/edit?usp=sharing) to see how you can contribute and the reward values for each task.
 
+# Optional feature matching
+
+LightGlue remains the default. An experimental [FlexGlue ONNX option](docs/flexglue.md)
+is available for mapping and relocalization; real-time VIO keeps LightGlue.
+
+On the original 64-request real-corridor diagnostic replayed on **Jetson Orin Nano
+Super 8GB (15W)**, a separate TensorRT conversion reduced accepted map-reference
+mismatches from **22 to 2**. Consistent poses were 32 versus 31, and requests without
+an accepted pose increased from 10 to 31: FlexGlue trades availability for fewer
+wrong corrections on these samples. Its TensorRT classifications matched the
+original ONNX diagnostic on all 64 requests.
+
+With the same TensorRT execution wrapper and cached descriptors, median pair
+matching took **12.7 ms (LightGlue)** and **501.8 ms (FlexGlue)**. These are matcher
+times, not full relocalization latency. The conversion is an offline experiment;
+`--feature_matcher flexglue` in this PR still uses ONNX Runtime CUDA. See
+[results, timing protocol and limitations](docs/flexglue.md#corridor-replay-on-orin-nano)
+for the matched-runtime comparison and the separate desktop measurements.
+
 # Stereo Cameras
 
 we’re excited to add [Looper](https://looper-robotics.com/?utm_source=blogger&utm_medium=social&utm_campaign=booking&promo=uIwjGxmJ) as a first-class supported camera, alongside RealSense.
