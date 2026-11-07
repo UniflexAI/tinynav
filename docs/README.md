@@ -31,6 +31,8 @@ The planning module is responsible for generating optimal and feasible control c
 | **Optimal Command Selection**       | Selects the best trajectory and computes the corresponding velocity commands for execution.                                                   |
 | **Planned Command Node Publishing(optional)**       | Publishes planned command as `geometry_msgs/Twist` and local map as `nav_msgs/OccupancyGrid`.|
 
+An experimental learned local planner (BEV -> recurrent policy -> `(v, w)` with a safety guard) can replace trajectory scoring; see [RL local navigation](rl_navigation.md).
+
 ### Mapping  Module
 
 The mapping module is responsible for providing the robot’s global position along with static map information.
