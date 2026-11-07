@@ -10,6 +10,7 @@ Each env's rollout is one GRU sequence; minibatches split by env so sequences st
 """
 import argparse
 import glob
+import json
 import time
 from pathlib import Path
 
@@ -83,6 +84,7 @@ def set_level(sim, level):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--carrot-distance", type=float, default=0.0)
     ap.add_argument("--run", required=True)
     ap.add_argument("--steps", type=int, default=30_000_000)
     ap.add_argument("--envs", type=int, default=256)
@@ -107,10 +109,11 @@ def main():
     args = ap.parse_args()
     run, dev = Path(args.run), torch.device("cuda")
     run.mkdir(parents=True, exist_ok=True)
+    (run / "config.json").write_text(json.dumps(vars(args), indent=2))
     torch.manual_seed(args.seed)
     writer = SummaryWriter(run)
 
-    sim = NavSim(SimConfig(num_envs=args.envs), device=dev, seed=args.seed)
+    sim = NavSim(SimConfig(num_envs=args.envs, carrot_distance=args.carrot_distance), device=dev, seed=args.seed)
     demos = Demos(args.demos, args.horizon, dev) if args.demos else None
     net = ActorCritic().to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
@@ -237,7 +240,7 @@ def main():
             set_level(sim, level)
         if update % args.eval_every == 0 and level == len(CURRICULUM) - 1:
             from tinynav.rl.eval_policy import PolicyActor, evaluate  # local: eval_policy imports this module
-            (e_succ, e_coll, _), (e_trap, _, _), q, _ = evaluate(lambda n: PolicyActor(net, n), level, 256, seed=999)
+            (e_succ, e_coll, _), (e_trap, _, _), q, _ = evaluate(lambda n: PolicyActor(net, n), level, 256, seed=999, carrot_distance=args.carrot_distance)
             for k, v in (("success_rate", e_succ), ("collision_rate", e_coll), ("trap_success_rate", e_trap), *q.items()):
                 writer.add_scalar(f"eval/{k}", v, step)
             print(f"eval @ {step:,}: success {e_succ:.3f} collision {e_coll:.3f} trap {e_trap:.3f} near_miss {q['near_miss']:.3f} "
@@ -245,7 +248,7 @@ def main():
             score = e_succ - 0.5 * q["near_miss"]  # success alone would keep a policy that still scrapes walls
             if score > best_eval:
                 best_eval = score
-                torch.save({"model": net.state_dict(), "level": level, "step": step, "eval": (e_succ, e_coll, e_trap)}, run / "best.pt")
+                torch.save({"model": net.state_dict(), "level": level, "step": step, "eval": (e_succ, e_coll, e_trap), "config": vars(args)}, run / "best.pt")
         if demos is not None:
             writer.add_scalar("train/bc_loss", bc.item(), step)
         for k, v in (("curriculum_level", level), ("lr", opt.param_groups[0]["lr"]), ("policy_loss", pg.item()), ("value_loss", vf.item()),
@@ -256,7 +259,7 @@ def main():
         if update % 10 == 0 or step >= args.steps:
             print(f"step {step:>10,} lvl {level} eps {n_ep:4d} succ {succ:.2f} coll {coll:.2f} trap {trap:.2f} "
                   f"ret {np.mean(stats['ret']) if n_ep else 0:6.2f} std {net.log_std.exp().mean():.2f} {(time.time() - t0) / 60:.1f} min", flush=True)
-            torch.save({"model": net.state_dict(), "opt": opt.state_dict(), "level": level, "step": step}, run / "last.pt")
+            torch.save({"model": net.state_dict(), "opt": opt.state_dict(), "level": level, "step": step, "config": vars(args)}, run / "last.pt")
         if update % 100 == 0:
             torch.save({"model": net.state_dict(), "level": level, "step": step}, run / f"step_{step}.pt")
 

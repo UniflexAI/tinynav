@@ -1,0 +1,53 @@
+{
+  "model": "v13",
+  "source_checkpoint": "tinynav_db/rl_runs/ppo_v13_carrot/best.pt",
+  "checkpoint_step": 2056192,
+  "checkpoint_sha256": "c38a9e2fc3fdd968e47c55bcaa96712f16c44b37aece42a6e7a7e7d6eca3d27a",
+  "selection_eval": [
+    0.921875,
+    0.0,
+    0.8275861740112305
+  ],
+  "onnx": "tinynav/models/rl_nav_policy_v13.onnx",
+  "onnx_sha256": "ba0419bdfc8ee0da558fe44de3acc692238c529c9eb267b7ef7501f65c2e6dca",
+  "onnx_bytes": 4446276,
+  "opset": 17,
+  "deployment_parameters": 1110530,
+  "validation": {
+    "checker": "passed",
+    "provider": "CPUExecutionProvider",
+    "recurrent_sequences": 4,
+    "steps_per_sequence": 128,
+    "seed": 26013,
+    "inputs": "recorded BEV + synthetic vectors in [-1,1]",
+    "max_action_abs_error": 1.5497207641601562e-06,
+    "max_hidden_abs_error": 6.3427723944187164e-06,
+    "torch": "2.14.0+cu130",
+    "onnx": "1.23.2",
+    "onnxruntime": "1.31.1"
+  },
+  "training_config": {
+    "carrot_distance": 2.2,
+    "run": "tinynav_db/rl_runs/ppo_v13_carrot",
+    "steps": 20000000,
+    "envs": 128,
+    "horizon": 64,
+    "epochs": 4,
+    "minibatch": 2048,
+    "lr": 5e-05,
+    "gamma": 0.995,
+    "lam": 0.95,
+    "clip": 0.2,
+    "ent": 0.002,
+    "seed": 0,
+    "lr_end": 5e-06,
+    "resume": null,
+    "init": "tinynav_db/rl_runs/ppo_v12_guarded/best.pt",
+    "level": 4,
+    "eval_every": 25,
+    "demos": null,
+    "bc_coef": 1.0,
+    "bc_coef_end": 0.1,
+    "bc_batch": 16
+  }
+}

@@ -70,6 +70,7 @@ class SimConfig:
     act_noise: float = 0.1
     # task
     goal_dist: tuple = (2.0, 8.0)
+    carrot_distance: float = 0.0  # 0: fixed goal; >0: moving target along the geodesic route
     goal_tol: float = 0.3
     clearance: float = 0.3
     trap_prob: float = 0.3  # episodes with a wall (or U-cup) between start and goal
@@ -570,8 +571,33 @@ class NavSim:
         return g, origin
 
     # ---------- RL interface ----------
+    def policy_goal(self):
+        """Moving global-path target; reward and termination keep the final goal."""
+        if self.cfg.carrot_distance <= 0:
+            return self.goal
+        idx = torch.arange(self.cfg.num_envs, device=self.device)
+        cell = ((self.pos + self.ng * GEO_RES / 2) / GEO_RES).long().clamp(0, self.ng - 1)
+        offsets = torch.tensor([(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)],
+                               device=self.device)
+        costs = offsets.float().norm(dim=1) * GEO_RES
+        traveled = torch.zeros(self.cfg.num_envs, device=self.device)
+        for _ in range(math.ceil(self.cfg.carrot_distance / GEO_RES)):
+            neighbors = (cell[:, None] + offsets).clamp(0, self.ng - 1)
+            distance = self.geo[idx[:, None], neighbors[..., 0], neighbors[..., 1]]
+            side_x = self.geo[idx[:, None], neighbors[..., 0], cell[:, None, 1]]
+            side_y = self.geo[idx[:, None], cell[:, None, 0], neighbors[..., 1]]
+            blocked = (side_x >= GEO_UNREACHABLE) | (side_y >= GEO_UNREACHABLE)
+            score = (distance + costs * 0.999).masked_fill(blocked, math.inf)
+            choice = score.argmin(1)
+            advance = traveled < self.cfg.carrot_distance
+            cell = torch.where(advance[:, None], neighbors[idx, choice], cell)
+            traveled += costs[choice] * advance
+        target = (cell.float() + 0.5) * GEO_RES - self.ng * GEO_RES / 2
+        near = self._geo_at(idx, self.pos) <= self.cfg.carrot_distance
+        return torch.where(near[:, None], self.goal, target)
+
     def goal_robot_frame(self):
-        d = self.goal - self.pos
+        d = self.policy_goal() - self.pos
         c, s = torch.cos(self.yaw), torch.sin(self.yaw)
         return torch.stack([c * d[:, 0] + s * d[:, 1], -s * d[:, 0] + c * d[:, 1]], -1)
 

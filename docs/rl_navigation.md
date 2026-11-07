@@ -235,3 +235,19 @@ issues 1 and 2 below.
 | `tinynav/rl/export_onnx.py`, `tinynav/models/rl_nav_policy_v*.onnx`, `Makefile` | deployment |
 | `tests/test_rl_sim.py`, `tests/test_rl_planner.py` | sim-vs-planner equivalence, guard, rewards |
 | `tinynav_db/rl_runs/` (not in git) | training runs; `ppo_v7_bigbody`, `ppo_v12_guarded` are the current candidates |
+
+## v13 experiment and detailed report (2026-11-07)
+
+v13 fine-tunes v12 with a 2.2m moving route target and no BC loss. Training stopped early
+after regression; the exported candidate uses best.pt at 2,056,192 steps, not the
+9,338,880-step last checkpoint. Matched tests (two seeds, 512 episodes per model/mode)
+found moving-target success v7 86.91%, v12 89.45%, v13 92.19%; fixed-goal success
+v7 86.13%, v12 89.65%, v13 87.30%. These are NavSim results, not Gazebo or real-robot validation.
+The default remains v7.
+
+See [the detailed training and comparison report](rl_navigation_v13_report.md) for
+CNN/MLP/GRU inputs and outputs, PPO, rewards, training provenance, paired example
+videos, raw results, ONNX validation and target-machine deployment instructions.
+The candidate is `tinynav/models/rl_nav_policy_v13.onnx`; build with
+`make rl_nav RL_NAV_ONNX=rl_nav_policy_v13.onnx` and select its plan with
+`TINYNAV_RL_ENGINE`.
