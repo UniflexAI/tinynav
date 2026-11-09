@@ -1,8 +1,8 @@
 """FlexGlue v0.1 sparse TensorRT matcher for existing SuperPoint keypoints."""
-from collections import OrderedDict
 import hashlib
 import os
 import platform
+from collections import OrderedDict
 from pathlib import Path
 
 import cv2

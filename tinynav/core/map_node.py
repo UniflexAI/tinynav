@@ -523,7 +523,7 @@ class MapNode(Node):
         for timestamp_in_map, _similarity in candidates:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, reference_image = self.db.get_depth_embedding_features_images(timestamp_in_map)
-            image_args = dict(image0=reference_image, image1=keyframe) if self.flex_glue_matcher is not None else {}
+            image_args = {'image0': reference_image, 'image1': keyframe} if self.flex_glue_matcher is not None else {}
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features, **image_args)
             if len(matches) < 50:
                 print(f"not enough matched features to relocalize, {len(matches)} < 50")

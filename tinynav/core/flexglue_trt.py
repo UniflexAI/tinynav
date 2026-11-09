@@ -1,6 +1,7 @@
 """Small synchronous TensorRT session for dynamic FlexGlue inputs."""
 
 from types import SimpleNamespace
+
 import numpy as np
 import tensorrt as trt
 from cuda import cudart as cu
