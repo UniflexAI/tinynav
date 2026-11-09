@@ -11,7 +11,8 @@ import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
 from queue import Empty, Full, Queue
-from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
+from tinynav.core.flexglue import FlexGlueONNX
+from tinynav.core.models_trt import SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
@@ -93,7 +94,7 @@ class PerceptionNode(Node):
         # self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         # model
         self.superpoint = SuperPointTRT()
-        self.light_glue = LightGlueTRT()
+        self.flex_glue = FlexGlueONNX()
 
         self.last_keyframe_img = None
         self.last_keyframe_features = None
@@ -319,15 +320,10 @@ class PerceptionNode(Node):
             prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
             current_left_extract_result = await self.superpoint.infer(left_img)
 
-            match_result = await self.light_glue.infer(
-                prev_left_extract_result["kpts"],
-                current_left_extract_result["kpts"],
-                prev_left_extract_result["descps"],
-                current_left_extract_result["descps"],
-                prev_left_extract_result["mask"],
-                current_left_extract_result["mask"],
-                kf_prev.image.shape,
-                left_img.shape)
+            _, _, pairs = self.flex_glue.match_keypoints(
+                prev_left_extract_result, current_left_extract_result, kf_prev.image, left_img)
+            match_indices = np.full(prev_left_extract_result["kpts"].shape[1], -1, dtype=np.int64)
+            match_indices[pairs[:, 0]] = pairs[:, 1]
 
         # propagate IMU measurements
         while True:
@@ -357,7 +353,6 @@ class PerceptionNode(Node):
         # do simple pose estimation between last keyframe and current frame
             prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
             current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
-            match_indices = match_result["match_indices"][0]
             idx_to_origial = range(len(prev_keypoints))
             valid_mask = match_indices != -1
             kpt_pre = prev_keypoints[valid_mask]
@@ -447,7 +442,7 @@ class PerceptionNode(Node):
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
             # Process pairs of keyframes from last _N keyframes: extract features (SuperPoint),
-            # match by LightGlue, filter by geometric consistency (pose estimation), 
+            # match by FlexGlue, filter by geometric consistency (pose estimation), 
             # and build tracks via Union-Find
             with Timer(name="[cached result]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 for i in range(max(0, len(self.keyframe_queue) - _N), len(self.keyframe_queue) - 1):
@@ -464,20 +459,13 @@ class PerceptionNode(Node):
                         current_left_extract_result = await self.superpoint.infer(kf_curr.image)
 
                     with Timer(name="[cached result[1.3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
-                        match_result = await self.light_glue.infer(
-                            prev_left_extract_result["kpts"],
-                            current_left_extract_result["kpts"],
-                            prev_left_extract_result["descps"],
-                            current_left_extract_result["descps"],
-                            prev_left_extract_result["mask"],
-                            current_left_extract_result["mask"],
-                            kf_prev.image.shape,
-                            kf_curr.image.shape,
-                        )
+                        _, _, pairs = self.flex_glue.match_keypoints(
+                            prev_left_extract_result, current_left_extract_result, kf_prev.image, kf_curr.image)
+                        match_indices = np.full(prev_left_extract_result["kpts"].shape[1], -1, dtype=np.int64)
+                        match_indices[pairs[:, 0]] = pairs[:, 1]
                     with Timer(name="[cached result[2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
                         current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
-                        match_indices = match_result["match_indices"][0].copy()
                         idx_to_origial = range(len(prev_keypoints))
 
                         valid_mask = match_indices != -1
@@ -592,7 +580,6 @@ class PerceptionNode(Node):
             self.slam_camera_info_pub.publish(self.camera_info_msg)
             self.depth_pub.publish(depth_msg)
         self.logger.debug(f"superpoint cache info: {self.superpoint.infer.cache_info()}")
-        self.logger.debug(f"lightglue cache info: {self.light_glue.infer.cache_info()}")
         self.logger.debug(f"estimate_pose cache info: {estimate_pose.cache_info()}")
 
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):

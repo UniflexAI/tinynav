@@ -1,31 +1,14 @@
-# Optional FlexGlue matching
+# FlexGlue matching
 
-TinyNav can use the official FlexGlue v0.1 sparse ONNX matcher in place of
-LightGlue for map building and map relocalization. LightGlue remains the default;
-real-time VIO in `perception_node` continues to use LightGlue.
+Mapping, relocalization and native stereo VIO use FlexGlue directly. SuperPoint
+keypoints, retrieval and PnP acceptance remain unchanged. Looper supplies its own odometry.
 
-SuperPoint keypoints, DINOv2/VLAD retrieval, depth filtering, PnP acceptance and
-candidate ranking keep their existing behavior. The optional backend returns
-matches in the original SuperPoint indexing and pixel-coordinate convention.
-
-## Enable
-
-Inside the usual TinyNav ROS/CUDA environment:
+Inside the TinyNav ROS/CUDA environment, install the dependencies and fetch the weights once:
 
 ```bash
-uv sync --extra flexglue
+uv sync
 python -m tool.download_flexglue
-
-python -m tinynav.core.build_map_node \
-  --bag_file /path/to/bag --map_save_path /path/to/new_map \
-  --feature_matcher flexglue
-
-python -m tinynav.core.map_node \
-  --tinynav_map_path /path/to/map --feature_matcher flexglue
 ```
-
-Omit `--feature_matcher` or select `lightglue` for the existing implementation.
-Python callers can pass `feature_matcher="flexglue"` to either node constructor.
 
 The downloader verifies both official models by SHA256 and installs them under
 `tinynav/models/flexglue/` (about 439 MiB). Downloads are explicit, not performed

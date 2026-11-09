@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from math import inf
-from typing import Callable, Dict, Literal, Optional
+from typing import Callable, Dict, Optional
 
 import cv2
 import einops
@@ -35,7 +35,7 @@ from tqdm import tqdm
 from visualization_msgs.msg import Marker, MarkerArray
 
 from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
+from tinynav.core.models_trt import Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.flexglue import FlexGlueONNX
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
@@ -55,7 +55,6 @@ class BuildMapArgs:
     # Minimum growth in keyframe count before running global pose-graph solve + TF republish.
     # Mirrors COLMAP IncrementalPipeline::ba_global_frames_ratio (default 1.1).
     global_frames_ratio: float = 1.1
-    feature_matcher: Literal["lightglue", "flexglue"] = "lightglue"
 
 
 def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
@@ -584,7 +583,6 @@ class BuildMapNode(Node):
         map_save_path: str,
         verbose_timer: bool = True,
         global_frames_ratio: float = 1.1,
-        feature_matcher: str = "lightglue",
     ):
         super().__init__('build_map_node')
         if global_frames_ratio < 1.0:
@@ -598,10 +596,7 @@ class BuildMapNode(Node):
             verbose_logger=self.logger.info if verbose_timer else None,
         )
         self.super_point_extractor = SuperPointTRT()
-        if feature_matcher not in ('lightglue', 'flexglue'):
-            raise ValueError(f'Unknown feature matcher: {feature_matcher}')
-        self.flex_glue_matcher = FlexGlueONNX() if feature_matcher == 'flexglue' else None
-        self.light_glue_matcher = LightGlueTRT() if self.flex_glue_matcher is None else None
+        self.flex_glue_matcher = FlexGlueONNX()
         self.dinov2_model = Dinov2TRT()
         self.semantic_embedder = SigLIPTRT()
 
@@ -762,8 +757,7 @@ class BuildMapNode(Node):
             self.db.set_semantic_embedding(keyframe_image_timestamp, semantic_embedding)
         with self.stage_timer.timed("super_point_extractor"):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
-            if self.flex_glue_matcher is not None:
-                features = self.flex_glue_matcher.add_features(features, infra1_image)
+            features = self.flex_glue_matcher.add_features(features, infra1_image)
             self.db.set_entry(keyframe_image_timestamp, features = features)
 
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
@@ -833,18 +827,7 @@ class BuildMapNode(Node):
         return True
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64), image0=None, image1=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        if self.flex_glue_matcher is not None:
-            return self.flex_glue_matcher.match_keypoints(feats0, feats1, image0, image1)
-        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
-        match_indices = match_result["match_indices"][0]
-        valid_mask = match_indices != -1
-        keypoints0 = feats0["kpts"][0][valid_mask]
-        keypoints1 = feats1["kpts"][0][match_indices[valid_mask]]
-        matches = []
-        for i, index in enumerate(match_indices):
-            if index != -1:
-                matches.append([i, index])
-        return keypoints0, keypoints1, np.array(matches, dtype=np.int64)
+        return self.flex_glue_matcher.match_keypoints(feats0, feats1, image0, image1)
 
     def pose_graph_trajectory_publish(self, timestamp):
         path_msg = Path()
@@ -1073,7 +1056,6 @@ if __name__ == '__main__':
         parsed_args.map_save_path,
         verbose_timer=parsed_args.verbose_timer,
         global_frames_ratio=parsed_args.global_frames_ratio,
-        feature_matcher=parsed_args.feature_matcher,
     )
     image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)

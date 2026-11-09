@@ -4028,6 +4028,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numba" },
     { name = "numpy" },
+    { name = "onnxruntime-gpu" },
     { name = "opencv-python" },
     { name = "pillow" },
     { name = "plyfile" },
@@ -4051,9 +4052,6 @@ dependencies = [
     { name = "plyfile" },
     { name = "pymeshlab" },
     { name = "torch" },
-]
-flexglue = [
-    { name = "onnxruntime-gpu" },
 ]
 lekiwi = [
     { name = "lerobot", extra = ["lekiwi"] },
@@ -4086,7 +4084,7 @@ requires-dist = [
     { name = "newrawpy", marker = "extra == '3dgs'", specifier = "<=1.0.0b0" },
     { name = "numba", specifier = "==0.61.2" },
     { name = "numpy", specifier = "==1.26.1" },
-    { name = "onnxruntime-gpu", marker = "extra == 'flexglue'", specifier = ">=1.23.2,<2" },
+    { name = "onnxruntime-gpu", specifier = ">=1.23.2,<2" },
     { name = "opencv-python" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pillow", marker = "extra == '3dgs'", specifier = ">=10,<12" },
@@ -4105,7 +4103,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
     { name = "viser" },
 ]
-provides-extras = ["flexglue", "lekiwi", "unitree", "3dgs"]
+provides-extras = ["lekiwi", "unitree", "3dgs"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.12.3" }]
