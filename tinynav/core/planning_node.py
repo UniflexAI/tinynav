@@ -192,18 +192,16 @@ def run_raycasting_points_loopy(points, T_points_to_world, grid_shape, origin, r
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
                        min_span_map=None):
-    """Obstacle = cells where occupied voxels span >= min_wall_span_m in z.
-    The span filter only applies to cells whose lowest occupied voxel sits near
-    the ground (within ground_band_m of robot_z_bottom): walls have large z-span
-    while stair risers / ground bumps have small span. Cells whose occupancy
-    starts above that ground band (floating / mid-height obstacles) use a
-    single-voxel span threshold (resolution) just to reject single-voxel
-    noise, so real low-profile obstacles are still kept.
+    """Obstacle = cells whose occupied voxels inside the band span >= the span
+    threshold. `robot_z` is **base_link's** world z (the pose is the camera's;
+    the caller subtracts the model's camera_above_base), and the band edges
+    config.robot_z_bottom/top are base-relative -- the ground sits below the
+    band by construction, so pose wobble cannot drag it in and the span filter
+    is the second line of defence, not the only one.
 
     `min_span_map` is an optional (h,w) array overriding min_wall_span_m per cell,
     which is how a caller marks somewhere a riser should read as a step rather than
-    a wall. Cells it relaxes skip the ground-band gate -- on a staircase the ground
-    is the staircase, and the steps ahead sit above the band. Per cell, not a global
+    a wall (climb regions raise the threshold there). Per cell, not a global
     switch, so low obstacles beside a staircase keep blocking while it is being
     climbed; the caller owns what the regions mean."""
     config = config or ObstacleConfig()
@@ -217,25 +215,12 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
         band_occ = occupancy_grid[:, :, z_mask] > config.occ_threshold
         has_occ = np.any(band_occ, axis=2)
         n_z = band_occ.shape[2]
-        z_rel_band = z_rel[z_mask]
         z_idx = np.arange(n_z, dtype=np.float32)
         occ_high = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], -1).max(axis=2)
         occ_low = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], n_z).min(axis=2)
         z_span = (occ_high - occ_low) * resolution
-        # relative height of the lowest occupied voxel in each cell
-        low_z_rel = z_rel_band[np.clip(occ_low, 0, n_z - 1).astype(np.int64)]
-        near_ground = low_z_rel <= config.robot_z_bottom + config.ground_band_m
         min_span = config.min_wall_span_m if min_span_map is None else min_span_map
-        # A relaxed cell keeps its threshold at any height: mid-climb the steps ahead
-        # start above the ground band, so gating on height would read every riser
-        # above it as a floating obstacle.
-        relaxed = False if min_span_map is None else min_span_map > config.min_wall_span_m
-        # ground-anchored (or caller-relaxed) cells: full span filter (wall vs
-        # stair/bump); floating cells: single-voxel span filter just to reject noise
-        span_ok = np.where(near_ground | relaxed,
-                           z_span >= min_span,
-                           z_span >= resolution)
-        obstacle = has_occ & span_ok
+        obstacle = has_occ & (z_span >= min_span)
 
     if config.dilation_cells > 0 and np.any(obstacle):
         obstacle = binary_dilation(obstacle, iterations=config.dilation_cells)
@@ -1047,8 +1032,7 @@ class PlanningNode(Node):
             f"{ROBOT_CONFIG.front_len}/{ROBOT_CONFIG.rear_len}/{ROBOT_CONFIG.half_width}m, "
             f"cam=({ROBOT_CONFIG.camera_fwd},{ROBOT_CONFIG.camera_left}), "
             f"safety_r={ROBOT_CONFIG.safety_radius}m, "
-            f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
-        )
+            f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m rel base_link)")
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         # Instantaneous (vx, omega) feedforward of the selected trajectory. cmd_vel_control
@@ -1132,10 +1116,11 @@ class PlanningNode(Node):
             ROBOT_CONFIG.obstacle,
             min_wall_span_m=float(self.get_parameter('min_wall_span_m').value))
         # Derive the grid's z extent and vertical offset from the obstacle band so
-        # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
+        # the grid covers exactly [robot_z_bottom, robot_z_top] relative to
+        # base_link -- the pose is the camera's, camera_above_base converts.
         z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
         self.grid_shape = (100, 100, z_layers)
-        self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
+        self.z_grid_drop = ROBOT_CONFIG.camera_above_base - (self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
 
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 4
@@ -1539,7 +1524,8 @@ class PlanningNode(Node):
                                           self.occupancy_grid.shape[:2])
         obstacle_mask = build_obstacle_map(
             self.occupancy_grid, self.origin, self.resolution,
-            robot_z=T[2, 3], config=self.obstacle_config, min_span_map=min_span_map,
+            robot_z=T[2, 3] - ROBOT_CONFIG.camera_above_base,
+            config=self.obstacle_config, min_span_map=min_span_map,
         )
         ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
         return min_span_map, obstacle_mask, ESDF_map

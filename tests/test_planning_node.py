@@ -299,7 +299,7 @@ if __name__ == "__main__":
 # --- climb region: per-cell relaxation of the obstacle span filter -----------
 
 def _riser_grid(height_m, config, resolution=0.05):
-    """3x3 cells; the centre one holds occupancy from the ground up to height_m."""
+    """3x3 cells; the centre one holds occupancy from the band bottom up to height_m."""
     z_layers = int(round((config.robot_z_top - config.robot_z_bottom) / resolution))
     grid = np.zeros((3, 3, z_layers))
     grid[1, 1, :int(round(height_m / resolution))] = 0.2
@@ -336,17 +336,16 @@ def test_min_span_map_still_blocks_taller_verticals():
                               min_span_map=_span_map(config, (1, 1)))[1, 1]
 
 
-def test_min_span_map_relaxes_steps_above_the_ground_band():
-    """Mid-climb the next riser starts above robot_z_bottom + ground_band_m; a relaxed
-    cell must still read it as a step, not as a floating obstacle."""
+def test_min_span_map_relaxes_floating_steps():
+    """Mid-climb the next riser floats above the band bottom; a relaxed cell must
+    still read it as a step, not dismiss it as out-of-reach noise."""
     from planning_node import build_obstacle_map
     from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
     resolution = 0.05
     grid, origin = _riser_grid(0.0, config, resolution)
-    base = config.ground_band_m + resolution        # above the ground band
-    lo = int(round(base / resolution))
-    hi = int(round((base + 0.15) / resolution))     # 0.15m riser, below the relaxed threshold
+    lo = int(round(0.10 / resolution))              # starts 0.10 above the band bottom
+    hi = int(round(0.25 / resolution))              # 0.15m riser, below the relaxed threshold
     grid[1, 1, lo:hi] = 0.2
     args = (grid, origin, resolution)
     assert build_obstacle_map(*args, robot_z=0.0, config=config)[1, 1]

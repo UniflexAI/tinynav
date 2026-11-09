@@ -9,26 +9,31 @@ from dataclasses import dataclass, field, replace
 class ObstacleConfig:
     """Height band + occupancy filters used by planning_node.build_obstacle_map.
 
-    z-band is relative to camera height (T[2, 3]). Taller robots need a wider
-    band so hanging obstacles and low walls still count as collisions.
+    The band hangs off **base_link**, not the sensor pose: per-model physical
+    constants -- how far the ground sits below the base at stance, how tall the
+    body is -- decide it, each with a margin. The ground therefore sits below the
+    band by construction, and stance shift or pose wobble cannot drag it in; the
+    in-band span filter is the second line of defence, not the only one. Taller
+    robots need a wider band so hanging obstacles still count as collisions.
 
     The values here are this fork's, measured on its rigs, and they are NOT upstream's
     (which are -0.4/0.4, 0.1, 0.2, 2). They arrived as one global config inside
-    planning_node -- `94e9871` tuned min_wall_span_m to 0.05 and `95ec80a` the
-    occupancy threshold -- and moved here when upstream made the config per-robot.
-    The move is upstream's structure with the fork's numbers. The band below is the
-    default for every robot except b2, which the operator widened to -0.6/0.6 on
-    2026-09-03 -- that is what this field is per-robot for, and it is a judgement about
-    a rig rather than something a merge should have done on its own.
+    planning_node -- `94e9871` tuned min_wall_span_m and `95ec80a` the occupancy
+    threshold -- and moved here when upstream made the config per-robot. The default
+    band is go2's: ground -0.294 and body top +0.097 relative to base (sim geometry,
+    both measured 2026-11-06), each with a 0.20 m margin. b2 keeps the operator's
+    widened -0.6/0.6 -- that is what this field is per-robot for.
     """
-    robot_z_bottom: float = -0.45
-    robot_z_top: float = 0.2
+    #: Band bottom relative to base_link: -(ground below base) + margin.
+    robot_z_bottom: float = -0.09
+    #: Band top relative to base_link: body top above base + margin.
+    robot_z_top: float = 0.30
     occ_threshold: float = 0.05
-    min_wall_span_m: float = 0.05
-    #: Only cells whose lowest occupied voxel sits within this of robot_z_bottom are
-    #: span-filtered: walls span, stair risers and ground bumps do not. Cells starting
-    #: above the band are floating obstacles and keep a single-voxel noise floor.
-    ground_band_m: float = 0.3
+    #: In-band occupied z-span for a cell to read as an obstacle. With the ground
+    #: out of band this is the only span filter; it is also the minimum height an
+    #: obstacle must reach above the band bottom -- the low-obstacle detection
+    #: floor. Climb regions override it per cell (climb_min_wall_span_m).
+    min_wall_span_m: float = 0.10
     #: Hard-occupied skirt binary-dilated around every obstacle (build_obstacle_map)
     #: before the ESDF is built: a footprint sample on it is a body hit (drives the
     #: all-collision escape branch), and the safety_radius soft band ramps outside
@@ -55,11 +60,16 @@ class RobotConfig:
     front_len: float
     rear_len: float
     half_width: float
-    #: Where the camera sits in the body frame. There is deliberately no vertical
-    #: term: a spin about the vertical axis cannot observe one, and the z-band that
-    #: would use it is defined relative to camera height (ObstacleConfig).
+    #: Where the camera sits in the body frame, horizontally. There is deliberately
+    #: no vertical term here: a spin about the vertical axis cannot observe one --
+    #: the one vertical constant the stack needs is explicit below.
     camera_fwd: float
     camera_left: float
+    #: z of the perception camera above base_link. Planning's pose is the camera
+    #: pose for both sources (the bridge lands the lidar pose on it too), and the
+    #: obstacle band is base-relative, so this is the conversion. The sim go2
+    #: mount is exact by construction; set the measured value per real rig.
+    camera_above_base: float = 0.07
     safety_radius: float = 0.1
     # Bounds used to constrain trajectory-library velocity sampling and to clamp
     # the final published cmd_vel. Placeholder values, same for every robot until
