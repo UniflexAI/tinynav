@@ -222,17 +222,19 @@ def select_target_position(paths, closest_idx, pos):
     return target_position
 
 class MapNode(Node):
-    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
+    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True, loop_closure: bool = True):
         """Initialization
 
         Args:
             tinynav_db_path (str): Directory to store output data.
             tinynav_map_path (str): Directory to load the pre-built map.
             verbose_timer (bool): Whether to use verbose timer output.
+            loop_closure (bool): Whether to add navigation trajectory loop factors.
         """
         super().__init__('map_node')
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
+        self.loop_closure = loop_closure
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
@@ -486,7 +488,8 @@ class MapNode(Node):
                                     prev_timestamp, curr_timestamp,
                                     gtsam.Pose3(T_prev_curr), self.loop_noise))
                                 #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
-            find_loop_and_pose_graph(keyframe_image_timestamp)
+            if self.loop_closure:
+                find_loop_and_pose_graph(keyframe_image_timestamp)
         self.isam.update(new_factors, new_values)
         if new_factors.size() > 1:
             for _ in range(4):
@@ -853,10 +856,15 @@ def main(args=None):
     parser.add_argument("--tinynav_map_path", type=str, required=True)
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parser.add_argument(
+        "--loop-closure", action=argparse.BooleanOptionalAction, default=True,
+        help="Enable loop closure within the navigation trajectory.",
+    )
     parsed_args, _unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
-                   verbose_timer=parsed_args.verbose_timer)
+                   verbose_timer=parsed_args.verbose_timer,
+                   loop_closure=parsed_args.loop_closure)
 
     rclpy.spin(node)
     node.destroy_node()
