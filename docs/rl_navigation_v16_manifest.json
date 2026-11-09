@@ -1,0 +1,18 @@
+{
+  "version": "v16",
+  "status": "retained experimental baseline",
+  "checkpoint_step": 1851392,
+  "sha256": {
+    "best.pt": "fedeb9faaf5daeae2e7e667ea5dbab42a973c255cccc7909f25dca1903796886",
+    "rl_nav_policy_v16.onnx": "095a26ad896a78805f56c142efc03defad6b178af1b50107711d66eea2ef8483",
+    "training-manifest.json": "03b464d183f6485aa3351c7be7df92796688f548bbf057a6330b9cb572dd2701",
+    "train-config.json": "dd33828e9cede5cc614c181b00c647912f79dfb3d59aacd9f6d8e7795c897f05",
+    "independent-corners.json": "c4ab5ff3943feb05085f6b8bbd3e194019dc74c48e0acc752106d8c5a2cbd8ce",
+    "independent-behind.json": "7f3cdeea963b35156ae8c62b045d1b7f039d7e75907d72cb0a871a7319acf7da"
+  },
+  "limitations": [
+    "180-degree turns can stall; not a stable fleet release",
+    "narrow 1.1-1.3m corridors with distant rear goals remain unsolved"
+  ],
+  "deployment": "home TensorRT; source training folder remains unchanged"
+}
