@@ -47,7 +47,7 @@ def make_mapper():
     params.relinearizeSkip = 1
     params.setOptimizationParams(gtsam.ISAM2DoglegParams())
     node = SimpleNamespace(
-        isam=gtsam.ISAM2(params), odometry_noise=noise,
+        isam=gtsam.ISAM2(params), odometry_noise=noise, flex_glue_matcher=None,
         loop_noise=gtsam.noiseModel.Robust.Create(
             gtsam.noiseModel.mEstimator.Cauchy.Create(5.), noise),
         odom={}, pose_graph_used_pose={}, last_keyframe_timestamp=None,

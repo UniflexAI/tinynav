@@ -6,6 +6,8 @@
 #   make dinov2     # build one engine
 #   make clean      # remove generated .plan
 
+.DELETE_ON_ERROR:
+
 ARCH      := $(shell uname -m)
 TRTEXEC   ?= trtexec
 SIGLIP_IMAGE_SHAPES ?=
@@ -32,9 +34,12 @@ FOUNDATION_STEREO_ENGINE := $(basename $(FOUNDATION_STEREO_ONNX))_$(ARCH).plan
 SIGLIP_IMAGE_ENGINE := $(basename $(SIGLIP_IMAGE_ONNX))_$(ARCH).plan
 SIGLIP_TEXT_ENGINE  := $(basename $(SIGLIP_TEXT_ONNX))_$(ARCH).plan
 
+FLEX_DESC := flexglue_descriptor_$(ARCH).plan
+FLEX_MATCH := flexglue_matcher_prescale_cuda_$(ARCH).plan
+
 ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE)
 
-.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo siglip clean
+.PHONY: flexglue help all dinov2 superpoint lightglue retinify foundation_stereo siglip clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -48,6 +53,16 @@ lightglue: $(LIGHTGLUE_ENGINE) ## Build LightGlue engine
 retinify: $(RETINIFY_ENGINE) ## Build Retinify engine
 foundation_stereo: $(FOUNDATION_STEREO_ENGINE) ## Build FoundationStereo engine
 siglip: $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) ## Build SigLIP image/text engines
+
+flexglue: $(FLEX_DESC) $(FLEX_MATCH) ## Build both FlexGlue engines
+
+$(FLEX_DESC): flexglue_descriptor.onnx
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16 --skipInference --memPoolSize=workspace:1024
+
+$(FLEX_MATCH): flexglue_matcher_prescale_cuda.onnx
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --stronglyTyped --skipInference --memPoolSize=workspace:1024 \
+	    --minShapes=kpts0:1x1x2,kpts1:1x1x2 --optShapes=kpts0:1x512x2,kpts1:1x512x2 \
+	    --maxShapes=kpts0:1x2048x2,kpts1:1x2048x2
 
 $(DINO_ENGINE): $(DINO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \

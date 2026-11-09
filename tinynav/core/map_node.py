@@ -28,6 +28,7 @@ from tinynav.core.build_map_node import (
     find_loop,
     pose_graph_estimate,
 )
+from tinynav.core.flexglue import FlexGlueTRT
 from tinynav.core.math_utils import (
     estimate_pose,
     matrix_to_quat,
@@ -221,7 +222,7 @@ def select_target_position(paths, closest_idx, pos):
     return target_position
 
 class MapNode(Node):
-    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True, loop_closure: bool = True):
+    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True, loop_closure: bool = True, feature_matcher: str = "lightglue"):
         """Initialization
 
         Args:
@@ -235,7 +236,10 @@ class MapNode(Node):
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         self.loop_closure = loop_closure
         self.super_point_extractor = SuperPointTRT()
-        self.light_glue_matcher = LightGlueTRT()
+        if feature_matcher not in ('lightglue', 'flexglue'):
+            raise ValueError(f'Unknown feature matcher: {feature_matcher}')
+        self.flex_glue_matcher = FlexGlueTRT() if feature_matcher == 'flexglue' else None
+        self.light_glue_matcher = LightGlueTRT() if self.flex_glue_matcher is None else None
         self.dinov2_model = Dinov2TRT()
         self.tinynav_db_path = tinynav_db_path
 
@@ -445,6 +449,8 @@ class MapNode(Node):
         embedding = self.get_embeddings(image)
         self.nav_temp_db.set_entry(keyframe_image_timestamp, embedding = embedding)
         features = asyncio.run(self.super_point_extractor.infer(image))
+        if self.flex_glue_matcher is not None:
+            features = self.flex_glue_matcher.add_features(features, image)
         self.nav_temp_db.set_entry(keyframe_image_timestamp, features = features)
 
         if self.isam.valueExists(keyframe_image_timestamp):
@@ -507,7 +513,9 @@ class MapNode(Node):
         patch_tokens = asyncio.run(self.dinov2_model.infer_patch_tokens(image))
         return compute_vlad(patch_tokens, self.vlad_centres)
 
-    def match_keypoints(self, feats0:dict, feats1:dict, image_shape: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def match_keypoints(self, feats0:dict, feats1:dict, image_shape: np.ndarray | None = None, image0=None, image1=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if self.flex_glue_matcher is not None:
+            return self.flex_glue_matcher.match_keypoints(feats0, feats1, image0, image1)
         if image_shape is None:
             image_shape = np.array([848, 480], dtype=np.int64)
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
@@ -554,8 +562,9 @@ class MapNode(Node):
         pnp_candidates = []
         for timestamp_in_map, _similarity in candidates:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
-            reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
-            reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
+            reference_depth, _, reference_features, _, reference_image = self.db.get_depth_embedding_features_images(timestamp_in_map)
+            image_args = {'image0': reference_image, 'image1': keyframe} if self.flex_glue_matcher is not None else {}
+            reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features, **image_args)
             if len(matches) < 50:
                 print(f"not enough matched features to relocalize, {len(matches)} < 50")
                 continue
@@ -609,6 +618,8 @@ class MapNode(Node):
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
         features = asyncio.run(self.super_point_extractor.infer(image))
+        if self.flex_glue_matcher is not None:
+            features = self.flex_glue_matcher.add_features(features, image)
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
             # publish the relocalization pose for debug
@@ -859,6 +870,7 @@ def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--tinynav_db_path", type=str, default="tinynav_temp")
     parser.add_argument("--tinynav_map_path", type=str, required=True)
+    parser.add_argument("--feature_matcher", choices=("lightglue", "flexglue"), default="lightglue")
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
     parser.add_argument(
@@ -869,7 +881,8 @@ def main(args=None):
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
                    verbose_timer=parsed_args.verbose_timer,
-                   loop_closure=parsed_args.loop_closure)
+                   loop_closure=parsed_args.loop_closure,
+                   feature_matcher=parsed_args.feature_matcher)
 
     rclpy.spin(node)
     node.destroy_node()
