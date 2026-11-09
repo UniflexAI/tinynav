@@ -21,7 +21,6 @@ from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, String
 from tf2_ros import TransformBroadcaster
-from tinynav.tinynav_cpp_bind import pose_graph_solve
 
 from tinynav.core.build_map_node import (
     OdomPoseRecorder,
@@ -656,26 +655,32 @@ class MapNode(Node):
 
 
     def compute_transform_from_map_to_odom(self):
-        """
-        Solve the optmization problem.
-        """
-        relative_pose_constraint = []
-        optimized_parameters = {
-            0 : np.eye(4) if self.T_from_map_to_odom is None else self.T_from_map_to_odom,
-            1 : np.eye(4),
-        }
-        constant_pose_index_dict = { 1: True }
+        """Fit the latest map-to-odometry observations with robust batch optimization."""
+        observations = []
         for timestamp, pose in self.relocalization_poses.items():
             if timestamp in self.pose_graph_used_pose:
-                camera_in_map_world = pose
-                camera_in_odom_world = self.pose_graph_used_pose[timestamp]
-                observation_T_from_map_to_odom =  camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
-                weight = self.relocalization_pose_weights[timestamp]
+                observation = self.pose_graph_used_pose[timestamp] @ np.linalg.inv(pose)
+                observations.append((observation, self.relocalization_pose_weights[timestamp]))
+        observations = select_fusion_constraints(observations)
+        if not observations:
+            return
 
-                relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
-        relative_pose_constraint = select_fusion_constraints(relative_pose_constraint)
-        optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
-        self.T_from_map_to_odom = optimized_parameters[0]
+        graph = gtsam.NonlinearFactorGraph()
+        for pose, weight in observations:
+            if not np.isfinite(weight) or weight <= 0:
+                raise ValueError("Relocalization weight must be positive and finite")
+            gaussian = gtsam.noiseModel.Isotropic.Sigma(6, 1.0 / (10.0 * weight))
+            robust = gtsam.noiseModel.Robust.Create(
+                gtsam.noiseModel.mEstimator.Cauchy.Create(5.0), gaussian
+            )
+            graph.add(gtsam.PriorFactorPose3(0, gtsam.Pose3(pose), robust))
+
+        initial_pose = np.eye(4) if self.T_from_map_to_odom is None else self.T_from_map_to_odom
+        initial = gtsam.Values()
+        initial.insert(0, gtsam.Pose3(initial_pose))
+        self.T_from_map_to_odom = (
+            gtsam.LevenbergMarquardtOptimizer(graph, initial).optimize().atPose3(0).matrix()
+        )
 
     def _publish_global_plan(self, paths_in_map: np.ndarray):
         path_msg = Path()

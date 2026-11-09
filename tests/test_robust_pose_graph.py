@@ -1,4 +1,3 @@
-import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -6,6 +5,7 @@ from unittest.mock import Mock, patch
 import gtsam
 import numpy as np
 from scipy.spatial.transform import Rotation
+
 from tinynav.core import build_map_node as mapping
 
 
@@ -137,6 +137,43 @@ class DirectISAMTests(unittest.TestCase):
         np.testing.assert_allclose(self.node.pose_graph_used_pose[self.base+10**9], previous@relative, atol=1e-8)
         measurement = self.node.isam.getFactorsUnsafe().at(1).measured().matrix()
         np.testing.assert_allclose(measurement, relative, atol=1e-8)
+
+
+class MapToOdomFusionTests(unittest.TestCase):
+    def test_known_transform_and_outlier(self):
+        from tinynav.core.map_node import MapNode
+
+        expected = np.eye(4)
+        expected[:3, :3] = Rotation.from_euler("xyz", [0.2, -0.3, 0.4]).as_matrix()
+        expected[:3, 3] = [1.0, -2.0, 0.5]
+        outlier = expected.copy()
+        outlier[:3, 3] += [2.0, -1.0, 0.5]
+        measurements = [expected] * 90 + [outlier] * 10
+        node = SimpleNamespace(
+            T_from_map_to_odom=None,
+            relocalization_poses={i: np.eye(4) for i in range(100)},
+            pose_graph_used_pose=dict(enumerate(measurements)),
+            relocalization_pose_weights=dict.fromkeys(range(100), 1.0),
+        )
+        MapNode.compute_transform_from_map_to_odom(node)
+        self.assertLess(np.linalg.norm(node.T_from_map_to_odom[:3, 3] - expected[:3, 3]), 0.03)
+        np.testing.assert_allclose(node.T_from_map_to_odom[:3, :3], expected[:3, :3], atol=0.01)
+
+    def test_empty_window_preserves_transform_and_invalid_weight_fails(self):
+        from tinynav.core.map_node import MapNode
+
+        expected = pose(3.0)
+        node = SimpleNamespace(
+            T_from_map_to_odom=expected,
+            relocalization_poses={}, pose_graph_used_pose={}, relocalization_pose_weights={},
+        )
+        MapNode.compute_transform_from_map_to_odom(node)
+        np.testing.assert_array_equal(node.T_from_map_to_odom, expected)
+        node.relocalization_poses[1] = np.eye(4)
+        node.pose_graph_used_pose[1] = expected
+        node.relocalization_pose_weights[1] = 0.0
+        with self.assertRaises(ValueError):
+            MapNode.compute_transform_from_map_to_odom(node)
 
 
 if __name__ == '__main__':
