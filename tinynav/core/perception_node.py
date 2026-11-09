@@ -11,7 +11,7 @@ import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
 from queue import Empty, Full, Queue
-from tinynav.core.flexglue import FlexGlueONNX
+from tinynav.core.flexglue import FlexGlueTRT
 from tinynav.core.models_trt import SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -94,7 +94,7 @@ class PerceptionNode(Node):
         # self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         # model
         self.superpoint = SuperPointTRT()
-        self.flex_glue = FlexGlueONNX()
+        self.flex_glue = FlexGlueTRT()
 
         self.last_keyframe_img = None
         self.last_keyframe_features = None

@@ -1,39 +1,23 @@
-"""Optional FlexGlue v0.1 sparse ONNX matcher for existing SuperPoint keypoints."""
+"""FlexGlue v0.1 sparse TensorRT matcher for existing SuperPoint keypoints."""
 from collections import OrderedDict
 import hashlib
-import os
+import platform
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-MODEL_FILES = {
-    'flexglue_descriptor.onnx': '93fab8a4ccde1b7331640915357d96cff0929ea87134872f37f7b0150d9914ff',
-    'flexglue_matcher_fp16.onnx': 'f81cb68f27367171728c2c51ea5b60acab348520bc12154d4a3befa79f2dfe11',
-}
-MODEL_URL = 'https://github.com/cvg/FlexGlue/releases/download/v0.1/'
-MODEL_DIR = Path(__file__).resolve().parents[1] / 'models' / 'flexglue'
+MODEL_DIR = Path(__file__).resolve().parents[1] / 'models'
 FEATURE_KEY = 'flexglue_v0_1'
 
 
-class FlexGlueONNX:
+class FlexGlueTRT:
     def __init__(self, model_dir=None):
-        import onnxruntime as ort
-
-        root = Path(model_dir or os.environ.get('TINYNAV_FLEXGLUE_MODEL_DIR', MODEL_DIR))
-        for name in MODEL_FILES:
-            if not (root / name).is_file():
-                raise FileNotFoundError(f'{root / name}: run python -m tool.download_flexglue')
-        if 'CUDAExecutionProvider' not in ort.get_available_providers():
-            raise RuntimeError('FlexGlue requires an ONNX Runtime build with CUDA support')
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 2
-        options.inter_op_num_threads = 1
-        providers = [('CUDAExecutionProvider', {'arena_extend_strategy': 'kSameAsRequested'}), 'CPUExecutionProvider']
-        self.descriptor = ort.InferenceSession(str(root / 'flexglue_descriptor.onnx'), sess_options=options, providers=providers)
-        self.matcher = ort.InferenceSession(str(root / 'flexglue_matcher_fp16.onnx'), sess_options=options, providers=providers)
-        if any(s.get_providers()[0] != 'CUDAExecutionProvider' for s in (self.descriptor, self.matcher)):
-            raise RuntimeError('FlexGlue could not initialize the CUDA execution provider')
+        from tinynav.core.flexglue_trt import Session
+        root = Path(model_dir or MODEL_DIR)
+        arch = platform.machine()
+        self.descriptor = Session(root / f'flexglue_descriptor_{arch}.plan')
+        self.matcher = Session(root / f'flexglue_matcher_prescale_cuda_{arch}.plan')
         self._cache = OrderedDict()
 
     def describe(self, image):

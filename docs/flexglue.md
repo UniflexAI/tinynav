@@ -3,24 +3,17 @@
 Mapping, relocalization and native stereo VIO use FlexGlue directly. SuperPoint
 keypoints, retrieval and PnP acceptance remain unchanged. Looper supplies its own odometry.
 
-Inside the TinyNav ROS/CUDA environment, install the dependencies and fetch the weights once:
+From the repository root:
 
 ```bash
-uv sync
-python -m tool.download_flexglue
+git lfs pull
+make -C tinynav/models flexglue
 ```
 
-The downloader verifies both official models by SHA256 and installs them under
-`tinynav/models/flexglue/` (about 439 MiB). Downloads are explicit, not performed
-while a node starts. For another directory, use `--model_dir` when downloading
-and set `TINYNAV_FLEXGLUE_MODEL_DIR` when running.
-
-A CUDA-enabled ONNX Runtime and its matching CUDA/cuDNN libraries are required.
-The tested environment uses ONNX Runtime GPU 1.23.2 and cuDNN 9.10.2.21. Jetson
-requires a JetPack-compatible ONNX Runtime CUDA build; a desktop PyPI wheel is
-not a Jetson deployment. The backend fails if CUDA cannot initialize instead of
-silently using a CPU-only session. It does not load the experimental TensorRT
-conversion from our separate performance investigation.
+Plain `make` in the models directory includes both engines. Build on the target GPU.
+The descriptor is the upstream v0.1 DINOv3-based export. The matcher is the
+TensorRT-compatible prescaled export used for the Nano comparison. Both ONNX
+files are stored in Git LFS; generated plans stay on the device.
 
 ## Maps and storage
 
@@ -105,7 +98,7 @@ from the desktop GPU.
 
 **Integration status:** the TensorRT build/runner used here is an offline
 experiment, not an enabled backend in this PR. The documented
-`--feature_matcher flexglue` command still loads ONNX Runtime CUDA. This replay
+`--feature_matcher flexglue` command in the original PR used ONNX Runtime CUDA. This replay
 does not validate live sensor scheduling, physical navigation, rear-camera
 coverage or independent-capture generalization.
 
@@ -164,5 +157,4 @@ outstanding. This PR does not change online localization acceptance thresholds.
 [FlexGlue](https://github.com/cvg/FlexGlue) is MIT-licensed. Its descriptor includes
 DINOv3 weights subject to the separate
 [DINOv3 license](https://github.com/cvg/FlexGlue/blob/main/DINOv3_LICENSE.md).
-Models are downloaded directly from the official v0.1 release; they are not
-repackaged in this repository. The optional runtime requires no PyTorch install.
+Redistributed weights are covered by the notices under `tinynav/models/licenses/`.

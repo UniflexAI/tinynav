@@ -36,7 +36,7 @@ We’ve launched our bounty program! Check the [list](https://docs.google.com/sp
 
 # Feature matching
 
-[FlexGlue ONNX](docs/flexglue.md) matches SuperPoint keypoints for mapping, relocalization and native stereo VIO.
+[FlexGlue TensorRT](docs/flexglue.md) matches SuperPoint keypoints for mapping, relocalization and native stereo VIO.
 
 On the original 64-request real-corridor diagnostic replayed on **Jetson Orin Nano
 Super 8GB (15W)**, a separate TensorRT conversion reduced accepted map-reference
@@ -48,7 +48,7 @@ original ONNX diagnostic on all 64 requests.
 With the same TensorRT execution wrapper and cached descriptors, median pair
 matching took **12.7 ms (LightGlue)** and **501.8 ms (FlexGlue)**. These are matcher
 times, not full relocalization latency. The conversion is an offline experiment;
-This branch still uses ONNX Runtime CUDA. See
+This branch uses the TensorRT engines built by `make flexglue`. See
 [results, timing protocol and limitations](docs/flexglue.md#corridor-replay-on-orin-nano)
 for the matched-runtime comparison and the separate desktop measurements.
 

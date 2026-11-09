@@ -20,7 +20,7 @@ import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import Dinov2TRT, SuperPointTRT
-from tinynav.core.flexglue import FlexGlueONNX
+from tinynav.core.flexglue import FlexGlueTRT
 import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
@@ -223,7 +223,7 @@ class MapNode(Node):
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         self.super_point_extractor = SuperPointTRT()
-        self.flex_glue_matcher = FlexGlueONNX()
+        self.flex_glue_matcher = FlexGlueTRT()
         self.dinov2_model = Dinov2TRT()
         self.tinynav_db_path = tinynav_db_path
 
