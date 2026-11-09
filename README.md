@@ -34,6 +34,28 @@
 
 We’ve launched our bounty program! Check the [list](https://docs.google.com/spreadsheets/d/1fyFSkiyfSGVeO8uW97gS7-gIt9qTbGIpYaMcHcjPF4Q/edit?usp=sharing) to see how you can contribute and the reward values for each task.
 
+## Optional FlexGlue matcher
+
+Mapping and relocalization use LightGlue by default. To use FlexGlue, build both
+TensorRT engines on the target GPU, then pass `--feature_matcher flexglue` to
+`build_map_node` or `map_node`.
+
+```bash
+git lfs pull --include="tinynav/models/flexglue*"
+make -C tinynav/models flexglue
+```
+
+Jetson Orin Nano Super 8GB, 15W · TensorRT 10.3 · 64 real-corridor requests.
+
+| Corridor replay | LightGlue TRT | FlexGlue TRT |
+|---|---:|---:|
+| Single pair, median (descriptors ready) | 9.9 ms | 502.2 ms |
+| Three candidate matches, median | 29.8 ms | 1,507 ms |
+| Consistent / inconsistent / no pose | 32 / 22 / 10 | 31 / 2 / 31 |
+
+Pose consistency uses the optimized map reference (position error <0.75 m and
+rotation error <10°). Timing covers matching only.
+
 # Stereo Cameras
 
 we’re excited to add [Looper](https://looper-robotics.com/?utm_source=blogger&utm_medium=social&utm_campaign=booking&promo=uIwjGxmJ) as a first-class supported camera, alongside RealSense.
