@@ -142,6 +142,3 @@ log/
 # Output result
 tinynav_db/
 tinynav_temp/
-
-# Optional FlexGlue models downloaded from the official release.
-/tinynav/models/flexglue/

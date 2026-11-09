@@ -20,7 +20,7 @@ import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
-from tinynav.core.flexglue import FlexGlueONNX
+from tinynav.core.flexglue import FlexGlueTRT
 import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
@@ -225,7 +225,7 @@ class MapNode(Node):
         self.super_point_extractor = SuperPointTRT()
         if feature_matcher not in ('lightglue', 'flexglue'):
             raise ValueError(f'Unknown feature matcher: {feature_matcher}')
-        self.flex_glue_matcher = FlexGlueONNX() if feature_matcher == 'flexglue' else None
+        self.flex_glue_matcher = FlexGlueTRT() if feature_matcher == 'flexglue' else None
         self.light_glue_matcher = LightGlueTRT() if self.flex_glue_matcher is None else None
         self.dinov2_model = Dinov2TRT()
         self.tinynav_db_path = tinynav_db_path

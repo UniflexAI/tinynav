@@ -1,14 +1,10 @@
-import hashlib
-from pathlib import Path
 from types import SimpleNamespace
-import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import numpy as np
 
-from tinynav.core.flexglue import FEATURE_KEY, FlexGlueONNX
-from tool import download_flexglue
+from tinynav.core.flexglue import FEATURE_KEY, FlexGlueTRT
 
 
 def features(points, valid):
@@ -18,7 +14,7 @@ def features(points, valid):
 
 class FlexGlueTest(unittest.TestCase):
     def setUp(self):
-        self.model = FlexGlueONNX.__new__(FlexGlueONNX)
+        self.model = FlexGlueTRT.__new__(FlexGlueTRT)
         from collections import OrderedDict
         self.model._cache = OrderedDict()
         self.model.descriptor = Mock()
@@ -76,30 +72,6 @@ class FlexGlueTest(unittest.TestCase):
         a = features([[1, 2]], [1])
         with self.assertRaisesRegex(ValueError, 'infrared image'):
             self.model.match_keypoints(a, a)
-
-    def test_constructor_rejects_cpu_only_runtime(self):
-        ort = Mock(); ort.get_available_providers.return_value = ['CPUExecutionProvider']
-        with tempfile.TemporaryDirectory() as directory:
-            for name in download_flexglue.MODEL_FILES: (Path(directory) / name).touch()
-            with patch.dict('sys.modules', {'onnxruntime': ort}):
-                with self.assertRaisesRegex(RuntimeError, 'CUDA support'): FlexGlueONNX(directory)
-
-
-class DownloadTest(unittest.TestCase):
-    def test_bad_download_keeps_existing_file_and_cleans_temporary_file(self):
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / 'model.onnx'; target.write_bytes(b'existing')
-            def retrieve(url, path): Path(path).write_bytes(b'bad download')
-            with patch.object(download_flexglue, 'MODEL_FILES', {'model.onnx': hashlib.sha256(b'correct').hexdigest()}), patch.object(download_flexglue.urllib.request, 'urlretrieve', retrieve):
-                with self.assertRaisesRegex(ValueError, 'SHA256'): download_flexglue.download(directory)
-            self.assertEqual(target.read_bytes(), b'existing')
-            self.assertEqual(list(Path(directory).iterdir()), [target])
-
-    def test_verified_local_file_does_not_use_network(self):
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / 'model.onnx'; target.write_bytes(b'correct')
-            with patch.object(download_flexglue, 'MODEL_FILES', {'model.onnx': hashlib.sha256(b'correct').hexdigest()}), patch.object(download_flexglue.urllib.request, 'urlretrieve') as request:
-                download_flexglue.download(directory); request.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

@@ -36,7 +36,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
-from tinynav.core.flexglue import FlexGlueONNX
+from tinynav.core.flexglue import FlexGlueTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
 from tinynav.core.vlad import compute_vlad, train_vocabulary_streaming
@@ -600,7 +600,7 @@ class BuildMapNode(Node):
         self.super_point_extractor = SuperPointTRT()
         if feature_matcher not in ('lightglue', 'flexglue'):
             raise ValueError(f'Unknown feature matcher: {feature_matcher}')
-        self.flex_glue_matcher = FlexGlueONNX() if feature_matcher == 'flexglue' else None
+        self.flex_glue_matcher = FlexGlueTRT() if feature_matcher == 'flexglue' else None
         self.light_glue_matcher = LightGlueTRT() if self.flex_glue_matcher is None else None
         self.dinov2_model = Dinov2TRT()
         self.semantic_embedder = SigLIPTRT()

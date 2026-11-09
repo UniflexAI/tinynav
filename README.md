@@ -36,14 +36,13 @@ We’ve launched our bounty program! Check the [list](https://docs.google.com/sp
 
 # Optional feature matching
 
-LightGlue remains the default. An experimental [FlexGlue ONNX option](docs/flexglue.md)
-is available for mapping and relocalization; real-time VIO keeps LightGlue.
+LightGlue is the default. The optional FlexGlue TensorRT backend supports mapping
+and relocalization. Build its two engines on the target GPU with
+`make -C tinynav/models flexglue`, then select `--feature_matcher flexglue`.
 
-On a Jetson Orin Nano Super 8GB at 15W, median matching time per image pair
-was **9.9 ms for LightGlue (TensorRT)** and **726.4 ms for FlexGlue (ONNX Runtime CUDA)**,
-with descriptors already prepared. On 64 real-corridor replay requests, accepted
-map-reference mismatches fell from 22 to 2, while requests without a pose rose
-from 10 to 31. [Timing scope and replay results](docs/flexglue.md#corridor-replay-on-orin-nano)
+On a 15W Jetson Orin Nano Super, median FlexGlue pair matching in the same
+64-request corridor replay took **502.2 ms with TensorRT** and **726.4 ms with
+ONNX Runtime CUDA**. [Setup and replay results](docs/flexglue.md)
 
 # Stereo Cameras
 

@@ -46,10 +46,6 @@ dev = [
 ]
 
 [project.optional-dependencies]
-flexglue = [
-    "onnxruntime-gpu>=1.23.2,<2",
-]
-
 lekiwi =[
     "lerobot[lekiwi]==0.3.3",
 ]
