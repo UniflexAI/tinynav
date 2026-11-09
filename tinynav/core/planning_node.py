@@ -10,6 +10,7 @@ and a reverse gate. With no route available it falls back to distance-to-goal.
 
 import heapq
 import json
+import array
 import rclpy
 from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
@@ -1362,7 +1363,7 @@ class PlanningNode(Node):
         msg.info.origin.position.y = self.origin[1]
         msg.info.origin.position.z = self.origin[2] + self.grid_shape[2] * self.resolution / 2
         msg.info.origin.orientation.w = 1.0
-        msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
+        msg.data = array.array('b', np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tobytes())
         self.obstacle_mask_pub.publish(msg)
 
 
