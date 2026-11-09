@@ -24,7 +24,7 @@ from numba import njit
 import rclpy
 import message_filters
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
+from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Image, CameraInfo, PointCloud
 from sensor_msgs_py import point_cloud2
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
@@ -1648,11 +1648,20 @@ class PlanningNode(Node):
         selected source: the PointCloud2 stream is the expensive one to
         deserialize, and in depth mode nobody consumes it."""
         from sensor_msgs.msg import PointCloud2
-        self._lidar_sub = message_filters.Subscriber(self, PointCloud2, self._lidar_topic)
+        # sensor-data (best_effort) QoS: the sim bridge and the fast-livox
+        # driver publish best_effort, and a best_effort sub matches a reliable
+        # publisher too -- a RELIABLE sub matches neither's opposite.
+        self._lidar_sub = message_filters.Subscriber(
+            self, PointCloud2, self._lidar_topic,
+            qos_profile=qos_profile_sensor_data)
         self._lidar_pose_sub = message_filters.Subscriber(
             self, Odometry, '/slam/odometry_visual')
+        # slop 0.05 s: at the planner's turn rate (pi/3 rad/s) a looser pair turns
+        # into up to 12 deg of pose error, smearing the votes along an arc -- the
+        # "ring of phantom obstacles while turning" on the sim bench. 10 Hz cloud
+        # and 30 Hz pose have a nearest pair within ~33 ms, so 0.05 still pairs.
         self._lidar_sync = message_filters.ApproximateTimeSynchronizer(
-            [self._lidar_sub, self._lidar_pose_sub], queue_size=10, slop=0.2)
+            [self._lidar_sub, self._lidar_pose_sub], queue_size=10, slop=0.05)
         self._lidar_sync.registerCallback(self.lidar_sync_callback)
 
     def lidar_sync_callback(self, cloud_msg, odom_msg):
