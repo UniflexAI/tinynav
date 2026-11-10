@@ -252,6 +252,7 @@ class MapNode(Node):
 
         self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
         self.K = None
+        self.image_shape = None
         self.baseline = None
         self.last_keyframe_image = None
         self.continuous_odom_recorder = OdomPoseRecorder(tinynav_db_path, "localization")
@@ -368,6 +369,7 @@ class MapNode(Node):
         if self.K is None:
             self.get_logger().info("Camera intrinsics received.")
             self.K = np.array(msg.k).reshape(3, 3)
+            self.image_shape = np.array([msg.width, msg.height], dtype=np.int64)
             fx = self.K[0, 0]
             Tx = msg.p[3]
             self.baseline = -Tx / fx
@@ -475,10 +477,10 @@ class MapNode(Node):
         patch_tokens = asyncio.run(self.dinov2_model.infer_patch_tokens(image))
         return compute_vlad(patch_tokens, self.vlad_centres)
 
-    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64), image0=None, image1=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def match_keypoints(self, feats0:dict, feats1:dict, image0=None, image1=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if self.flex_glue_matcher is not None:
             return self.flex_glue_matcher.match_keypoints(feats0, feats1, image0, image1)
-        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
+        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], self.image_shape, self.image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
         keypoints0 = feats0["kpts"][0][valid_mask]
