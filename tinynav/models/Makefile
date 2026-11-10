@@ -60,13 +60,13 @@ flexglue: $(FLEX_DESC) $(FLEX_MATCH) ## Build both FlexGlue engines
 $(FLEX_DESC): flexglue_descriptor.onnx
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16 --skipInference --memPoolSize=workspace:1024
 
-# FP16 attention fused by TensorRT can emit NaN (=> zero matches); run attention cores in BF16 instead.
-FLEX_MATCH_BF16_ONNX := flexglue_matcher_prescale_cuda_bf16attn.onnx
-.INTERMEDIATE: $(FLEX_MATCH_BF16_ONNX)
-$(FLEX_MATCH_BF16_ONNX): flexglue_matcher_prescale_cuda.onnx patch_flexglue_attention.py
-	$(PYTHON) patch_flexglue_attention.py $< $@
+# Work around TensorRT fusion bugs that end in zero matches (see patch_flexglue_matcher.py).
+FLEX_MATCH_PATCHED_ONNX := flexglue_matcher_prescale_cuda_patched.onnx
+.INTERMEDIATE: $(FLEX_MATCH_PATCHED_ONNX)
+$(FLEX_MATCH_PATCHED_ONNX): flexglue_matcher_prescale_cuda.onnx patch_flexglue_matcher.py
+	$(PYTHON) patch_flexglue_matcher.py $< $@
 
-$(FLEX_MATCH): $(FLEX_MATCH_BF16_ONNX)
+$(FLEX_MATCH): $(FLEX_MATCH_PATCHED_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ --stronglyTyped --skipInference --memPoolSize=workspace:3072 \
 	    --minShapes=kpts0:1x1x2,kpts1:1x1x2 --optShapes=kpts0:1x512x2,kpts1:1x512x2 \
 	    --maxShapes=kpts0:1x2048x2,kpts1:1x2048x2
