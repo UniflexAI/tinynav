@@ -10,7 +10,7 @@
 
 ARCH      := $(shell uname -m)
 TRTEXEC   ?= trtexec
-PYTHON    ?= python3
+PYTHON    ?= $(if $(wildcard ../../.venv/bin/python),../../.venv/bin/python,python3)
 SIGLIP_IMAGE_SHAPES ?=
 SIGLIP_TEXT_SHAPES ?=
 
