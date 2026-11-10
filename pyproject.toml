@@ -62,3 +62,7 @@ unitree = [
     "pymeshlab==2022.2.post4",
     "newrawpy<=1.0.0b0",
 ]
+
+[tool.ruff.lint]
+# Pin ruff's classic default rules: CI runs the latest ruff via uvx, and newer releases enable many more.
+select = ["E4", "E7", "E9", "F"]
