@@ -632,7 +632,6 @@ class BuildMapNode(Node):
         self.ts.registerCallback(self.keyframe_callback)
 
         self.K = None
-        self.image_shape = None
         self.baseline = None
         self.odom = {}
         self.pose_graph_used_pose = {}
@@ -704,7 +703,6 @@ class BuildMapNode(Node):
         if self.K is None:
             self.get_logger().info("Camera intrinsics received.")
             self.K = np.array(msg.k).reshape(3, 3)
-            self.image_shape = np.array([msg.width, msg.height], dtype=np.int64)
             fx = self.K[0, 0]
             Tx = msg.p[3]
             self.baseline = -Tx / fx
@@ -834,10 +832,10 @@ class BuildMapNode(Node):
         self._global_prev_num_frames = num_frames
         return True
 
-    def match_keypoints(self, feats0:dict, feats1:dict, image0=None, image1=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64), image0=None, image1=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if self.flex_glue_matcher is not None:
             return self.flex_glue_matcher.match_keypoints(feats0, feats1, image0, image1)
-        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], self.image_shape, self.image_shape))
+        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
         keypoints0 = feats0["kpts"][0][valid_mask]
