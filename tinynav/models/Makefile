@@ -60,14 +60,17 @@ flexglue: $(FLEX_DESC) $(FLEX_MATCH) ## Build both FlexGlue engines
 $(FLEX_DESC): flexglue_descriptor.onnx
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16 --skipInference --memPoolSize=workspace:1024
 
-# Work around TensorRT fusion bugs that end in zero matches (see patch_flexglue_matcher.py).
+# CumSum is miscomputed by TensorRT 10.3 (Jetson); see patch_flexglue_matcher.py.
 FLEX_MATCH_PATCHED_ONNX := flexglue_matcher_prescale_cuda_patched.onnx
 .INTERMEDIATE: $(FLEX_MATCH_PATCHED_ONNX)
 $(FLEX_MATCH_PATCHED_ONNX): flexglue_matcher_prescale_cuda.onnx patch_flexglue_matcher.py
 	$(PYTHON) patch_flexglue_matcher.py $< $@
 
+# FP16 attention (4096 tokens) overflows to NaN in the fused kernel and zeroes every match; run it in BF16.
 $(FLEX_MATCH): $(FLEX_MATCH_PATCHED_ONNX)
-	$(TRTEXEC) --onnx=$< --saveEngine=$@ --stronglyTyped --skipInference --memPoolSize=workspace:3072 \
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16 --bf16 --precisionConstraints=obey \
+	    --layerPrecisions='node_of_standard_attention_*_scaled:bf16,node_of_standard_attention_*_prob:bf16,node_of_standard_attention_*_weighted:bf16' \
+	    --skipInference --memPoolSize=workspace:3072 \
 	    --minShapes=kpts0:1x1x2,kpts1:1x1x2 --optShapes=kpts0:1x512x2,kpts1:1x512x2 \
 	    --maxShapes=kpts0:1x2048x2,kpts1:1x2048x2
 
