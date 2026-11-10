@@ -50,7 +50,10 @@ lekiwi =[
     "lerobot[lekiwi]==0.3.3",
 ]
 unitree = [
-    "unitree-sdk2py @ git+https://github.com/junlinp/unitree_sdk2_python.git@800103eab7e045336b1c40186cda5023dbd05821",
+    # Has the as2 sport client, and the discovery-lease fix (ghost readers hold the
+    # dog's writer sessions for the full 100 s default): upstream PR
+    # unitreerobotics/unitree_sdk2_python#190. Re-pin to upstream once it merges.
+    "unitree-sdk2py @ git+https://github.com/zhongyuanguo-code/unitree_sdk2_python.git@cd47a98be4b0699462ca995797169b09710a19a6",
 ]
 3dgs = [
     "torch>=2.4,<2.11",
