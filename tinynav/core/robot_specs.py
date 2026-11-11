@@ -122,6 +122,10 @@ AS2_CONFIG = RobotConfig(
     safety_radius=0.2,
 )
 
+# The wheeled AS2: its body's core, 0.6 x 0.3 m (721 x 493 mm overall, which
+# safety_radius covers).
+AS2W_CONFIG = replace(AS2_CONFIG, name='as2w', front_len=0.30, rear_len=0.30, half_width=0.15)
+
 B2_CONFIG = RobotConfig(
     name='b2',
     front_len=0.44, rear_len=0.44, half_width=0.175,
