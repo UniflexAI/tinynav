@@ -87,6 +87,10 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
             if steps == 0:
                 continue
 
+            # Each voxel coordinate is monotone along the ray and the grid is a box, so a
+            # ray that has left the grid never re-enters: stop there. A far point (open
+            # ground, outdoors) would otherwise walk hundreds of voxels outside it.
+            inside = False
             for i in range(steps + 1):
                 t = i / steps
                 interp_x = int(round(start_voxel_x + t * diff_x))
@@ -97,6 +101,9 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
                     0 <= interp_y < grid_shape_y and
                     0 <= interp_z < grid_shape_z):
                     occupancy_grid[interp_x, interp_y, interp_z] -= 0.05
+                    inside = True
+                elif inside:
+                    break
 
             if (0 <= end_voxel_x < grid_shape_x and
                 0 <= end_voxel_y < grid_shape_y and
