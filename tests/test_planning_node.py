@@ -618,7 +618,10 @@ def test_a_cell_under_the_body_is_reported_as_a_body_hit():
     leaves the current pose can only be inf if a footprint sample is already on an
     obstacle cell. Sampled through the shipped lattice, so a cell has to land on a
     sample -- exactly the condition the scorer uses."""
-    off_fwd, off_lat = footprint_lattice(0.25, 0.35, 0.15, 0.1)   # the go2 default
+    # The model's own footprint, which `_footprint_hits` samples: a hard-coded one
+    # stops landing on a sample when the model's numbers change.
+    off_fwd, off_lat = footprint_lattice(*ROBOT_CONFIG.footprint_from_control(),
+                                         ROBOT_CONFIG.safety_radius)
     on_sample = (float(off_fwd[3]), float(off_lat[3]))
     hits, n = _hits_at(on_sample)
     assert hits, f'a cell on sample {on_sample} was not seen'
@@ -636,7 +639,8 @@ def test_the_report_names_where_the_hits_are():
     """Scattered singles are odometry-drift phantoms; a blob is a real obstacle.
     The offsets are the only way to tell, so they have to be in the line."""
     from planning_node import PlanningNode
-    off_fwd, off_lat = footprint_lattice(0.25, 0.35, 0.15, 0.1)
+    off_fwd, off_lat = footprint_lattice(*ROBOT_CONFIG.footprint_from_control(),
+                                         ROBOT_CONFIG.safety_radius)
     hits, n = _hits_at((float(off_fwd[3]), float(off_lat[3])))
     line = PlanningNode._hits_report(hits, n)
     assert 'body_hits=%d/%d' % (len(hits), n) in line
