@@ -1,6 +1,7 @@
 import json
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 from tinynav.core import robot_specs
@@ -15,7 +16,7 @@ def test_a_measurement_moves_the_camera_and_nothing_else(tmp_path):
     path = tmp_path / 'camera_offset.json'
     path.write_text(json.dumps({'forward_m': 0.31, 'left_m': -0.04, 'residual_m': 0.01}))
     got = with_measured_camera(GO2_CONFIG, path)
-    assert list(got.cam_offset_3d) == pytest.approx([-0.04, 0.0, 0.31])
+    assert list(got.cam_offset_3d) == pytest.approx([0.04, 0.0, 0.31])   # left is camera -x
     assert got.footprint_from_control() == GO2_CONFIG.footprint_from_control()
     assert got.name == GO2_CONFIG.name
 
@@ -44,3 +45,14 @@ def test_only_the_free_gait_has_floors_of_its_own(tmp_path):
     classic, free = (robot_specs.robot_config(missing, gait) for gait in ('classic', 'free'))
     floors = robot_specs.FREE_GAIT_FLOORS.get(classic.name, {})
     assert replace(classic, **floors) == free
+
+
+def test_a_camera_to_the_left_has_the_origin_to_its_right():
+    """cam_offset_3d is in the camera's frame (x right, y down, z forward), as
+    pilot/geometry.camera_from_robot has it: a camera 0.05 m left of the origin puts
+    the origin 0.05 m to the camera's right."""
+    cfg = replace(GO2_CONFIG, camera_fwd=0.3, camera_left=0.05)
+    T = np.eye(4)
+    T[:3, :3] = [[0, 0, 1], [-1, 0, 0], [0, -1, 0]]   # camera z along world +x
+    origin = T[:3, 3] - T[:3, :3] @ cfg.cam_offset_3d
+    assert origin[:2] == pytest.approx([-0.3, -0.05])
