@@ -1163,29 +1163,24 @@ class PlanningNode(Node):
             [[p.x, p.y, p.z] for p in msg.points], dtype=np.float64).reshape(-1, 3)
         self._climb_stamp_ns = self.get_clock().now().nanoseconds
 
-    def _ground_map(self, origin, resolution, shape, camera_xyz):
+    def _ground_map(self, origin, resolution, shape):
         """Per-cell ground z for build_obstacle_map (NaN off the region), or None when
         there is no fresh region at all.
 
         A cell within climb_region_radius_m of a climb point takes that nearest point's
-        z less the camera height, **moved so the point nearest the camera sits at the
-        camera's own height**: the map gives the climb's shape, the live camera where it
-        is, so a map->odom that is off in z does not move the ground. The radius is the
-        whole of the look-ahead: the labelling window already extends the region ~1m
-        back along the path."""
+        z less the camera height. The radius is the whole of the look-ahead: the
+        labelling window already extends the region ~1m back along the path."""
         if not self._signal_fresh(self._climb_stamp_ns, self._climb_region_ttl_ns):
             return None
         pts = self._climb_points
         if not len(pts):
             return None
-        here = np.argmin(np.hypot(*(pts[:, :2] - camera_xyz[:2]).T))
-        z = pts[:, 2] + (camera_xyz[2] - pts[here, 2])
         ground = np.full(shape, np.nan)
         idx = np.floor((pts[:, :2] - origin[:2]) / resolution).astype(np.int64)
         inside = np.all((idx >= 0) & (idx < np.array(shape)), axis=1)
         if not inside.any():
             return None
-        ground[idx[inside, 0], idx[inside, 1]] = z[inside] - self._camera_height_m
+        ground[idx[inside, 0], idx[inside, 1]] = pts[inside, 2] - self._camera_height_m
         # Each cell's nearest seed, at a cost independent of how many points came in.
         dist, (ni, nj) = distance_transform_edt(np.isnan(ground), return_indices=True)
         return np.where(dist <= self._climb_region_cells, ground[ni, nj], np.nan)
@@ -1404,7 +1399,7 @@ class PlanningNode(Node):
 
     def build_obstacle_and_esdf(self, T):
         ground_map = self._ground_map(self.origin, self.resolution,
-                                      self.occupancy_grid.shape[:2], T[:3, 3])
+                                      self.occupancy_grid.shape[:2])
         obstacle_mask = build_obstacle_map(
             self.occupancy_grid, self.origin, self.resolution,
             robot_z=T[2, 3], config=self.obstacle_config, ground_map=ground_map,
