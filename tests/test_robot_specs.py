@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from tinynav.core import robot_specs
-from tinynav.core.robot_specs import GO2_CONFIG, with_measured_camera
+from tinynav.core.robot_specs import B2_CONFIG, GO2_CONFIG, with_measured_camera, with_rig_footprint
 
 
 def test_no_file_is_the_type_default(tmp_path):
@@ -56,3 +56,15 @@ def test_a_camera_to_the_left_has_the_origin_to_its_right():
     T[:3, :3] = [[0, 0, 1], [-1, 0, 0], [0, -1, 0]]   # camera z along world +x
     origin = T[:3, 3] - T[:3, :3] @ cfg.cam_offset_3d
     assert origin[:2] == pytest.approx([-0.3, -0.05])
+
+
+def test_a_rig_footprint_replaces_only_the_footprint(tmp_path):
+    path = tmp_path / 'footprint.json'
+    path.write_text(json.dumps({'front_len': 0.44, 'rear_len': 0.44, 'half_width': 0.175,
+                                'why': 'a reason'}))
+    got = with_rig_footprint(B2_CONFIG, path)
+    assert (got.front_len, got.rear_len, got.half_width) == (0.44, 0.44, 0.175)
+    assert got.camera_fwd == B2_CONFIG.camera_fwd and got.obstacle == B2_CONFIG.obstacle
+    assert with_rig_footprint(B2_CONFIG, tmp_path / 'absent.json') is B2_CONFIG
+    path.write_text('{"front_len": 0.44}')
+    assert with_rig_footprint(B2_CONFIG, path) is B2_CONFIG

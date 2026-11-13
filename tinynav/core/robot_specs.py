@@ -287,6 +287,29 @@ def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
         return config
 
 
+#: A rig whose footprint differs from its type's: `front_len` / `rear_len` / `half_width`
+#: in metres, and `why`, which this does not read. 122 has one (2026-11-13): it keeps the
+#: footprint its routes, docks and narrow passages were run on, not the CAD's.
+FOOTPRINT_PATH = '/tinynav/tinynav_db/calib/footprint.json'
+_FOOTPRINT_FIELDS = ('front_len', 'rear_len', 'half_width')
+
+
+def with_rig_footprint(config, path=FOOTPRINT_PATH):
+    """`config` with the footprint from `path`; `config` itself when there is no file
+    or it cannot be read, said on stderr as `with_measured_camera` does."""
+    try:
+        with open(path) as f:
+            text = f.read()
+    except FileNotFoundError:
+        return config
+    try:
+        doc = json.loads(text)
+        return replace(config, **{k: float(doc[k]) for k in _FOOTPRINT_FIELDS})
+    except (KeyError, TypeError, ValueError) as e:
+        print(f"robot_specs: ignoring {path}, not a footprint ({e!r})", file=sys.stderr)
+        return config
+
+
 ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()
 try:
     _TYPE_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
@@ -305,12 +328,13 @@ if CHASSIS_GAIT not in GAITS:
 FREE_GAIT_FLOORS = {'go2': {'min_linear_vel': 0.25, 'min_spin_vel': 0.45}}
 
 
-def robot_config(path=CAMERA_OFFSET_PATH, gait=CHASSIS_GAIT):
-    """This ROBOT_TYPE's config in `gait`, with the rig's measurement read from disk now."""
+def robot_config(path=CAMERA_OFFSET_PATH, gait=CHASSIS_GAIT, footprint_path=FOOTPRINT_PATH):
+    """This ROBOT_TYPE's config in `gait`, with the rig's footprint and measurement read
+    from disk now."""
     config = _TYPE_CONFIG
     if gait == 'free' and config.name in FREE_GAIT_FLOORS:
         config = replace(config, **FREE_GAIT_FLOORS[config.name])
-    return with_measured_camera(config, path)
+    return with_measured_camera(with_rig_footprint(config, footprint_path), path)
 
 
 #: Read once, at import: a process picks up a new measurement at its next launch.
