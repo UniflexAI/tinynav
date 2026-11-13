@@ -349,7 +349,7 @@ def test_mid_climb_a_riser_above_the_robot_is_a_step_on_its_own_ground():
                                   ground_map=_ground((1, 1), origin[2] + base))[1, 1]
 
 
-def test_ground_map_takes_the_nearest_climb_point_less_the_camera_height():
+def test_ground_map_is_the_climbs_shape_at_the_cameras_height():
     from planning_node import PlanningNode
     node = PlanningNode.__new__(PlanningNode)
     node._signal_fresh = lambda stamp, window: stamp is not None
@@ -357,12 +357,14 @@ def test_ground_map_takes_the_nearest_climb_point_less_the_camera_height():
     node._climb_region_cells = 2
     node._camera_height_m = 0.5
     node._climb_points = np.array([[0.025, 0.025, 1.0], [0.425, 0.025, 2.0]])
-    g = node._ground_map(np.zeros(3), 0.05, (20, 20))
-    assert g[0, 0] == 0.5 and g[2, 0] == 0.5      # nearest is the first point
-    assert g[7, 0] == 1.5 and g[8, 2] == 1.5      # nearest is the second
+    # The camera stands by the first point, 0.3 above where the map put it.
+    camera = np.array([0.0, 0.0, 1.3])
+    g = node._ground_map(np.zeros(3), 0.05, (20, 20), camera)
+    assert np.isclose(g[0, 0], 0.8) and np.isclose(g[2, 0], 0.8)    # nearest is the first point
+    assert np.isclose(g[7, 0], 1.8) and np.isclose(g[8, 2], 1.8)    # the second, one higher by the map
     assert np.isnan(g[0, 5]) and np.isnan(g[19, 19])    # beyond the radius
     node._climb_stamp_ns = None
-    assert node._ground_map(np.zeros(3), 0.05, (20, 20)) is None
+    assert node._ground_map(np.zeros(3), 0.05, (20, 20), camera) is None
 
 
 # --- published Path: the stride cmd_vel_control's dt assumption rests on -----
