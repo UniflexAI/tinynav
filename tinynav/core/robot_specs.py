@@ -264,11 +264,19 @@ CAMERA_OFFSET_PATH = '/tinynav/tinynav_db/calib/camera_offset.json'
 FLOOR_CLEARANCE_M = 0.065
 
 
+#: The footprint fields a rig's file may set by hand (122 does, 2026-11-13: it keeps the
+#: footprint its routes, docks and narrow passages were run on, not the CAD's).
+FOOTPRINT_FIELDS = ('front_len', 'rear_len', 'half_width')
+
+
 def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
-    """`config` with the camera offset from `path` and, when its height was measured
-    from the floor, the obstacle band's bottom FLOOR_CLEARANCE_M above that floor;
-    `config` itself when there is no file or it cannot be read. An unreadable one is said on stderr, because every
-    process that plans imports this and none of them should fail to start over it."""
+    """`config` with what the rig's file at `path` sets, each part optional: the camera
+    offset (`forward_m` / `left_m`, the looper plugin's), the obstacle band's bottom
+    FLOOR_CLEARANCE_M above the floor when its height was measured (`floor_at` /
+    `up_m`), and the footprint (all of FOOTPRINT_FIELDS, written by hand); the type's
+    value for anything it does not set. `config` itself when there is no file or it
+    cannot be read. An unreadable one is said on stderr, because every process that
+    plans imports this and none of them should fail to start over it."""
     try:
         with open(path) as f:
             text = f.read()
@@ -276,37 +284,18 @@ def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
         return config
     try:
         doc = json.loads(text)
-        out = replace(config, camera_fwd=float(doc['forward_m']),
-                      camera_left=float(doc['left_m']))
+        out = config
+        if 'forward_m' in doc or 'left_m' in doc:
+            out = replace(out, camera_fwd=float(doc['forward_m']),
+                          camera_left=float(doc['left_m']))
+        if any(k in doc for k in FOOTPRINT_FIELDS):
+            out = replace(out, **{k: float(doc[k]) for k in FOOTPRINT_FIELDS})
         if 'floor_at' in doc:
             out = replace(out, obstacle=replace(
                 out.obstacle, robot_z_bottom=-(float(doc['up_m']) - FLOOR_CLEARANCE_M)))
         return out
     except (KeyError, TypeError, ValueError) as e:
         print(f"robot_specs: ignoring {path}, not a camera offset ({e!r})", file=sys.stderr)
-        return config
-
-
-#: A rig whose footprint differs from its type's: `front_len` / `rear_len` / `half_width`
-#: in metres, and `why`, which this does not read. 122 has one (2026-11-13): it keeps the
-#: footprint its routes, docks and narrow passages were run on, not the CAD's.
-FOOTPRINT_PATH = '/tinynav/tinynav_db/calib/footprint.json'
-_FOOTPRINT_FIELDS = ('front_len', 'rear_len', 'half_width')
-
-
-def with_rig_footprint(config, path=FOOTPRINT_PATH):
-    """`config` with the footprint from `path`; `config` itself when there is no file
-    or it cannot be read, said on stderr as `with_measured_camera` does."""
-    try:
-        with open(path) as f:
-            text = f.read()
-    except FileNotFoundError:
-        return config
-    try:
-        doc = json.loads(text)
-        return replace(config, **{k: float(doc[k]) for k in _FOOTPRINT_FIELDS})
-    except (KeyError, TypeError, ValueError) as e:
-        print(f"robot_specs: ignoring {path}, not a footprint ({e!r})", file=sys.stderr)
         return config
 
 
@@ -328,13 +317,12 @@ if CHASSIS_GAIT not in GAITS:
 FREE_GAIT_FLOORS = {'go2': {'min_linear_vel': 0.25, 'min_spin_vel': 0.45}}
 
 
-def robot_config(path=CAMERA_OFFSET_PATH, gait=CHASSIS_GAIT, footprint_path=FOOTPRINT_PATH):
-    """This ROBOT_TYPE's config in `gait`, with the rig's footprint and measurement read
-    from disk now."""
+def robot_config(path=CAMERA_OFFSET_PATH, gait=CHASSIS_GAIT):
+    """This ROBOT_TYPE's config in `gait`, with the rig's file read from disk now."""
     config = _TYPE_CONFIG
     if gait == 'free' and config.name in FREE_GAIT_FLOORS:
         config = replace(config, **FREE_GAIT_FLOORS[config.name])
-    return with_measured_camera(with_rig_footprint(config, footprint_path), path)
+    return with_measured_camera(config, path)
 
 
 #: Read once, at import: a process picks up a new measurement at its next launch.
