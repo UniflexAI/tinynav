@@ -17,9 +17,9 @@ class ObstacleConfig:
     planning_node -- `94e9871` tuned min_wall_span_m to 0.05 and `95ec80a` the
     occupancy threshold -- and moved here when upstream made the config per-robot.
     The move is upstream's structure with the fork's numbers. The band below is the
-    default for every robot except b2, which the operator widened to -0.6/0.6 on
-    2026-09-03 -- that is what this field is per-robot for, and it is a judgement about
-    a rig rather than something a merge should have done on its own.
+    default for every robot except b2, whose band the operator set to -0.6/0.2 --
+    that is what this field is per-robot for, and it is a judgement about a rig rather
+    than something a merge should have done on its own.
     """
     robot_z_bottom: float = -0.45
     robot_z_top: float = 0.2
@@ -141,10 +141,10 @@ B2_CONFIG = RobotConfig(
     # raising it, so [0.1, 0.2) went from creeping to standing still -- every /cmd_vel
     # sample that drive was 0.000 or exactly 0.200. Raising it needs the planner's own
     # speed floor raised with it.
-    # Taller than the default band covers: the operator's call, 2026-09-03. This is
-    # the same band upstream ships for b2, adopted now that someone has judged it
-    # rather than as a side effect of a merge.
-    obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.6),
+    # The operator's call: the bottom reaches lower than the default for the taller
+    # body (2026-09-03); the top is the default 0.2, because 0.6 above the camera
+    # took the charging station's roof for an obstacle (2026-11-13).
+    obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.2),
 )
 
 B2W_CONFIG = replace(B2_CONFIG, name='b2w', obstacle=ObstacleConfig())
