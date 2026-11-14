@@ -58,8 +58,8 @@ def _x_env_int(name, default):
         return default
 
 X_MIN_MATCH = _x_env_int("TINYNAV_X_MIN_MATCH", 50)
-X_MIN_LANDMARK = _x_env_int("TINYNAV_X_MIN_LANDMARK", 80)
-X_MIN_INLIER = _x_env_int("TINYNAV_X_MIN_INLIER", 50)
+X_MIN_LANDMARK = _x_env_int("TINYNAV_X_MIN_LANDMARK", 20)
+X_MIN_INLIER = _x_env_int("TINYNAV_X_MIN_INLIER", 15)
 X_ON = os.environ.get("TINYNAV_X_MODE", "off") == "gmm"
 X_CHI2_THRESHOLD = 22.5           # chi2.ppf(0.999, 6), dof 6
 X_MAX_HYP = _x_env_int("TINYNAV_X_MAX_HYP", 3)
@@ -161,7 +161,7 @@ def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map
             return reconstruct_path_sdf(parent, current)
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
-                for dz in [-1, 0, 1]:
+                for dz in [0]:  # 2D-slice costmap: every z layer is a copy of the same plane;
                     if dx == 0 and dy == 0 and dz == 0:
                         continue
                     neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
@@ -211,7 +211,7 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
             return reconstruct_path_sdf(parent, current)
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
-                for dz in [-1, 0, 1]:
+                for dz in [0]:  # 2D-slice costmap: every z layer is a copy of the same plane;
                     if dx == 0 and dy == 0 and dz == 0:
                         continue
                     neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
