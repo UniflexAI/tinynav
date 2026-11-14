@@ -119,6 +119,18 @@ def search_forward_command(center, yaw, goal, guided, current, policy_speed, esd
     target_yaw = np.arctan2(goal[1] - xy[:, -1, 1], goal[0] - xy[:, -1, 0])
     alignment = np.abs(np.angle(np.exp(1j * (target_yaw - heading[:, -1]))))
     score = gain - .06 * np.abs(w - gw) - .23 * alignment
+    # Prefer an arc that leaves room to straighten through the next metre.
+    # Score this continuation before committing to the entry line.
+    look = np.arange(1, 11) * .10
+    tangent = np.stack((np.cos(heading[:, -1]), np.sin(heading[:, -1])), axis=1)
+    extension = xy[:, -1, None, :] + tangent[:, None, :] * look[None, :, None]
+    extended = np.concatenate((extension, np.broadcast_to(
+        heading[:, -1, None, None], (*extension.shape[:2], 1))), axis=2)
+    room = footprint_clearance(extended.reshape(-1, 3), esdf, origin, GRID_RES)
+    room = room.reshape(len(v), -1).min(axis=1)
+    forward_room = np.clip(room, -.05, .22)
+    score += 1.9 * forward_room
+
     score[(clearance.min(axis=1) < GUARD_MARGIN) | (gain < .025)] = -np.inf
     choice = int(np.argmax(score))
     if choice and np.isfinite(score[choice]) and score[choice] > score[0] + .02:
