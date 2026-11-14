@@ -54,7 +54,13 @@ INFRA2_CAMINFO = "/camera/camera/infra2/camera_info"
 COLOR_CAMINFO = "/camera/camera/color/camera_info"
 TF_STATIC = "/tf_static"
 
-COLOR_SLOP_NS = 20_000_000  # the builder 4-way sync slop for the rgb queue
+# The color frame carries no pose: the keyframe's pose is the solved trajectory
+# at the keyframe stamp, and the color is imagery hung on it. Pairing is by
+# NEAREST stamp, not by a sync slop: in bag order the color for a stamp lands
+# after the depth/infra/vio triplet completes, so a small slop dropped ~96% of
+# keyframes as "colorless" (998 of 1038 on the 2026-11-12 sim capture). The cap
+# only guards a genuine hole in the color stream.
+COLOR_SLOP_NS = 1_000_000_000
 
 _PERCENT_INTERVAL_S = 2.0
 
@@ -215,8 +221,8 @@ def main() -> None:
 
     triplets = {}  # stamp_ns -> {"vio": PoseStamped, "depth": Image, "infra": Image}
     infra2_done = color_caminfo_done = False
-    # (stamp_ns, raw CompressedImage); the decoder stays <=16 ahead, so a frame
-    # needed within the 20 ms slop can never be evicted from the ring's tail.
+    # (stamp_ns, raw CompressedImage); the decoder stays <=16 ahead, so the
+    # nearest-stamp frame can never be evicted from the ring's tail.
     color_ring = collections.deque(maxlen=40)
     last_kf_T = None
     last_kf_stamp_s = None
