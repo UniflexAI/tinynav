@@ -387,6 +387,14 @@ class PlanningNode(Node):
         self.rl = None
         if PLANNER == "rl":
             from tinynav.rl.rl_planner import RLPlanner, TRTPolicy
+            self.ppo_route_guidance = os.environ.get("TINYNAV_RL_ROUTE_GUIDANCE") == "1"
+            if self.ppo_route_guidance:
+                from tf2_ros import Buffer, TransformListener
+                from tinynav.rl.ppo_planner import RLPlanner
+                self.global_route = None
+                self.route_tf_buffer = Buffer()
+                self.route_tf_listener = TransformListener(self.route_tf_buffer, self)
+                self.create_subscription(Path, '/mapping/global_plan', self.global_route_callback, 10)
             self.rl = RLPlanner(TRTPolicy())
             self.rl_cmd_pub = self.create_publisher(Twist, '/planning/rl_cmd', 10)
             self.rl_bev_pub = self.create_publisher(Image, '/planning/rl_bev', 10)
@@ -394,6 +402,26 @@ class PlanningNode(Node):
 
     def poi_change_callback(self, msg):
         self.target_pose = None
+        if getattr(self, "ppo_route_guidance", False):
+            self.global_route = None
+            self.rl.reset()
+
+    def global_route_callback(self, msg):
+        self.global_route = np.asarray(
+            [[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses]
+        ) if msg.header.frame_id == "map" and msg.poses else None
+
+    def route_in_world(self):
+        from tf2_ros import TransformException
+        if self.global_route is None:
+            return None
+        try:
+            transform = self.route_tf_buffer.lookup_transform("world", "map", Time()).transform
+        except TransformException:
+            return None
+        q, t = transform.rotation, transform.translation
+        rotation = quat_to_matrix(np.array([q.x, q.y, q.z, q.w]))
+        return (self.global_route @ rotation.T + np.array([t.x, t.y, t.z]))[:, :2]
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
@@ -667,6 +695,8 @@ class PlanningNode(Node):
         if self.target_pose is None:
             self.rl.reset()  # next goal starts with fresh memory; no command -> cmd_vel_control stops
             return
+        if getattr(self, "ppo_route_guidance", False):
+            self.rl.route_xy = self.route_in_world()
         v, w, poses, bev, status = self.rl.step(self.occupancy_grid, self.origin, T, stamp, self.target_pose[:2], ESDF_map)
         if status == "stuck":
             self.get_logger().error("RL planner stuck: commanded to move but no progress for 10s; stopped until the next goal",
