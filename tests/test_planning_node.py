@@ -1,5 +1,6 @@
 
 import ast
+from dataclasses import replace
 import numpy as np
 import time
 import sys
@@ -623,7 +624,7 @@ def test_a_cell_under_the_body_is_reported_as_a_body_hit():
     sample -- exactly the condition the scorer uses."""
     # The model's own footprint, which `_footprint_hits` samples: a hard-coded one
     # stops landing on a sample when the model's numbers change.
-    off_fwd, off_lat = footprint_lattice(*ROBOT_CONFIG.footprint_from_control(),
+    off_fwd, off_lat = footprint_lattice(*ROBOT_CONFIG.collision_footprint(),
                                          ROBOT_CONFIG.safety_radius)
     on_sample = (float(off_fwd[3]), float(off_lat[3]))
     hits, n = _hits_at(on_sample)
@@ -642,7 +643,7 @@ def test_the_report_names_where_the_hits_are():
     """Scattered singles are odometry-drift phantoms; a blob is a real obstacle.
     The offsets are the only way to tell, so they have to be in the line."""
     from planning_node import PlanningNode
-    off_fwd, off_lat = footprint_lattice(*ROBOT_CONFIG.footprint_from_control(),
+    off_fwd, off_lat = footprint_lattice(*ROBOT_CONFIG.collision_footprint(),
                                          ROBOT_CONFIG.safety_radius)
     hits, n = _hits_at((float(off_fwd[3]), float(off_lat[3])))
     line = PlanningNode._hits_report(hits, n)
@@ -716,7 +717,7 @@ def _score_rows(obst_xy, back_step):
 
 def _edge_samples():
     """The frontmost and rearmost footprint samples, on one side."""
-    fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+    fl, rl, hw = ROBOT_CONFIG.collision_footprint()
     off_fwd, _ = footprint_lattice(fl, rl, hw, ROBOT_CONFIG.safety_radius)
     return (float(max(off_fwd)), -hw), (float(min(off_fwd)), -hw)
 
@@ -877,7 +878,7 @@ def test_the_time_cost_arrives_on_the_tick_map_node_does():
         traj = np.array([[_pose_facing(x, 2.5, heading) for x in centres]])
         arrive_t = score_trajectories_by_ESDF(
             traj, np.full((50, 50), 5.0, dtype=np.float32), zeros, zeros, zeros, origin,
-            resolution, 0.1, *ROBOT_CONFIG.footprint_from_control(), target[0], target[1],
+            resolution, 0.1, *ROBOT_CONFIG.collision_footprint(), target[0], target[1],
             float(cam[0]), float(cam[1]), float(cam[2]), ARRIVE_M, 1, 1, 0.5, False, dt)[5][0]
         c, s = np.cos(heading), np.sin(heading)
         R = np.array([[s, 0.0, c], [-c, 0.0, s], [0.0, -1.0, 0.0]])
@@ -1037,3 +1038,121 @@ def test_an_obstacle_beside_behind_or_past_the_stop_pose_does_not():
     assert not _blocked_with_box_at(0.6, 2.5)         # behind the robot
     assert not _blocked_with_box_at(4.0, 2.5)         # past the stop pose
 
+
+
+# --- footprint_scale --------------------------------------------------------------
+#: A body whose edges and its 0.8 edges sit mid-cell on the 0.05 grids below, so the
+#: cell an obstacle lands in is not decided by float rounding at a cell boundary.
+_BODY = replace(ROBOT_CONFIG, front_len=0.42, rear_len=0.42, half_width=0.18,
+                safety_radius=0.1, footprint_scale=(1.0, 1.0, 1.0))
+
+
+def _three(scale):
+    """A footprint_scale: one number is the same factor front, rear and width."""
+    return tuple(scale) if isinstance(scale, tuple) else (scale, scale, scale)
+
+
+def _planning_sees(monkeypatch, scale):
+    """planning_node's ROBOT_CONFIG as _BODY at `scale` (one factor or front, rear,
+    width): what the shipped methods read."""
+    import planning_node
+    monkeypatch.setattr(planning_node, 'ROBOT_CONFIG', replace(_BODY, footprint_scale=_three(scale)))
+
+
+def test_at_scale_one_the_lattice_is_the_bodys():
+    """The default changes nothing: the same samples, bit for bit, as before the scale."""
+    a = footprint_lattice(*ROBOT_CONFIG.footprint_from_control(), ROBOT_CONFIG.safety_radius)
+    b = footprint_lattice(*replace(ROBOT_CONFIG, footprint_scale=(1.0, 1.0, 1.0)).collision_footprint(),
+                          ROBOT_CONFIG.safety_radius)
+    assert all(np.array_equal(x, y) for x, y in zip(a, b))
+
+
+def test_a_scale_shrinks_the_lattice_and_keeps_its_pitch():
+    """0.8 spans 0.8 of the body each way, and the pitch is still safety_radius's, so the
+    smaller outline is covered as densely as the body was."""
+    for front, rear, width in ((1.0, 1.0, 1.0), (0.8, 0.8, 0.8), (0.5, 0.5, 0.5),
+                               (1.0, 1.0, 0.6), (0.9, 0.6, 1.0)):
+        fl, rl, hw = replace(_BODY, footprint_scale=(front, rear, width)).collision_footprint()
+        off_fwd, off_lat = footprint_lattice(fl, rl, hw, _BODY.safety_radius)
+        assert np.isclose(off_fwd.max(), front * 0.42) and np.isclose(off_fwd.min(), -rear * 0.42)
+        assert np.isclose(off_lat.max(), width * 0.18) and np.isclose(off_lat.min(), -width * 0.18)
+        assert (off_fwd[0], off_lat[0]) == (0.0, 0.0)
+        samples = np.stack([off_fwd, off_lat], axis=1)
+        grid = np.stack(np.meshgrid(np.linspace(-rl, fl, 41), np.linspace(-hw, hw, 41)), -1).reshape(-1, 2)
+        worst = np.linalg.norm(grid[:, None] - samples[None], axis=2).min(axis=1).max()
+        assert worst <= _BODY.safety_radius + 1e-9, ((front, rear, width), worst)
+
+
+def test_at_0_8_the_body_outline_past_the_scaled_one_is_not_a_body_hit(monkeypatch):
+    nose_corner, scaled_corner = (0.42, -0.18), (0.8 * 0.42, -0.8 * 0.18)
+    _planning_sees(monkeypatch, 1.0)
+    assert _hits_at(nose_corner)[0], 'the body corner is not on the 1.0 lattice'
+    _planning_sees(monkeypatch, 0.8)
+    assert _hits_at(nose_corner)[0] == []
+    assert _hits_at(scaled_corner)[0], 'the scaled corner is not checked at 0.8'
+
+
+def test_only_the_width_shrinks_when_only_the_width_is_scaled(monkeypatch):
+    """Width 0.6 lets go of the body's side edge, and the nose, at full length, still
+    collides. (Points on lattice rows: the corners and, at width 0.6, the centre line.)"""
+    nose_corner, nose_centre = (0.42, -0.18), (0.42, 0.0)
+    _planning_sees(monkeypatch, (1.0, 1.0, 0.6))
+    assert _hits_at(nose_corner)[0] == [], 'the body side is still checked at width 0.6'
+    assert _hits_at(nose_centre)[0], 'the nose is not checked though the front is 1.0'
+    assert _hits_at((0.42, -0.6 * 0.18))[0], 'the side at width 0.6 is not checked'
+
+
+def test_front_and_rear_shrink_each_by_their_own(monkeypatch):
+    """Front 1.0, rear 0.6: the tail lets go of what the nose still sees."""
+    nose, tail = (0.42, -0.18), (-0.42, -0.18)
+    _planning_sees(monkeypatch, (1.0, 0.6, 1.0))
+    assert _hits_at(nose)[0]
+    assert _hits_at(tail)[0] == []
+    assert _hits_at((-0.6 * 0.42, -0.18))[0], 'the rear at 0.6 is not checked'
+
+
+def _front_clearance(obstacle_xy):
+    """The shipped `_front_obstacle_dist`, for a robot at the origin facing +x."""
+    node = _EscapeNode(obstacle_xy)
+    T = np.eye(4)
+    T[:3, :3] = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    return PlanningNode._front_obstacle_dist(node, T, node.mask, max_dist=1.0)
+
+
+def test_at_0_8_the_front_clearance_is_from_the_scaled_face(monkeypatch):
+    """The speed schedule and the reverse gate read this, so it has to start where the
+    rows are checked from: 0.2 of front_len further, to within a cell, and the corridor
+    is the scaled width -- an obstacle off the scaled side is not ahead."""
+    ahead, beside = (0.72, 0.0), (0.72, -0.18)
+    _planning_sees(monkeypatch, 1.0)
+    full = _front_clearance(ahead)
+    assert abs(full - 0.30) <= 0.05 and _front_clearance(beside) == full
+    _planning_sees(monkeypatch, 0.8)
+    assert abs(_front_clearance(ahead) - (full + 0.2 * 0.42)) <= 0.05
+    assert _front_clearance(beside) > 1.0, 'the corridor is still the body width'
+
+
+def test_at_0_8_an_obstacle_on_the_body_edge_no_longer_vetoes_standing(monkeypatch):
+    """The scorer's collision is the scaled lattice: an obstacle cell on the body's nose
+    corner is a collision at 1.0 and clearance (here past safety_radius) at 0.8."""
+    _planning_sees(monkeypatch, 1.0)
+    assert _score_rows((0.42, -0.18), back_step=_RES)[0] == float('inf')
+    _planning_sees(monkeypatch, 0.8)
+    assert _score_rows((0.42, -0.18), back_step=_RES)[0] == 0.0
+
+
+def test_planning_reads_the_body_footprint_only_to_log_it():
+    """Every collision use -- the lattice and scoring, the body hits, the front scan and
+    reverse gate, the strict-follow and around-obstacles widths, the decay under the
+    body -- goes through collision_footprint; the body's own numbers are only logged
+    next to it. ARRIVE_M is planned_arrival_radius, which stays the body's."""
+    tree = ast.parse(open(os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core',
+                                       'planning_node.py')).read())
+    body = {'footprint_from_control', 'front_len', 'rear_len', 'half_width'}
+
+    def reads(node):
+        return sum(1 for n in ast.walk(node) if isinstance(n, ast.Attribute) and n.attr in body
+                   and isinstance(n.value, ast.Name) and n.value.id == 'ROBOT_CONFIG')
+
+    init = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '__init__')
+    assert reads(tree) == reads(init) == 3

@@ -50,10 +50,11 @@ def esdf_cloud_points(esdf, origin, resolution, max_dist=1.0):
 
 
 def footprint_points(T, samples=21):
-    """The control-frame rectangle's outline in world, `samples` points per edge."""
+    """The control-frame rectangle's outline in world, `samples` points per edge. The
+    collision footprint, not the body: what the operator sees is what planning checks."""
     forward, left = T[:3, 2], T[:3, 0]
     center = T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
-    fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+    fl, rl, hw = ROBOT_CONFIG.collision_footprint()
     corners = [center + forward * fl + left * hw, center + forward * fl - left * hw,
                center - forward * rl - left * hw, center - forward * rl + left * hw]
     t = (np.arange(samples) / (samples - 1))[:, None]

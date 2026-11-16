@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import sys
 import numpy as np
@@ -66,6 +67,14 @@ class RobotConfig:
     camera_fwd: float
     camera_left: float
     safety_radius: float = 0.1
+    #: What collision checking multiplies front_len, rear_len and half_width by, one
+    #: factor each (front, rear, width -- FOOTPRINT_SCALE_DIRECTIONS; collision_footprint),
+    #: so a rig can be let through a passage its outline says it does not fit, on the
+    #: side where it is tight. The fields themselves stay the body: the arrival radii
+    #: are measured in it, and a smaller check must not move where a POI counts as
+    #: reached. safety_radius is the margin around whatever is checked and is not scaled.
+    #: Set per rig (with_measured_camera, FOOTPRINT_SCALE_ENV), within FOOTPRINT_SCALE_RANGE.
+    footprint_scale: tuple = (1.0, 1.0, 1.0)
     # Bounds used to constrain trajectory-library velocity sampling and to clamp
     # the final published cmd_vel. Placeholder values, same for every robot until
     # real per-platform min/max linear & angular speeds are measured.
@@ -89,8 +98,17 @@ class RobotConfig:
         return np.array([-self.camera_left, 0.0, self.camera_fwd], dtype=np.float32)
 
     def footprint_from_control(self):
-        """Returns (front_len, rear_len, half_w) relative to control center."""
+        """Returns (front_len, rear_len, half_w) relative to control center: the body,
+        whatever footprint_scale is. Collision checks read collision_footprint."""
         return self.front_len, self.rear_len, self.half_width
+
+    def collision_footprint(self):
+        """(front_len, rear_len, half_w) relative to control center that collision is
+        checked over: the body's, each times its own footprint_scale factor. Everything
+        that decides whether the robot fits reads this, and so does the outline drawn
+        for the operator, so what is shown is what is checked."""
+        front, rear, width = self.footprint_scale
+        return self.front_len * front, self.rear_len * rear, self.half_width * width
 
     @property
     def arrival_radius(self):
@@ -257,7 +275,11 @@ G1_CONFIG = RobotConfig(
 
 #: This rig's measured camera offset, over the robot type's. `forward_m` / `left_m`
 #: in metres, in the body frame above; `up_m` the camera's height above the floor when
-#: `floor_at` says it was measured from the floor; any other key is the writer's own record.
+#: `floor_at` says it was measured from the floor; the footprint (FOOTPRINT_FIELDS);
+#: `footprint_scale`, what collision checking shrinks that footprint by -- one number
+#: for all three directions, or `{"front", "rear", "width"}`, a direction left out
+#: being 1.0 (RobotConfig.footprint_scale; FOOTPRINT_SCALE_ENV overrides it); any other
+#: key is the writer's own record.
 CAMERA_OFFSET_PATH = '/tinynav/tinynav_db/calib/camera_offset.json'
 #: How far above the floor the obstacle band starts once the camera's height is
 #: measured: what go2's -0.45 left on 65, whose camera is 0.515 m up (2026-11-04).
@@ -267,16 +289,75 @@ FLOOR_CLEARANCE_M = 0.065
 #: The footprint fields a rig's file may set by hand (122 does, 2026-11-13: it keeps the
 #: footprint its routes, docks and narrow passages were run on, not the CAD's).
 FOOTPRINT_FIELDS = ('front_len', 'rear_len', 'half_width')
+#: The directions footprint_scale has a factor for, in its order: front_len's,
+#: rear_len's and half_width's (both sides together).
+FOOTPRINT_SCALE_DIRECTIONS = ('front', 'rear', 'width')
+#: The factor a rig may set in each direction, the operators' range (2026-11-16): a
+#: scale is for a passage a little narrower than the outline. A bigger body is
+#: FOOTPRINT_FIELDS' job.
+FOOTPRINT_SCALE_RANGE = (0.5, 1.0)
+#: Overrides the file's footprint_scale when set and not empty, so a launch can try a
+#: scale without editing the rig's calibration: "0.8" for all three directions, or
+#: "0.9,1.0,0.8" for front, rear and width. Read at process start, like the file.
+FOOTPRINT_SCALE_ENV = 'TINYNAV_FOOTPRINT_SCALE'
+
+
+def footprint_scale_in_range(value, source):
+    """`value` as one footprint_scale factor, clamped to FOOTPRINT_SCALE_RANGE and said
+    on stderr when it had to be (the planner logs the scale it ends up with). Not a
+    finite number is a ValueError: no scale stands in for a typo."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = math.nan
+    if not math.isfinite(number):
+        raise ValueError(f"footprint_scale {value!r} from {source} is not a number")
+    lo, hi = FOOTPRINT_SCALE_RANGE
+    held = min(max(number, lo), hi)
+    if held != number:
+        print(f"robot_specs: footprint_scale {number} from {source} is outside "
+              f"[{lo}, {hi}], using {held}", file=sys.stderr)
+    return held
+
+
+def footprint_scale_label(scale):
+    """(front, rear, width) as the logs say it: "1/1/0.8"."""
+    return '/'.join(f'{factor:g}' for factor in scale)
+
+
+def footprint_scale_of(value, source):
+    """A footprint_scale as written, as (front, rear, width), each factor in range
+    (footprint_scale_in_range): one number is all three; a mapping names directions
+    (FOOTPRINT_SCALE_DIRECTIONS), one left out being 1.0, and a name that is not a
+    direction is a ValueError, as a typo should be; a string is the env's -- one number,
+    or three comma-separated in that order."""
+    if isinstance(value, dict):
+        unknown = set(value) - set(FOOTPRINT_SCALE_DIRECTIONS)
+        if unknown:
+            raise ValueError(f"footprint_scale from {source} has no direction "
+                             f"{sorted(unknown)}, only {FOOTPRINT_SCALE_DIRECTIONS}")
+        return tuple(footprint_scale_in_range(value.get(d, 1.0), f"{source} {d}")
+                     for d in FOOTPRINT_SCALE_DIRECTIONS)
+    if isinstance(value, str) and ',' in value:
+        parts = [p.strip() for p in value.split(',')]
+        if len(parts) != len(FOOTPRINT_SCALE_DIRECTIONS):
+            raise ValueError(f"footprint_scale {value!r} from {source} is one number "
+                             f"or three ({', '.join(FOOTPRINT_SCALE_DIRECTIONS)})")
+        return tuple(footprint_scale_in_range(p, f"{source} {d}")
+                     for p, d in zip(parts, FOOTPRINT_SCALE_DIRECTIONS))
+    factor = footprint_scale_in_range(value, source)
+    return (factor,) * len(FOOTPRINT_SCALE_DIRECTIONS)
 
 
 def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
     """`config` with what the rig's file at `path` sets, each part optional: the camera
     offset (`forward_m` / `left_m`, the looper plugin's), the obstacle band's bottom
     FLOOR_CLEARANCE_M above the floor when its height was measured (`floor_at` /
-    `up_m`), and the footprint (all of FOOTPRINT_FIELDS, written by hand); the type's
-    value for anything it does not set. `config` itself when there is no file or it
-    cannot be read. An unreadable one is said on stderr, because every process that
-    plans imports this and none of them should fail to start over it."""
+    `up_m`), the footprint (all of FOOTPRINT_FIELDS, written by hand) and the
+    `footprint_scale` collision checking applies to it; the type's value for anything
+    it does not set. `config` itself when there is no file or it cannot be read. An
+    unreadable one is said on stderr, because every process that plans imports this
+    and none of them should fail to start over it."""
     try:
         with open(path) as f:
             text = f.read()
@@ -290,6 +371,9 @@ def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
                           camera_left=float(doc['left_m']))
         if any(k in doc for k in FOOTPRINT_FIELDS):
             out = replace(out, **{k: float(doc[k]) for k in FOOTPRINT_FIELDS})
+        if 'footprint_scale' in doc:
+            out = replace(out, footprint_scale=footprint_scale_of(
+                doc['footprint_scale'], path))
         if 'floor_at' in doc:
             out = replace(out, obstacle=replace(
                 out.obstacle, robot_z_bottom=-(float(doc['up_m']) - FLOOR_CLEARANCE_M)))
@@ -318,11 +402,17 @@ FREE_GAIT_FLOORS = {'go2': {'min_linear_vel': 0.25, 'min_spin_vel': 0.45}}
 
 
 def robot_config(path=CAMERA_OFFSET_PATH, gait=CHASSIS_GAIT):
-    """This ROBOT_TYPE's config in `gait`, with the rig's file read from disk now."""
+    """This ROBOT_TYPE's config in `gait`, with the rig's file read from disk now and
+    FOOTPRINT_SCALE_ENV, when set, over the file's footprint_scale."""
     config = _TYPE_CONFIG
     if gait == 'free' and config.name in FREE_GAIT_FLOORS:
         config = replace(config, **FREE_GAIT_FLOORS[config.name])
-    return with_measured_camera(config, path)
+    config = with_measured_camera(config, path)
+    scale = os.environ.get(FOOTPRINT_SCALE_ENV, '').strip()
+    if scale:
+        config = replace(config, footprint_scale=footprint_scale_of(
+            scale, FOOTPRINT_SCALE_ENV))
+    return config
 
 
 #: Read once, at import: a process picks up a new measurement at its next launch.

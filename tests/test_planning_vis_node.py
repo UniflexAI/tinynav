@@ -1,12 +1,15 @@
 import os
 import sys
 import types
+from dataclasses import replace
+from unittest import mock
 
 import numpy as np
 from builtin_interfaces.msg import Time
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from tinynav.core.planning_node import PlanningNode
+from tinynav.core import planning_vis_node
 from tinynav.core.planning_vis_node import decode_mask, footprint_points
 from tinynav.core.robot_specs import ROBOT_CONFIG
 
@@ -37,7 +40,7 @@ def test_footprint_outlines_the_control_rectangle():
     T[:3, :3] = [[np.cos(yaw), 0, -np.sin(yaw)], [np.sin(yaw), 0, np.cos(yaw)], [0, 1, 0]]
     T[:3, 3] = [2.0, -1.0, 0.3]
     pts = footprint_points(T)
-    fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+    fl, rl, hw = ROBOT_CONFIG.collision_footprint()
     rel = pts - (T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d)
     along, across = rel @ T[:3, 2], rel @ T[:3, 0]
     assert len(pts) == 84
@@ -45,6 +48,30 @@ def test_footprint_outlines_the_control_rectangle():
     assert (np.isclose(along, fl) | np.isclose(along, -rl) | np.isclose(np.abs(across), hw)).all()
 
 
+def test_the_footprint_drawn_is_the_one_checked():
+    """At footprint_scale 0.8 the operator sees the 0.8 outline planning checks, around
+    the same centre: the camera offset is not the scale's."""
+    T = np.eye(4)
+    T[:3, :3] = [[0, 0, 1], [1, 0, 0], [0, 1, 0]]
+    body = ROBOT_CONFIG.footprint_from_control()
+    with mock.patch.object(planning_vis_node, 'ROBOT_CONFIG',
+                           replace(ROBOT_CONFIG, footprint_scale=(1.0, 1.0, 1.0))):
+        full = footprint_points(T)
+    with mock.patch.object(planning_vis_node, 'ROBOT_CONFIG',
+                           replace(ROBOT_CONFIG, footprint_scale=(0.8, 0.8, 0.8))):
+        scaled = footprint_points(T)
+    center = T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
+    assert np.allclose(full[:, 0].max() - center[0], body[0])
+    assert np.allclose(scaled - center, 0.8 * (full - center))
+    with mock.patch.object(planning_vis_node, 'ROBOT_CONFIG',
+                           replace(ROBOT_CONFIG, footprint_scale=(1.0, 0.6, 0.7))):
+        rel = footprint_points(T) - center
+    # this T: body forward is world +x, body left is world +y
+    assert np.isclose(rel[:, 0].max(), body[0]) and np.isclose(rel[:, 0].min(), -0.6 * body[1])
+    assert np.isclose(np.abs(rel[:, 1]).max(), 0.7 * body[2])
+
+
 if __name__ == "__main__":
     test_mask_arrives_as_planning_holds_it()
     test_footprint_outlines_the_control_rectangle()
+    test_the_footprint_drawn_is_the_one_checked()

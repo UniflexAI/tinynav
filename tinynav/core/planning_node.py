@@ -32,7 +32,8 @@ from std_msgs.msg import Bool, Header, Float32, String
 from cv_bridge import CvBridge
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
-from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig, FLOOR_CLEARANCE_M
+from tinynav.core.robot_specs import (ROBOT_CONFIG, ObstacleConfig, FLOOR_CLEARANCE_M,
+                                      footprint_scale_label)
 
 # === Helper functions ===
 @njit(cache=True)
@@ -638,7 +639,8 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
 
 #: The nav node's arrival (tinynav-pilot's nav_node; its test_arrival_contract holds
 #: these to it) at a tighter radius, its ticks at its 0.1 s nav tick: a row counts as
-#: arriving only well inside where the nav node ends the leg.
+#: arriving only well inside where the nav node ends the leg. The body's half-width,
+#: not the collision footprint's: footprint_scale must not move where a POI is reached.
 ARRIVE_M = ROBOT_CONFIG.planned_arrival_radius
 ARRIVE_TICKS = 1
 ARRIVE_TICK_S = 0.1
@@ -962,9 +964,12 @@ class PlanningNode(Node):
 
     def __init__(self, node_name='planning_node'):
         super().__init__(node_name)
+        cf, cr, ch = ROBOT_CONFIG.collision_footprint()
         self.get_logger().info(
             f"Robot: {ROBOT_CONFIG.name} (footprint fwd/rear/half-w "
             f"{ROBOT_CONFIG.front_len}/{ROBOT_CONFIG.rear_len}/{ROBOT_CONFIG.half_width}m, "
+            f"collision x{footprint_scale_label(ROBOT_CONFIG.footprint_scale)} (front/rear/width) "
+            f"{cf:.3f}/{cr:.3f}/{ch:.3f}m, "
             f"cam=({ROBOT_CONFIG.camera_fwd},{ROBOT_CONFIG.camera_left}), "
             f"safety_r={ROBOT_CONFIG.safety_radius}m, "
             f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
@@ -1296,7 +1301,7 @@ class PlanningNode(Node):
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
         fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
         lx, ly = -fy, fx
-        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+        fl, rl, hw = ROBOT_CONFIG.collision_footprint()
         off_fwd, off_lat = footprint_lattice(fl, rl, hw, ROBOT_CONFIG.safety_radius)
         rows, cols = obstacle_mask.shape
         hits = []
@@ -1322,13 +1327,16 @@ class PlanningNode(Node):
 
     def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
         """Distance from the robot's front face to the nearest obstacle in the forward corridor.
-        Scans start at the front face so the returned value matches physical clearance."""
+        Scans start at the front face so the returned value matches physical clearance.
+        The face and the corridor are the collision footprint's: the speed schedule and
+        the reverse gate read this, and both have to agree with what the rows are
+        checked against."""
         center = self.camera_to_robot_center(T)
         fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
         fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
         lx, ly = -fy, fx
-        fl, _, hw = ROBOT_CONFIG.footprint_from_control()
+        fl, _, hw = ROBOT_CONFIG.collision_footprint()
         rows, cols = obstacle_mask.shape
         steps = int(max_dist / self.resolution) + 1
         for step in range(steps):
@@ -1370,12 +1378,15 @@ class PlanningNode(Node):
         self.occupancy_grid *= 0.99
         # The camera cannot see under the body, so no ray ever clears those cells;
         # decay them faster, but not to zero at once, so a real obstacle there still reads.
+        # "Under the body" is the collision footprint: with footprint_scale < 1 the robot
+        # is let closer to an obstacle than its outline, and decaying the whole outline
+        # would fade a door frame it is squeezing past while it is still beside it.
         center = self.camera_to_robot_center(T)
         fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         n = np.hypot(fwd[0], fwd[1])
         if n > 1e-6:
             under = footprint_cells(self.grid_shape[:2], self.origin, self.resolution, center[:2],
-                                    fwd[:2] / n, *ROBOT_CONFIG.footprint_from_control())
+                                    fwd[:2] / n, *ROBOT_CONFIG.collision_footprint())
             self.occupancy_grid[under] *= self._footprint_decay
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
@@ -1423,7 +1434,7 @@ class PlanningNode(Node):
     def score_trajectories(self, trajectories, params, ESDF_map, path_dist_map, remaining_map,
                            route_heading_map, target, has_route):
         """score_trajectories_by_ESDF's columns, as arrays."""
-        front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
+        front_len, rear_len, half_w = ROBOT_CONFIG.collision_footprint()
         cam = ROBOT_CONFIG.cam_offset_3d
 
         def score(trajs):
@@ -1506,7 +1517,9 @@ class PlanningNode(Node):
             xi, yi = ((init_p[:2] - self.origin[:2]) / self.resolution).astype(int)
             rem_here = (remaining_map[xi, yi] if 0 <= xi < remaining_map.shape[0]
                         and 0 <= yi < remaining_map.shape[1] else 1e3)
-            _, _, half_w = ROBOT_CONFIG.footprint_from_control()
+            # The width the body needs to fit, for strict follow below and the
+            # around-obstacles band: the collision footprint's, as the rows are checked.
+            _, _, half_w = ROBOT_CONFIG.collision_footprint()
             # Strict follow: an obstacle on the route as far as the carrot aims DWA at
             # map_node's stop pose instead, so it does not start round it early; one as far
             # as the stop pose stands the robot. Off when either stream is stale.
