@@ -390,12 +390,20 @@ class PlanningNode(Node):
             self.ppo_route_guidance = os.environ.get("TINYNAV_RL_ROUTE_GUIDANCE") == "1"
             if self.ppo_route_guidance:
                 from tf2_ros import Buffer, TransformListener
-                from tinynav.rl.ppo_planner import RLPlanner
+                from tinynav.rl.ppo_planner import PPOGeometry, RLPlanner
                 self.global_route = None
                 self.route_tf_buffer = Buffer()
                 self.route_tf_listener = TransformListener(self.route_tf_buffer, self)
                 self.create_subscription(Path, '/mapping/global_plan', self.global_route_callback, 10)
-            self.rl = RLPlanner(TRTPolicy())
+                defaults = PPOGeometry()
+                geometry = PPOGeometry(**{
+                    name: float(os.environ.get(f"TINYNAV_PPO_{name.upper()}_M", getattr(defaults, name)))
+                    for name in ("front", "rear", "half_width", "control_x", "control_y")
+                })
+                self.get_logger().info(f"PPO guard geometry (m): {geometry}")
+                self.rl = RLPlanner(TRTPolicy(), geometry)
+            else:
+                self.rl = RLPlanner(TRTPolicy())
             self.rl_cmd_pub = self.create_publisher(Twist, '/planning/rl_cmd', 10)
             self.rl_bev_pub = self.create_publisher(Image, '/planning/rl_bev', 10)
             self.get_logger().info("TINYNAV_PLANNER=rl: learned policy replaces the trajectory library")
@@ -698,7 +706,22 @@ class PlanningNode(Node):
         if getattr(self, "ppo_route_guidance", False):
             self.rl.route_xy = self.route_in_world()
         v, w, poses, bev, status = self.rl.step(self.occupancy_grid, self.origin, T, stamp, self.target_pose[:2], ESDF_map)
-        if status == "stuck":
+        if getattr(self, "ppo_route_guidance", False) and status == "stuck":
+            self.get_logger().error(
+                "PPO stuck: no measured motion after publishing nonzero commands; stopped until the next goal",
+                throttle_duration_sec=5.0,
+            )
+        elif status == "clearance blocked":
+            self.get_logger().warn(
+                "PPO clearance blocked: zero command, checking again on the next obstacle map",
+                throttle_duration_sec=1.0,
+            )
+        elif status == "recovery no motion":
+            self.get_logger().warn(
+                "PPO recovery had no measured translation or rotation",
+                throttle_duration_sec=1.0,
+            )
+        elif status == "stuck":
             self.get_logger().error("RL planner stuck: commanded to move but no progress for 10s; stopped until the next goal",
                                     throttle_duration_sec=5.0)
         elif status != "ok":

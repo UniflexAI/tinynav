@@ -2,14 +2,16 @@
 
 Builds the same observation the policy saw in NavSim (BEV + own trail + goal/velocity/last
 action), runs the recurrent policy and returns (v, w). A guard, independent of what the policy
-learned, keeps the RL footprint (robot_specs.RL_FOOTPRINT, the one used in training) at least
-GUARD_MARGIN from obstacles over GUARD_HORIZON: it checks the swept area of the commanded motion,
+learned, keeps a configurable footprint
+at least GUARD_MARGIN from obstacles over GUARD_HORIZON: it checks the swept area of the commanded motion,
 including turning in place, and falls back to the first safe alternative or a stop. A robot that
 stays put while being commanded to move is declared stuck and stopped until the next goal.
 """
+from dataclasses import dataclass
+
 import numpy as np
 
-from tinynav.core.robot_specs import RL_FOOTPRINT, ROBOT_CONFIG
+from tinynav.core.robot_specs import RL_FOOTPRINT, RLFootprint, ROBOT_CONFIG
 from tinynav.rl.bev import GRID_RES, TRAIL_LEN, camera_yaw, make_bev, to_robot_frame, trail_channel
 
 # Action scaling shared with NavSim (which imports these): action[0] in [-1, 1] maps to
@@ -30,7 +32,7 @@ RECOVERY_PHASES = ((0.2, 0.6, 0.5), (-0.1, 0.6, 1.0), (-0.2, 0.3, 1.0), (-0.2, 0
 ESCAPE_TOL = 0.01  # m an escape move may lose to ESDF noise; never below 0 (touching the obstacle)
 
 
-from tinynav.rl.rl_planner import footprint_clearance, rollout, safe_command
+from tinynav.rl.rl_planner import EDGE, _edge_points, footprint_clearance, rollout, safe_command
 
 
 def route_guided_command(route, center, yaw, v, w):
@@ -73,30 +75,30 @@ def route_guided_command(route, center, yaw, v, w):
     return speed, float(turn)
 
 
-def progress_command(center, yaw, goal, desired_turn, esdf, origin):
+def progress_command(center, yaw, goal, desired_turn, esdf, origin, *, edge=EDGE):
     """Find a short forward motion with the same swept-footprint clearance rule."""
     relative = to_robot_frame(goal, center, yaw)
     if relative[0] <= abs(relative[1]) * .5:
         return None
     distance = np.linalg.norm(goal - center)
-    now = footprint_clearance(rollout(center, yaw, 0., 0., steps=0), esdf, origin, GRID_RES)[0]
+    now = footprint_clearance(rollout(center, yaw, 0., 0., steps=0), esdf, origin, GRID_RES, edge=edge)[0]
     minimum = GUARD_MARGIN if now >= GUARD_MARGIN else max(0., now - ESCAPE_TOL)
     steps = round(GUARD_HORIZON / ROLLOUT_DT)
     options = [(v, w) for v in (.04, .06, .08, .12, .16, .20) for w in (-.6, -.5, -.4, -.3, -.2, -.1, 0., .1, .2, .3, .4, .5, .6)]
     poses = np.asarray([rollout(center, yaw, v, w, steps=steps) for v, w in options])
-    clearance = footprint_clearance(poses.reshape(-1, 3), esdf, origin, GRID_RES)
+    clearance = footprint_clearance(poses.reshape(-1, 3), esdf, origin, GRID_RES, edge=edge)
     clearance = clearance.reshape(len(options), steps + 1)[:, 1:].min(axis=1)
     gain = distance - np.linalg.norm(goal - poses[:, -1, :2], axis=1)
     turn = np.asarray(options)[:, 1]
     # Reward ending the rollout with room to continue, beyond the swept minimum.
-    end_clearance = footprint_clearance(poses[:, -1], esdf, origin, GRID_RES)
+    end_clearance = footprint_clearance(poses[:, -1], esdf, origin, GRID_RES, edge=edge)
     score = gain + .65 * np.minimum(end_clearance, .25) - .05 * np.abs(turn - desired_turn)
     score[(clearance < minimum) | (gain < .025)] = -np.inf
     selected = int(np.argmax(score))
     return options[selected] if np.isfinite(score[selected]) else None
 
 
-def search_forward_command(center, yaw, goal, guided, current, policy_speed, esdf, origin):
+def search_forward_command(center, yaw, goal, guided, current, policy_speed, esdf, origin, *, edge=EDGE):
     """Search faster arcs with the same one-second swept clearance margin."""
     gv, gw = guided
     if gv < .05:
@@ -113,7 +115,7 @@ def search_forward_command(center, yaw, goal, guided, current, policy_speed, esd
     offset = np.cumsum(v[:, None, None] * ROLLOUT_DT * direction, axis=1)
     xy = np.concatenate((np.broadcast_to(center, (len(v), 1, 2)), center + offset), axis=1)
     poses = np.concatenate((xy, heading[..., None]), axis=2)
-    clearance = footprint_clearance(poses.reshape(-1, 3), esdf, origin, GRID_RES).reshape(len(v), len(t))
+    clearance = footprint_clearance(poses.reshape(-1, 3), esdf, origin, GRID_RES, edge=edge).reshape(len(v), len(t))
     gain = np.linalg.norm(goal - center) - np.linalg.norm(goal - xy[:, -1], axis=1)
     # Look beyond the immediate distance gain when an arc leaves the body misaligned.
     target_yaw = np.arctan2(goal[1] - xy[:, -1, 1], goal[0] - xy[:, -1, 0])
@@ -126,7 +128,7 @@ def search_forward_command(center, yaw, goal, guided, current, policy_speed, esd
     extension = xy[:, -1, None, :] + tangent[:, None, :] * look[None, :, None]
     extended = np.concatenate((extension, np.broadcast_to(
         heading[:, -1, None, None], (*extension.shape[:2], 1))), axis=2)
-    room = footprint_clearance(extended.reshape(-1, 3), esdf, origin, GRID_RES)
+    room = footprint_clearance(extended.reshape(-1, 3), esdf, origin, GRID_RES, edge=edge)
     room = room.reshape(len(v), -1).min(axis=1)
     forward_room = np.clip(room, -.05, .22)
     score += 1.9 * forward_room
@@ -138,12 +140,34 @@ def search_forward_command(center, yaw, goal, guided, current, policy_speed, esd
     return None
 
 
+@dataclass(frozen=True)
+class PPOGeometry:
+    """Body extents from the configured control center and its shift from the robot default."""
+
+    front: float = RL_FOOTPRINT.front
+    rear: float = RL_FOOTPRINT.rear
+    half_width: float = RL_FOOTPRINT.half_width
+    control_x: float = 0.0
+    control_y: float = 0.0
+
+    def __post_init__(self):
+        extents = np.array([self.front, self.rear, self.half_width])
+        if not np.isfinite(extents).all() or (extents <= 0).any():
+            raise ValueError("PPO footprint extents must be finite and positive")
+        if not np.isfinite([self.control_x, self.control_y]).all():
+            raise ValueError("PPO control-center offsets must be finite")
+
+
 class RLPlanner:
     GUARD_REASONS = ("ok", "turn in place", "turn the other way", "creep forward", "creep forward turning",
                      "creep forward turning the other way", "back off", "stop")
 
-    def __init__(self, policy):
+    def __init__(self, policy, geometry=None):
         self.policy = policy
+        self.geometry = geometry if geometry is not None else PPOGeometry()
+        self.edge = _edge_points(footprint=RLFootprint(
+            self.geometry.front, self.geometry.rear, self.geometry.half_width,
+        ))
         self.reset()
 
     def reset(self):
@@ -152,7 +176,8 @@ class RLPlanner:
         self.hist, self.last = [], None
         self.vel = np.zeros(2, np.float32)
         self.last_action = np.zeros(2, np.float32)
-        self.motion, self.stuck = [], False  # (stamp, x, y, yaw, commanded) for stuck detection
+        self.motion, self.stuck = [], False
+        self.motion_command_sent = False
         self.stuck_count = 0
         self.recovery = None
         self.recovery_start = None
@@ -161,7 +186,7 @@ class RLPlanner:
     def _checked_recovery(self, center, yaw, stamp, esdf, origin, phases):
         if phases in self.failed_recoveries:
             return None
-        now = footprint_clearance(rollout(center, yaw, 0.0, 0.0, steps=0), esdf, origin, GRID_RES)[0]
+        now = footprint_clearance(rollout(center, yaw, 0.0, 0.0, steps=0), esdf, origin, GRID_RES, edge=self.edge)[0]
         if now < 0.0:
             return None
         # Apply the normal escape tolerance once, relative to the initial pose.
@@ -169,7 +194,7 @@ class RLPlanner:
         pose = np.array([*center, yaw])
         for v, w, duration in phases:
             poses = rollout(pose[:2], pose[2], v, w, steps=round(duration / ROLLOUT_DT))
-            if footprint_clearance(poses, esdf, origin, GRID_RES).min() < minimum:
+            if footprint_clearance(poses, esdf, origin, GRID_RES, edge=self.edge).min() < minimum:
                 return None
             pose = poses[-1]
         return stamp, phases, minimum
@@ -228,26 +253,54 @@ class RLPlanner:
             if elapsed < duration:
                 steps = max(1, int(np.ceil((duration - elapsed) / ROLLOUT_DT - 1e-8)))
                 poses = rollout(center, yaw, v, w, steps=steps)
-                clearance = footprint_clearance(poses, esdf, origin, GRID_RES)
+                clearance = footprint_clearance(poses, esdf, origin, GRID_RES, edge=self.edge)
                 if clearance.min() >= minimum:
                     return v, w, f"recovery {index + 1}/{len(phases)}"
                 return 0.0, 0.0, "recovery blocked"
             elapsed -= duration
         return None
 
-    def _check_stuck(self, stamp, center, yaw, commanded):
-        self.motion = [m for m in self.motion if stamp - m[0] <= STUCK_WINDOW] + [(stamp, center[0], center[1], yaw, commanded)]
-        if stamp - self.motion[0][0] < 0.9 * STUCK_WINDOW or not all(m[4] for m in self.motion):
+    def _check_stuck(self, stamp, center, yaw):
+        # The command returned on the previous tick is the one that could have moved this pose.
+        if not self.motion_command_sent:
+            self.motion.clear()
             return False
-        moved = np.hypot(center[0] - self.motion[0][1], center[1] - self.motion[0][2])
-        turned = abs(np.angle(np.exp(1j * (yaw - self.motion[0][3]))))
-        return moved < STUCK_MOVE and turned < STUCK_TURN
+        moved = any(np.linalg.norm(center - position) >= STUCK_MOVE
+                    or abs(np.angle(np.exp(1j * (yaw - heading)))) >= STUCK_TURN
+                    for _, position, heading in self.motion)
+        if moved or (self.motion and stamp - self.motion[-1][0] > GUARD_HORIZON):
+            self.motion.clear()
+        self.motion.append((stamp, center.copy(), yaw))
+        return stamp - self.motion[0][0] >= STUCK_WINDOW
+
+    def control_center(self, T, yaw):
+        center = (T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d)[:2]
+        forward = np.array([np.cos(yaw), np.sin(yaw)])
+        left = np.array([-forward[1], forward[0]])
+        return center + self.geometry.control_x * forward + self.geometry.control_y * left
+
+    def _guard_command(self, center, yaw, goal, guided, policy_speed, esdf, origin):
+        requested_v, requested_w = guided
+        v, w, reason = safe_command(center, yaw, *guided, esdf, origin, GRID_RES, edge=self.edge)
+        status = self.GUARD_REASONS[reason]
+        if reason != 0 and requested_v > .05:
+            alternate = progress_command(center, yaw, goal, requested_w, esdf, origin, edge=self.edge)
+            if alternate is not None:
+                v, w = alternate
+                status = "progress fallback"
+        alternate = search_forward_command(
+            center, yaw, goal, guided, (v, w), policy_speed, esdf, origin, edge=self.edge,
+        )
+        if alternate is not None:
+            v, w = alternate
+            status = "forward search"
+        return v, w, "clearance blocked" if status == "stop" else status
 
     def step(self, grid, origin, T, stamp, goal_xy, esdf):
         """grid/origin: planning occupancy grid; T: camera->world; esdf: 2D ESDF on the same grid.
         Returns (v, w, rollout poses, policy BEV, status) with status one of GUARD_REASONS or "stuck"."""
-        center = (T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d)[:2]
         yaw = camera_yaw(T)
+        center = self.control_center(T, yaw)
         if self.last is not None:
             dt = max(stamp - self.last[0], 1e-3)
             raw = np.array([to_robot_frame(center, self.last[1], self.last[2])[0] / dt,
@@ -267,25 +320,12 @@ class RLPlanner:
         policy_speed = v
         v, w = route_guided_command(getattr(self, "route_xy", None), center, yaw, v, w)
         self.guided_command = (v, w)
-        requested = abs(v) > 0.05 or abs(w) > 0.1
-
-        requested_v, requested_w = v, w
-        v, w, reason = safe_command(center, yaw, v, w, esdf, origin, GRID_RES)
-        status = self.GUARD_REASONS[reason]
-        if reason != 0 and requested_v > .05:
-            alternate = progress_command(center, yaw, goal_xy, requested_w, esdf, origin)
-            if alternate is not None:
-                v, w = alternate
-                status = "progress fallback"
-        alternate = search_forward_command(
-            center, yaw, goal_xy, self.guided_command, (v, w), policy_speed, esdf, origin,
-        )
-        if alternate is not None:
-            v, w = alternate
-            status = "forward search"
-        # Requested motion with no measured response can indicate an unseen obstacle.
+        v, w, status = self._guard_command(center, yaw, goal_xy, (v, w), policy_speed, esdf, origin)
         preferred = -1.0 if a[1] >= 0.0 else 1.0
-        if self.recovery is None and not self.stuck and self._check_stuck(stamp, center, yaw, requested):
+        if status == "clearance blocked":
+            self.motion.clear()
+        if (status != "clearance blocked" and self.recovery is None and not self.stuck
+                and self._check_stuck(stamp, center, yaw)):
             recovery = self._start_recovery(center, yaw, stamp, esdf, origin, preferred, goal_xy)
             if recovery is None or self.stuck_count >= MAX_RECOVERY_ATTEMPTS:
                 self.stuck = True
@@ -296,7 +336,14 @@ class RLPlanner:
             moved = self._recovery_moved(center, yaw)
             unresponsive = not moved and (command is None or stamp - self.recovery[0] >= RECOVERY_RESPONSE_S)
             blocked = command is not None and command[2] == "recovery blocked"
-            if unresponsive or blocked:
+            if blocked:
+                # The updated map vetoed the maneuver. Replan from the current pose next tick.
+                self.recovery = None
+                self.motion.clear()
+                self.failed_recoveries.clear()
+                self.stuck_count = 0
+                v, w, status = 0.0, 0.0, "clearance blocked"
+            elif unresponsive:
                 self.failed_recoveries.add(self.recovery[1])
                 alternate = self._start_recovery(center, yaw, stamp, esdf, origin, preferred, goal_xy)
                 if alternate is None or self.stuck_count >= MAX_RECOVERY_ATTEMPTS:
@@ -304,7 +351,7 @@ class RLPlanner:
                     self.stuck = True
                 else:
                     self._activate_recovery(alternate, center, yaw)
-                v, w, status = 0.0, 0.0, "recovery blocked" if blocked else "recovery no motion"
+                v, w, status = 0.0, 0.0, "recovery no motion"
             elif command is not None:
                 v, w, status = command
             else:
@@ -326,4 +373,5 @@ class RLPlanner:
                     v, w, status = 0.0, 0.0, "recovery complete"
         if self.stuck:
             v, w, status = 0.0, 0.0, "stuck"
+        self.motion_command_sent = bool(v or w)
         return v, w, rollout(center, yaw, v, w), bev, status

@@ -56,9 +56,10 @@ def rollout(center, yaw, v, w, steps=ROLLOUT_STEPS, dt=ROLLOUT_DT):
     return np.array(out)
 
 
-def _edge_points(step=GRID_RES / 2):
-    fl, rl, hw = RL_FOOTPRINT.front, RL_FOOTPRINT.rear, RL_FOOTPRINT.half_width
-    f, s = np.arange(-rl, fl + 1e-6, step), np.arange(-hw, hw + 1e-6, step)
+def _edge_points(step=GRID_RES / 2, footprint=RL_FOOTPRINT):
+    fl, rl, hw = footprint.front, footprint.rear, footprint.half_width
+    f = np.linspace(-rl, fl, int(np.ceil((fl + rl) / step)) + 1)
+    s = np.linspace(-hw, hw, int(np.ceil(2 * hw / step)) + 1)
     return np.concatenate([np.stack([f, np.full_like(f, hw)], 1), np.stack([f, np.full_like(f, -hw)], 1),
                            np.stack([np.full_like(s, fl), s], 1), np.stack([np.full_like(s, -rl), s], 1)])
 
@@ -66,13 +67,13 @@ def _edge_points(step=GRID_RES / 2):
 EDGE = _edge_points()
 
 
-def footprint_clearance(poses, esdf, origin, res):
+def footprint_clearance(poses, esdf, origin, res, *, edge=EDGE):
     """Per pose, the smallest distance from the footprint outline to an obstacle cell's surface (m).
     The ESDF holds center-to-center distances, so half a cell is subtracted; bilinear interpolation
     avoids the up-to-half-cell error of reading the 10cm grid at cell centers."""
     c, sn = np.cos(poses[:, 2:3]), np.sin(poses[:, 2:3])
-    gx = (poses[:, :1] + c * EDGE[:, 0] - sn * EDGE[:, 1] - origin[0]) / res - 0.5
-    gy = (poses[:, 1:2] + sn * EDGE[:, 0] + c * EDGE[:, 1] - origin[1]) / res - 0.5
+    gx = (poses[:, :1] + c * edge[:, 0] - sn * edge[:, 1] - origin[0]) / res - 0.5
+    gy = (poses[:, 1:2] + sn * edge[:, 0] + c * edge[:, 1] - origin[1]) / res - 0.5
     x0, y0 = np.floor(gx).astype(int), np.floor(gy).astype(int)
     fx, fy = gx - x0, gy - y0
     def at(i, j):
@@ -83,7 +84,7 @@ def footprint_clearance(poses, esdf, origin, res):
     return np.nan_to_num(d, nan=np.inf).min(axis=1) - res / 2
 
 
-def safe_command(center, yaw, v, w, esdf, origin, res):
+def safe_command(center, yaw, v, w, esdf, origin, res, *, edge=EDGE):
     """First command in (policy, turn in place, turn the other way, creep forward, creep forward
     turning either way, straight back, stop) whose swept footprint keeps GUARD_MARGIN over
     GUARD_HORIZON. When the robot is already closer than the margin, a command also passes if it
@@ -91,11 +92,11 @@ def safe_command(center, yaw, v, w, esdf, origin, res):
     it is hugging instead of freezing. Creeping forward covers a robot backed against a wall, where
     every turn sweeps a rear corner into it."""
     n = int(GUARD_HORIZON / ROLLOUT_DT)
-    now = float(footprint_clearance(rollout(center, yaw, 0.0, 0.0, steps=0), esdf, origin, res)[0])
+    now = float(footprint_clearance(rollout(center, yaw, 0.0, 0.0, steps=0), esdf, origin, res, edge=edge)[0])
     turn = np.sign(w) * max(abs(w), 0.3) if w != 0.0 else 0.3
     options = ((v, w), (0.0, turn), (0.0, -turn), (CREEP_V, 0.0), (CREEP_V, turn), (CREEP_V, -turn), (V_MIN, 0.0))
     for k, (cv, cw) in enumerate(options):
-        clr = footprint_clearance(rollout(center, yaw, cv, cw, steps=n), esdf, origin, res)[1:]
+        clr = footprint_clearance(rollout(center, yaw, cv, cw, steps=n), esdf, origin, res, edge=edge)[1:]
         if clr.min() >= GUARD_MARGIN or (now < GUARD_MARGIN and clr.min() >= max(0.0, now - ESCAPE_TOL)):
             return cv, cw, k
     return 0.0, 0.0, len(options)

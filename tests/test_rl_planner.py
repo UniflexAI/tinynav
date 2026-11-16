@@ -137,3 +137,68 @@ def test_reset_clears_memory_and_trail():
     assert len(planner.hist) == 5 and planner.vel[0] > 0.3 and pol.seen[-1][0][2].max() > 0
     planner.reset()
     assert pol.resets == 2 and planner.hist == [] and not planner.vel.any() and not planner.last_action.any()
+
+
+def test_ppo_clearance_block_does_not_latch_and_resumes_on_clear_map():
+    from tinynav.rl.ppo_planner import RLPlanner as PPOPlanner
+
+    planner = PPOPlanner(FakePolicy([0.4, 0.0]))
+    grid, origin, clear = _scene()
+    blocked = np.zeros_like(clear)
+    pose = _camera_pose(CAM, 0.0, 0.0)
+    goal = np.array([3.0, 0.0])
+    for tick in range(65):
+        v, w, _, _, status = planner.step(grid, origin, pose, tick * 0.2, goal, blocked)
+        assert (v, w, status) == (0.0, 0.0, "clearance blocked")
+    v, _, _, _, status = planner.step(grid, origin, pose, 13.0, goal, clear)
+    assert v > 0 and status == "ok"
+
+
+def test_ppo_distinguishes_nonzero_commands_without_motion():
+    from tinynav.rl.ppo_planner import RLPlanner as PPOPlanner
+
+    planner = PPOPlanner(FakePolicy([0.4, 0.0]))
+    grid, origin, clear = _scene()
+    pose = _camera_pose(CAM, 0.0, 0.0)
+    goal = np.array([3.0, 0.0])
+    statuses = [
+        planner.step(grid, origin, pose, tick * 0.2, goal, clear)[4]
+        for tick in range(100)
+    ]
+    assert all(status == "ok" for status in statuses[:50])
+    assert "recovery no motion" in statuses
+    assert statuses[-1] == "stuck"
+
+
+def test_ppo_uses_configured_extents_and_control_center():
+    from tinynav.rl.ppo_planner import PPOGeometry, RLPlanner as PPOPlanner
+
+    grid, origin, esdf = _scene(wall_x=0.70)
+    pose = _camera_pose(CAM, 0.0, 0.0)
+    goal = np.array([3.0, 0.0])
+    default = PPOPlanner(FakePolicy([0.2, 0.0]))
+    configured = PPOPlanner(FakePolicy([0.2, 0.0]), PPOGeometry(.25, .35, .15, .05, .07))
+    assert default.step(grid, origin, pose, 0.0, goal, esdf)[4] != "ok"
+    v, w, poses, _, status = configured.step(grid, origin, pose, 0.0, goal, esdf)
+    assert np.allclose(poses[0], [.05, .07, 0])
+    assert np.isclose(v, .2) and w == 0 and status == "ok"
+
+
+def test_ppo_recovery_veto_rechecks_the_next_obstacle_map():
+    from tinynav.rl.ppo_planner import RLPlanner as PPOPlanner
+
+    planner = PPOPlanner(FakePolicy([0.4, 0.0]))
+    grid, origin, clear = _scene()
+    pose = _camera_pose(CAM, 0.0, 0.0)
+    goal = np.array([3.0, 0.0])
+    for tick in range(60):
+        *_, status = planner.step(grid, origin, pose, tick * 0.2, goal, clear)
+        if status.startswith("recovery 1/"):
+            break
+    else:
+        raise AssertionError("Expected a recovery after continuous commands without movement")
+
+    v, w, _, _, status = planner.step(grid, origin, pose, (tick + 1) * 0.2, goal, np.zeros_like(clear))
+    assert (v, w, status) == (0.0, 0.0, "clearance blocked")
+    v, _, _, _, status = planner.step(grid, origin, pose, (tick + 2) * 0.2, goal, clear)
+    assert v > 0 and status == "ok"
