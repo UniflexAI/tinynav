@@ -102,9 +102,8 @@ class VideoDB:
         if frame_idx < 0 or not os.path.exists(self.video_path):
             return None
         if self._video_reader is None:
-            # Opened on the first read, not with the DB: a reader starts a decoder thread
-            # per core, and a DB opened only for its shelves (relocalization) never reads
-            # a frame. Each thread leaves a malloc arena behind when it exits.
+            # On the first read: a reader starts a decoder thread per core, and a DB opened
+            # for its shelves alone never reads a frame.
             self._video_reader = decord.VideoReader(self.video_path)
         if frame_idx >= len(self._video_reader):
             return None
