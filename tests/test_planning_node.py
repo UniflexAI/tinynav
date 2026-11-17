@@ -294,23 +294,23 @@ if __name__ == "__main__":
     print("Route field tests passed.")
 
 
-# --- climb region: cells judged by height above the map's ground -------------
+# --- climb region: cells judged by height above the ground they show -----------
 
 def _riser_grid(height_m, config, resolution=0.05):
-    """3x3 cells; the centre one holds occupancy from the ground up to height_m."""
+    """3x3 cells; the centre one holds occupancy from the band's bottom up to height_m."""
     z_layers = int(round((config.robot_z_top - config.robot_z_bottom) / resolution))
     grid = np.zeros((3, 3, z_layers))
     grid[1, 1, :int(round(height_m / resolution))] = 0.2
     return grid, np.array([0.0, 0.0, config.robot_z_bottom])
 
 
-def _ground(cell, z):
-    m = np.full((3, 3), np.nan)
-    m[cell] = z
+def _region(cell):
+    m = np.zeros((3, 3), dtype=bool)
+    m[cell] = True
     return m
 
 
-def test_a_riser_on_the_known_ground_is_a_step_and_only_there():
+def test_a_riser_from_the_floor_is_a_step_in_the_climb_region_and_only_there():
     from planning_node import build_obstacle_map
     from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
@@ -318,51 +318,54 @@ def test_a_riser_on_the_known_ground_is_a_step_and_only_there():
     args = (grid, origin, 0.05)
     assert build_obstacle_map(*args, robot_z=0.0, config=config)[1, 1]
     assert not build_obstacle_map(*args, robot_z=0.0, config=config,
-                                  ground_map=_ground((1, 1), origin[2]))[1, 1]
-    # a ground known somewhere else leaves this cell to the span filter
+                                  climb_region=_region((1, 1)))[1, 1]
+    # a region somewhere else leaves this cell to the span filter
     assert build_obstacle_map(*args, robot_z=0.0, config=config,
-                              ground_map=_ground((0, 0), origin[2]))[1, 1]
+                              climb_region=_region((0, 0)))[1, 1]
 
 
-def test_what_rises_a_step_above_the_ground_blocks():
+def test_what_rises_a_step_above_the_floor_blocks():
+    """Measured from the floor, not from the band's bottom: 0.2 m of band over the
+    floor clearance is more than a step."""
     from planning_node import build_obstacle_map
     from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
-    grid, origin = _riser_grid(0.35, config)
+    grid, origin = _riser_grid(0.2, config)
     assert build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config,
-                              ground_map=_ground((1, 1), origin[2]), step_m=0.2)[1, 1]
+                              climb_region=_region((1, 1)), step_m=0.2)[1, 1]
 
 
-def test_mid_climb_a_riser_above_the_robot_is_a_step_on_its_own_ground():
-    """The next riser starts above robot_z_bottom + ground_band_m, where the span
-    filter reads it as floating; on its own ground it is a step."""
+def test_a_tread_above_the_robot_is_its_own_ground():
+    """Mid-climb a tread above the ground band is its own ground; a B2's band is tall
+    enough to hold a step over it."""
     from planning_node import build_obstacle_map
     from tinynav.core.robot_specs import ObstacleConfig
-    config = ObstacleConfig()
+    config = ObstacleConfig(robot_z_bottom=-0.66)
     resolution = 0.05
     grid, origin = _riser_grid(0.0, config, resolution)
-    base = config.ground_band_m + resolution
-    grid[1, 1, int(round(base / resolution)):int(round((base + 0.15) / resolution))] = 0.2
+    base = int(round((config.ground_band_m + resolution) / resolution))
+    grid[1, 1, base:base + 3] = 0.2
     args = (grid, origin, resolution)
     assert build_obstacle_map(*args, robot_z=0.0, config=config)[1, 1]
     assert not build_obstacle_map(*args, robot_z=0.0, config=config,
-                                  ground_map=_ground((1, 1), origin[2] + base))[1, 1]
+                                  climb_region=_region((1, 1)))[1, 1]
+    grid[1, 1, base:base + 6] = 0.2
+    assert build_obstacle_map(*args, robot_z=0.0, config=config,
+                              climb_region=_region((1, 1)))[1, 1]
 
 
-def test_ground_map_takes_the_nearest_climb_point_less_the_camera_height():
+def test_the_climb_region_is_the_cells_near_a_climb_point():
     from planning_node import PlanningNode
     node = PlanningNode.__new__(PlanningNode)
     node._signal_fresh = lambda stamp, window: stamp is not None
     node._climb_stamp_ns, node._climb_region_ttl_ns = 1, 1
     node._climb_region_cells = 2
-    node._camera_height_m = 0.5
-    node._climb_points = np.array([[0.025, 0.025, 1.0], [0.425, 0.025, 2.0]])
-    g = node._ground_map(np.zeros(3), 0.05, (20, 20))
-    assert g[0, 0] == 0.5 and g[2, 0] == 0.5      # nearest is the first point
-    assert g[7, 0] == 1.5 and g[8, 2] == 1.5      # nearest is the second
-    assert np.isnan(g[0, 5]) and np.isnan(g[19, 19])    # beyond the radius
+    node._climb_points = np.array([[0.025, 0.025], [0.425, 0.025]])
+    r = node._climb_region(np.zeros(3), 0.05, (20, 20))
+    assert r[0, 0] and r[2, 0] and r[7, 0] and r[8, 2]
+    assert not r[0, 5] and not r[19, 19]                # beyond the radius
     node._climb_stamp_ns = None
-    assert node._ground_map(np.zeros(3), 0.05, (20, 20)) is None
+    assert node._climb_region(np.zeros(3), 0.05, (20, 20)) is None
 
 
 # --- published Path: the stride cmd_vel_control's dt assumption rests on -----

@@ -126,7 +126,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
-                       ground_map=None, step_m=0.2):
+                       climb_region=None, step_m=0.2):
     """Obstacle = cells where occupied voxels span >= min_wall_span_m in z.
     The span filter only applies to cells whose lowest occupied voxel sits near
     the ground (within ground_band_m of robot_z_bottom): walls have large z-span
@@ -135,12 +135,8 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
     single-voxel span threshold (resolution) just to reject single-voxel
     noise, so real low-profile obstacles are still kept.
 
-    `ground_map` is an optional (h,w) array of where the ground is in each cell (world
-    z, NaN where unknown). A cell with a ground is judged by height alone: an obstacle
-    is occupancy at least `step_m` above that ground. That is how a staircase reads as
-    steps -- its ground rises with it, so neither the span filter nor the ground band,
-    both measured from the robot, applies there. Cells without one keep the rules
-    above; the caller owns where the ground is known."""
+    `climb_region`: optional (h,w) bool of cells on stairs or a ramp, where an obstacle is
+    occupancy `step_m` above the ground the cell itself shows (docs/gotchas.md in pilot)."""
     config = config or ObstacleConfig()
     h, w, z_dim = occupancy_grid.shape
     z_world = origin[2] + (np.arange(z_dim) + 0.5) * resolution
@@ -166,11 +162,12 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
                            z_span >= config.min_wall_span_m,
                            z_span >= resolution)
         obstacle = has_occ & span_ok
-        if ground_map is not None:
-            known = np.isfinite(ground_map)
-            above = z_world[z_mask][np.newaxis, np.newaxis, :] >= (
-                np.where(known, ground_map, np.inf) + step_m)[:, :, np.newaxis]
-            obstacle = np.where(known, np.any(band_occ & above, axis=2), obstacle)
+        if climb_region is not None:
+            # Above the cell's own lowest voxel, or the floor when it reaches the band's
+            # bottom; an empty cell's span is negative.
+            top = z_rel_band[np.clip(occ_high, 0, n_z - 1).astype(np.int64)]
+            rise = np.where(occ_low == 0, top - config.robot_z_bottom + FLOOR_CLEARANCE_M, z_span)
+            obstacle = np.where(climb_region, rise >= step_m, obstacle)
 
     if config.dilation_cells > 0 and np.any(obstacle):
         obstacle = binary_dilation(obstacle, iterations=config.dilation_cells)
@@ -1098,29 +1095,19 @@ class PlanningNode(Node):
         # The last metres of route, where the target is the goal rather than a carrot.
         self.route_terminal_band = 0.5
 
-        # Climb region: the capture camera's positions, in this grid's frame, where the
-        # map says the path climbed (tinynav-pilot's path_prior plugin). Each cell near
-        # them takes its ground from the nearest one, the camera's height below it, and
-        # is judged by height above that ground (build_obstacle_map); everything beside
-        # the staircase keeps the strict default. No message, or a stale stream, means
-        # no region. The radius is deliberately small: a cell in it cannot see an
-        # obstacle lower than the step, and the labels that open these regions are
-        # inferred from path z, which VIO drift fakes. The region also trusts the map's
-        # z: a capture that crossed the same stairs twice without closing the loop puts
-        # the ground where one pass saw it. A ROS parameter, so a site can be retuned
-        # from the launch without a code edit.
+        # Climb region: where the map says the path climbed (tinynav-pilot's path_prior),
+        # as xy; no message, or a stale stream, means none. Small: a cell in it cannot
+        # see an obstacle lower than the step. A ROS parameter, retuned from the launch.
         self.declare_parameter('climb_region_radius_m', 0.75)
         self._climb_region_cells = int(round(
             float(self.get_parameter('climb_region_radius_m').value) / self.resolution))
         self.declare_parameter('climb_region_ttl_s', 3.0)
         self._climb_region_ttl_ns = int(float(self.get_parameter('climb_region_ttl_s').value) * 1e9)
-        # Above the ground a riser and the nearest-point ground spread over: a cell
-        # holding the edge of a step sees both treads.
+        # Above its own ground, what a cell may hold and still be a step: a cell on
+        # the edge of a step sees both treads.
         self.declare_parameter('climb_step_m', 0.2)
         self._climb_step_m = float(self.get_parameter('climb_step_m').value)
-        # The camera's height above the floor its band was set from (robot_specs).
-        self._camera_height_m = FLOOR_CLEARANCE_M - self.obstacle_config.robot_z_bottom
-        self._climb_points = np.empty((0, 3))
+        self._climb_points = np.empty((0, 2))
         self._climb_stamp_ns = None
         self.create_subscription(PointCloud, '/planning/climb_region',
                                  self.climb_region_callback, 10)
@@ -1160,30 +1147,25 @@ class PlanningNode(Node):
         # An empty cloud is a real answer ("no region here"), not a missed message:
         # only the stamp decides freshness.
         self._climb_points = np.array(
-            [[p.x, p.y, p.z] for p in msg.points], dtype=np.float64).reshape(-1, 3)
+            [[p.x, p.y] for p in msg.points], dtype=np.float64).reshape(-1, 2)
         self._climb_stamp_ns = self.get_clock().now().nanoseconds
 
-    def _ground_map(self, origin, resolution, shape):
-        """Per-cell ground z for build_obstacle_map (NaN off the region), or None when
-        there is no fresh region at all.
-
-        A cell within climb_region_radius_m of a climb point takes that nearest point's
-        z less the camera height. The radius is the whole of the look-ahead: the
-        labelling window already extends the region ~1m back along the path."""
+    def _climb_region(self, origin, resolution, shape):
+        """The cells within climb_region_radius_m of a climb point, or None when there is
+        no fresh region at all."""
         if not self._signal_fresh(self._climb_stamp_ns, self._climb_region_ttl_ns):
             return None
         pts = self._climb_points
         if not len(pts):
             return None
-        ground = np.full(shape, np.nan)
-        idx = np.floor((pts[:, :2] - origin[:2]) / resolution).astype(np.int64)
+        seeds = np.zeros(shape, dtype=bool)
+        idx = np.floor((pts - origin[:2]) / resolution).astype(np.int64)
         inside = np.all((idx >= 0) & (idx < np.array(shape)), axis=1)
         if not inside.any():
             return None
-        ground[idx[inside, 0], idx[inside, 1]] = pts[inside, 2] - self._camera_height_m
-        # Each cell's nearest seed, at a cost independent of how many points came in.
-        dist, (ni, nj) = distance_transform_edt(np.isnan(ground), return_indices=True)
-        return np.where(dist <= self._climb_region_cells, ground[ni, nj], np.nan)
+        seeds[idx[inside, 0], idx[inside, 1]] = True
+        # At a cost independent of how many points came in.
+        return distance_transform_edt(~seeds) <= self._climb_region_cells
 
     def speed_cap_callback(self, msg):
         self._speed_cap = float(msg.data)
@@ -1398,15 +1380,15 @@ class PlanningNode(Node):
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
     def build_obstacle_and_esdf(self, T):
-        ground_map = self._ground_map(self.origin, self.resolution,
-                                      self.occupancy_grid.shape[:2])
+        climb_region = self._climb_region(self.origin, self.resolution,
+                                          self.occupancy_grid.shape[:2])
         obstacle_mask = build_obstacle_map(
             self.occupancy_grid, self.origin, self.resolution,
-            robot_z=T[2, 3], config=self.obstacle_config, ground_map=ground_map,
+            robot_z=T[2, 3], config=self.obstacle_config, climb_region=climb_region,
             step_m=self._climb_step_m,
         )
         ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
-        return ground_map, obstacle_mask, ESDF_map
+        return climb_region, obstacle_mask, ESDF_map
 
     def generate_trajectories(self, init_p, init_q, v_allow, extra_turn=None):
         """(trajectories, params, durations, is_turn): the lattice, rotate-then-go and
@@ -1479,7 +1461,7 @@ class PlanningNode(Node):
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            ground_map, obstacle_mask, ESDF_map = self.build_obstacle_and_esdf(T)
+            climb_region, obstacle_mask, ESDF_map = self.build_obstacle_and_esdf(T)
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
@@ -1631,7 +1613,7 @@ class PlanningNode(Node):
                 f'route_err={np.rad2deg(end_heading_errs[sel]):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
                 f'should_reverse={should_reverse} follow={follow} '
-                f'climb_cells={0 if ground_map is None else int(np.isfinite(ground_map).sum())}'
+                f'climb_cells={0 if climb_region is None else int(climb_region.sum())}'
             )
 
             # velocity feedforward for cmd_vel_control: (vx, omega) of the selected
