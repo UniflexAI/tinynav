@@ -19,9 +19,7 @@ from planning_node import (run_raycasting_loopy, build_route_fields, score_traje
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
                            generate_trajectory_library_3d, heading_of_pose7, angle_between,
-                           route_left_at, around_obstacles, route_blocked_ahead,
-                           goal_speed_cap)
-from types import SimpleNamespace
+                           route_left_at, around_obstacles, route_blocked_ahead)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -296,23 +294,23 @@ if __name__ == "__main__":
     print("Route field tests passed.")
 
 
-# --- climb region: per-cell relaxation of the obstacle span filter -----------
+# --- climb region: cells judged by height above the map's ground -------------
 
 def _riser_grid(height_m, config, resolution=0.05):
-    """3x3 cells; the centre one holds occupancy from the band bottom up to height_m."""
+    """3x3 cells; the centre one holds occupancy from the ground up to height_m."""
     z_layers = int(round((config.robot_z_top - config.robot_z_bottom) / resolution))
     grid = np.zeros((3, 3, z_layers))
     grid[1, 1, :int(round(height_m / resolution))] = 0.2
     return grid, np.array([0.0, 0.0, config.robot_z_bottom])
 
 
-def _span_map(config, relaxed_cell, relaxed=0.3):
-    m = np.full((3, 3), config.min_wall_span_m)
-    m[relaxed_cell] = relaxed
+def _ground(cell, z):
+    m = np.full((3, 3), np.nan)
+    m[cell] = z
     return m
 
 
-def test_min_span_map_relaxes_only_the_cells_it_covers():
+def test_a_riser_on_the_known_ground_is_a_step_and_only_there():
     from planning_node import build_obstacle_map
     from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
@@ -320,48 +318,51 @@ def test_min_span_map_relaxes_only_the_cells_it_covers():
     args = (grid, origin, 0.05)
     assert build_obstacle_map(*args, robot_z=0.0, config=config)[1, 1]
     assert not build_obstacle_map(*args, robot_z=0.0, config=config,
-                                  min_span_map=_span_map(config, (1, 1)))[1, 1]
-    # relaxing somewhere else must not relax this cell -- the whole point of going
-    # per-cell instead of switching the threshold globally
+                                  ground_map=_ground((1, 1), origin[2]))[1, 1]
+    # a ground known somewhere else leaves this cell to the span filter
     assert build_obstacle_map(*args, robot_z=0.0, config=config,
-                              min_span_map=_span_map(config, (0, 0)))[1, 1]
+                              ground_map=_ground((0, 0), origin[2]))[1, 1]
 
 
-def test_min_span_map_still_blocks_taller_verticals():
+def test_what_rises_a_step_above_the_ground_blocks():
     from planning_node import build_obstacle_map
     from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
-    grid, origin = _riser_grid(0.35, config)   # above the relaxed threshold
+    grid, origin = _riser_grid(0.35, config)
     assert build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config,
-                              min_span_map=_span_map(config, (1, 1)))[1, 1]
+                              ground_map=_ground((1, 1), origin[2]), step_m=0.2)[1, 1]
 
 
-def test_min_span_map_relaxes_floating_steps():
-    """Mid-climb the next riser floats above the band bottom; a relaxed cell must
-    still read it as a step, not dismiss it as out-of-reach noise."""
+def test_mid_climb_a_riser_above_the_robot_is_a_step_on_its_own_ground():
+    """The next riser starts above robot_z_bottom + ground_band_m, where the span
+    filter reads it as floating; on its own ground it is a step."""
     from planning_node import build_obstacle_map
     from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
     resolution = 0.05
     grid, origin = _riser_grid(0.0, config, resolution)
-    lo = int(round(0.10 / resolution))              # starts 0.10 above the band bottom
-    hi = int(round(0.25 / resolution))              # 0.15m riser, below the relaxed threshold
-    grid[1, 1, lo:hi] = 0.2
+    base = config.ground_band_m + resolution
+    grid[1, 1, int(round(base / resolution)):int(round((base + 0.15) / resolution))] = 0.2
     args = (grid, origin, resolution)
     assert build_obstacle_map(*args, robot_z=0.0, config=config)[1, 1]
     assert not build_obstacle_map(*args, robot_z=0.0, config=config,
-                                  min_span_map=_span_map(config, (1, 1)))[1, 1]
+                                  ground_map=_ground((1, 1), origin[2] + base))[1, 1]
 
 
-def test_no_min_span_map_is_the_strict_default():
-    from planning_node import build_obstacle_map
-    from tinynav.core.robot_specs import ObstacleConfig
-    config = ObstacleConfig()
-    grid, origin = _riser_grid(0.15, config)
-    assert np.array_equal(
-        build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config),
-        build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config,
-                           min_span_map=None))
+def test_ground_map_takes_the_nearest_climb_point_less_the_camera_height():
+    from planning_node import PlanningNode
+    node = PlanningNode.__new__(PlanningNode)
+    node._signal_fresh = lambda stamp, window: stamp is not None
+    node._climb_stamp_ns, node._climb_region_ttl_ns = 1, 1
+    node._climb_region_cells = 2
+    node._camera_height_m = 0.5
+    node._climb_points = np.array([[0.025, 0.025, 1.0], [0.425, 0.025, 2.0]])
+    g = node._ground_map(np.zeros(3), 0.05, (20, 20))
+    assert g[0, 0] == 0.5 and g[2, 0] == 0.5      # nearest is the first point
+    assert g[7, 0] == 1.5 and g[8, 2] == 1.5      # nearest is the second
+    assert np.isnan(g[0, 5]) and np.isnan(g[19, 19])    # beyond the radius
+    node._climb_stamp_ns = None
+    assert node._ground_map(np.zeros(3), 0.05, (20, 20)) is None
 
 
 # --- published Path: the stride cmd_vel_control's dt assumption rests on -----
@@ -617,8 +618,10 @@ def test_a_cell_under_the_body_is_reported_as_a_body_hit():
     leaves the current pose can only be inf if a footprint sample is already on an
     obstacle cell. Sampled through the shipped lattice, so a cell has to land on a
     sample -- exactly the condition the scorer uses."""
-    fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
-    off_fwd, off_lat = footprint_lattice(fl, rl, hw, ROBOT_CONFIG.safety_radius)
+    # The model's own footprint, which `_footprint_hits` samples: a hard-coded one
+    # stops landing on a sample when the model's numbers change.
+    off_fwd, off_lat = footprint_lattice(*ROBOT_CONFIG.footprint_from_control(),
+                                         ROBOT_CONFIG.safety_radius)
     on_sample = (float(off_fwd[3]), float(off_lat[3]))
     hits, n = _hits_at(on_sample)
     assert hits, f'a cell on sample {on_sample} was not seen'
@@ -634,11 +637,10 @@ def test_a_cell_beyond_the_footprint_is_not_a_body_hit():
 
 def test_the_report_names_where_the_hits_are():
     """Scattered singles are odometry-drift phantoms; a blob is a real obstacle.
-    The offsets are the only way to tell, so they have to be in the line. Sampled
-    through the ROBOT_CONFIG lattice -- a hardcoded point is not on the scored
-    lattice of every model (a go2-sized point is not a b2 lattice sample)."""
-    fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
-    off_fwd, off_lat = footprint_lattice(fl, rl, hw, ROBOT_CONFIG.safety_radius)
+    The offsets are the only way to tell, so they have to be in the line."""
+    from planning_node import PlanningNode
+    off_fwd, off_lat = footprint_lattice(*ROBOT_CONFIG.footprint_from_control(),
+                                         ROBOT_CONFIG.safety_radius)
     hits, n = _hits_at((float(off_fwd[3]), float(off_lat[3])))
     line = PlanningNode._hits_report(hits, n)
     assert 'body_hits=%d/%d' % (len(hits), n) in line
@@ -646,11 +648,10 @@ def test_the_report_names_where_the_hits_are():
     assert PlanningNode._hits_report([], n) == 'body_hits=0/%d' % n
 
 
-# --- sampling/execution decoupling: the execution half --------------------------
-
-def _plan_and_publish_src():
+def _sync_callback_src():
     src = open(os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core',
                             'planning_node.py')).read()
+    # The planning tail is split out so the lidar callback shares it too.
     return next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
                 and n.name == '_plan_and_publish')
 
@@ -660,7 +661,7 @@ def test_the_all_collision_branch_publishes_nothing():
     is already on an obstacle cell and every trajectory is inf whichever way it
     points. There is no direction in the scores, so an escape there would be
     blind -- and a reverse row published from it was dead code."""
-    fn = _plan_and_publish_src()
+    fn = _sync_callback_src()
     allcoll = next(n for n in ast.walk(fn) if isinstance(n, ast.If)
                    and isinstance(n.test, ast.Call)
                    and getattr(n.test.func, 'id', None) == 'all')
@@ -860,16 +861,6 @@ def test_footprint_cells_cover_the_body_along_its_heading():
 
 # --- the time cost ---------------------------------------------------------------
 
-def test_the_time_cost_arrives_where_map_node_does():
-    src = open(os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core', 'map_node.py')).read()
-    node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
-                and getattr(n.targets[0], 'id', None) == '_ARRIVE_M')
-    assert ast.unparse(node.value) == 'ROBOT_CONFIG.arrival_radius'
-    assert ARRIVE_M == ROBOT_CONFIG.planned_arrival_radius < ROBOT_CONFIG.arrival_radius
-    assert "os.environ.get('TINYNAV_ARRIVE_TICKS', '%d')" % ARRIVE_TICKS in src
-    assert 'create_timer(%s, self.nav_target_timer_callback)' % ARRIVE_TICK_S in src
-
-
 def test_the_time_cost_arrives_on_the_tick_map_node_does():
     """Closing on a target, the scorer's arrival lands on the first sample whose
     camera pose is inside map_node's circles (RobotConfig.arrival_distance) at ARRIVE_M: nose
@@ -1043,29 +1034,3 @@ def test_an_obstacle_beside_behind_or_past_the_stop_pose_does_not():
     assert not _blocked_with_box_at(2.0, 3.0)         # clears the body
     assert not _blocked_with_box_at(0.6, 2.5)         # behind the robot
     assert not _blocked_with_box_at(4.0, 2.5)         # past the stop pose
-
-
-
-# --- goal-proximity trapezoid (the arrival brake) --------------------------------
-
-_FAR_M, _NEAR_M, _FAR_V, _NEAR_V = 1.0, 0.3, 0.6, 0.3
-
-
-def test_goal_speed_cap_holds_the_rig_anchors():
-    # the two numbers the schedule was tuned to: 1 m -> 0.6 m/s, 0.3 m -> 0.3 m/s
-    assert goal_speed_cap(1.0, _FAR_M, _NEAR_M, _FAR_V, _NEAR_V) == 0.6
-    assert goal_speed_cap(0.3, _FAR_M, _NEAR_M, _FAR_V, _NEAR_V) == 0.3
-
-
-def test_goal_speed_cap_floors_below_the_ramp_and_is_linear_on_it():
-    cap = lambda d: goal_speed_cap(d, _FAR_M, _NEAR_M, _FAR_V, _NEAR_V)
-    assert cap(0.05) == 0.3                      # the floor holds to the arrival circle
-    assert abs(cap(0.65) - 0.45) < 1e-9          # linear between the anchors
-    assert cap(0.9) > cap(0.5)
-
-
-def test_goal_speed_cap_leaves_the_open_to_the_clearance_schedule():
-    # beyond the ramp start there is no cap at all -- not 0.6: the capture
-    # prior / operator speed still governs the cruise
-    assert goal_speed_cap(1.5, _FAR_M, _NEAR_M, _FAR_V, _NEAR_V) is None
-    assert goal_speed_cap(1.01, _FAR_M, _NEAR_M, _FAR_V, _NEAR_V) is None

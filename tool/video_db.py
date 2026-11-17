@@ -41,8 +41,6 @@ class VideoDB:
             self._container = av.open(self.video_path, mode="w")
         else:
             self.ts_to_idx = self._load_meta()
-            if os.path.exists(self.video_path):
-                self._video_reader = decord.VideoReader(self.video_path)
 
     def _ensure_writer_stream(self, image: np.ndarray):
         h, w = image.shape[:2]
@@ -104,7 +102,9 @@ class VideoDB:
         if frame_idx < 0 or not os.path.exists(self.video_path):
             return None
         if self._video_reader is None:
-            return None
+            # On the first read: a reader starts a decoder thread per core, and a DB opened
+            # for its shelves alone never reads a frame.
+            self._video_reader = decord.VideoReader(self.video_path)
         if frame_idx >= len(self._video_reader):
             return None
         frame = self._video_reader[frame_idx].asnumpy()
@@ -132,6 +132,7 @@ class VideoDB:
         return image
 
     def close(self):
+        self._video_reader = None
         if self.mode == "write":
             if self._stream is not None:
                 for pkt in self._stream.encode(None):

@@ -1,0 +1,232 @@
+"""Bag checks: which sensor recorded it, what map building needs, and USB evidence on the host clock."""
+import contextlib
+import io
+import json
+from pathlib import Path
+import sqlite3
+import struct
+import tempfile
+import unittest
+from unittest.mock import patch
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tool'))
+from check_camera_bag import (
+    correlate_usb, header_stamp, inspect_bag, main, read_kernel, resolve_bag,
+)
+
+START = 1_700_000_000_000_000_000
+CAM = "/camera/camera"
+LOOPER = ("infra1/image_rect_raw", "depth/image_rect_raw", "vio_image",
+          "color/image_rect_raw/compressed", "infra1/camera_info", "color/camera_info")
+REALSENSE = ("infra1/image_rect_raw", "infra2/image_rect_raw", "imu",
+             "color/image_raw", "infra2/camera_info", "color/camera_info")
+TIMES = (0, .1, .2, .3)
+
+
+def cdr(stamp, little=True):
+    sec, ns = divmod(stamp, 1_000_000_000)
+    return bytes([0, int(little), 0, 0]) + struct.pack("<iI" if little else ">iI", sec, ns)
+
+
+def fixture(directory, suffixes=LOOPER, times=None, offsets=None, tf=True):
+    """A bag with each suffix at TIMES; `times` and `offsets` (header minus receive, s) per suffix."""
+    times, offsets = times or {}, offsets or {}
+    path = Path(directory)
+    path.mkdir(exist_ok=True)
+    (path / "metadata.yaml").write_text("rosbag2_bagfile_information: {}\n")
+    with sqlite3.connect(path / "bag_0.db3") as db:
+        db.execute("CREATE TABLE topics (id INTEGER PRIMARY KEY, name TEXT)")
+        db.execute("CREATE TABLE messages (topic_id INTEGER, timestamp INTEGER, data BLOB)")
+        names = [f"{CAM}/{s}" for s in suffixes] + ["/tf_static"]
+        for tid, name in enumerate(names, 1):
+            db.execute("INSERT INTO topics VALUES (?,?)", (tid, name))
+        for tid, suffix in enumerate(suffixes, 1):
+            for seconds in times.get(suffix, TIMES):
+                ns = round(seconds * 1e9)
+                header = 100 * 10**9 + ns + round(offsets.get(suffix, 0) * 1e9)
+                db.execute("INSERT INTO messages VALUES (?,?,?)", (tid, START + ns, cdr(header)))
+        if tf:
+            db.execute("INSERT INTO messages VALUES (?,?,?)", (len(names), START, b"tf"))
+    return path
+
+
+def kernel(*rows):
+    return {"status": "supplied", "source": "test", "note": "",
+            "text": "\n".join(json.dumps({
+                "__REALTIME_TIMESTAMP": str((START + round(seconds * 1e9)) // 1000),
+                "MESSAGE": message,
+            }) for seconds, message in rows)}
+
+
+class CameraBagCheckTest(unittest.TestCase):
+    def test_plain_cdr_endianness_and_malformed_headers(self):
+        stamp = 101_123_456_789
+        self.assertEqual(header_stamp(cdr(stamp)), stamp)
+        self.assertEqual(header_stamp(cdr(stamp, False)), stamp)
+        self.assertIsNone(header_stamp(b"short"))
+        self.assertIsNone(header_stamp(bytes([0, 1, 0, 0]) + struct.pack("<iI", 1, 10**9)))
+
+    def test_good_looper_bag_and_no_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = fixture(directory)
+            before = {p.name: (p.stat().st_size, p.stat().st_mtime_ns) for p in path.iterdir()}
+            report = inspect_bag(path)
+            self.assertEqual(report["warnings"], [])
+            self.assertEqual(report["mode"], "looper")
+            self.assertEqual(report["pairing"]["pct"], 100)
+            self.assertEqual(report["color"]["pct"], 100)
+            self.assertEqual(report["tf_count"]["/tf_static"], 1)
+            self.assertEqual(before, {
+                p.name: (p.stat().st_size, p.stat().st_mtime_ns) for p in path.iterdir()})
+
+    def test_good_realsense_bag_pairs_within_slop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = inspect_bag(fixture(directory, REALSENSE, offsets={
+                "infra2/image_rect_raw": .005, "color/image_raw": .015}))
+            self.assertEqual(report["mode"], "realsense")
+            self.assertEqual(report["warnings"], [])
+            self.assertEqual(report["pairing"]["pct"], 100)
+            self.assertEqual(report["color"]["pct"], 100)
+
+    def test_looper_pairing_is_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = inspect_bag(fixture(directory, offsets={"vio_image": .001}))
+            self.assertEqual(report["pairing"]["pct"], 0)
+            self.assertTrue(any("pairing below" in w for w in report["warnings"]))
+
+    def test_colour_too_far_from_keyframes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = inspect_bag(fixture(directory, offsets={
+                "color/image_rect_raw/compressed": .03}))
+            self.assertEqual(report["color"]["pct"], 0)
+            self.assertTrue(any("colour within" in w for w in report["warnings"]))
+
+    def test_missing_colour_is_a_missing_required_topic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = inspect_bag(fixture(directory, LOOPER, times={
+                "color/image_rect_raw/compressed": ()}))
+            self.assertEqual(report["mode"], "looper")
+            self.assertIn(f"{CAM}/color/image_rect_raw/compressed", report["missing"])
+            gaps = report["topics"][f"{CAM}/color/image_rect_raw/compressed"]["gaps"]
+            self.assertEqual(gaps[0]["boundary"], "whole_bag")
+
+    def test_old_looper_firmware_and_unknown_sensor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = fixture(root / "old", LOOPER, times={"vio_image": ()})
+            with sqlite3.connect(path / "bag_0.db3") as db:
+                db.execute("INSERT INTO topics VALUES (99, '/insight/vio_20hz')")
+                db.execute("INSERT INTO messages VALUES (99, ?, ?)", (START, cdr(START)))
+            report = inspect_bag(path)
+            self.assertEqual(report["mode"], "looper")
+            self.assertIn("older Looper", report["mode_reason"])
+            self.assertIn(f"{CAM}/vio_image", report["missing"])
+            report = inspect_bag(fixture(root / "infra", ("infra1/image_rect_raw",)))
+            self.assertEqual(report["mode"], "unknown")
+            self.assertIsNone(report["pairing"])
+            self.assertTrue(any("Unknown sensor" in w for w in report["warnings"]))
+
+    def test_forced_mode_disagreeing_with_topics_warns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = inspect_bag(fixture(directory), mode="realsense")
+            self.assertEqual(report["mode"], "realsense")
+            self.assertEqual(report["mode_detected"], "looper")
+            self.assertTrue(any("look like looper" in w for w in report["warnings"]))
+
+    def test_dropout_and_usb_correlation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = fixture(directory, times={s: (0, .1, 8.1, 8.2) for s in LOOPER})
+            report = inspect_bag(path)
+            self.assertEqual(report["pairing"]["pct"], 100)
+            gaps = report["topics"][f"{CAM}/vio_image"]["gaps"]
+            self.assertEqual(gaps[0]["duration_s"], 8)
+            self.assertTrue(any("missing interval" in w for w in report["warnings"]))
+            logs = kernel((.2, "cdc_ncm 2-1.2:1.0 enx020000000a01: unregister 'cdc_ncm'"),
+                          (.3, "usb 2-1.2: USB disconnect, device number 8"),
+                          (.4, "usb 1-3: USB disconnect, device number 2"),
+                          (8, "usb 2-1.2: new SuperSpeed USB device number 9"))
+            result = correlate_usb(report, logs)
+            self.assertEqual(result["port"], "2-1.2")
+            self.assertEqual(len(result["gap_correlations"]), 4)
+            self.assertTrue(all(e["port"] == "2-1.2" for m in result["gap_correlations"]
+                                for e in m["usb_events"]))
+
+    def test_unrelated_port_does_not_prove_camera_dropout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = inspect_bag(fixture(directory, times={s: (0, .1, 8.1) for s in LOOPER}))
+            result = correlate_usb(report, kernel((.2, "usb 1-3: USB disconnect, device number 2")),
+                                   port="2-1.2")
+            self.assertEqual(result["gap_correlations"], [])
+
+    def test_malformed_header_at_same_receive_time_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = fixture(directory)
+            with sqlite3.connect(path / "bag_0.db3") as db:
+                db.execute("INSERT INTO messages VALUES (1, ?, ?)", (START, b"bad"))
+            report = inspect_bag(path)
+            self.assertEqual(report["topics"][f"{CAM}/infra1/image_rect_raw"]["invalid_headers"], 1)
+            self.assertTrue(any("malformed headers" in w for w in report["warnings"]))
+
+    def test_missing_static_tf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = inspect_bag(fixture(directory, tf=False))
+            self.assertTrue(any("/tf_static" in w for w in report["warnings"]))
+
+    def test_split_bags_combine_topic_ids_by_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture(root / "a", times={s: (0, .1) for s in LOOPER})
+            fixture(root / "b", times={s: (.2, .3) for s in LOOPER})
+            (root / "a/bag_0.db3").rename(root / "bag_0.db3")
+            (root / "b/bag_0.db3").rename(root / "bag_1.db3")
+            report = inspect_bag(root)
+            self.assertEqual(len(report["sqlite_integrity"]), 2)
+            self.assertEqual(report["pairing"]["paired"], 4)
+
+    def test_missing_path_does_not_create_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.db3"
+            with self.assertRaises(sqlite3.Error):
+                inspect_bag(path)
+            self.assertFalse(path.exists())
+            with self.assertRaises(ValueError):
+                resolve_bag("missing", Path(directory))
+
+    def test_journal_permission_failure_is_unavailable(self):
+        with patch("check_camera_bag.subprocess.run",
+                   return_value=type("Result", (), {
+                       "returncode": 1, "stdout": "", "stderr": "Permission denied"})()):
+            result = read_kernel(START, START + 10**9)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertIn("Permission denied", result["note"])
+
+    def test_journal_command_covers_previous_boots_and_no_records_is_uncertain(self):
+        with patch("check_camera_bag.subprocess.run",
+                   return_value=type("Result", (), {
+                       "returncode": 0, "stdout": "", "stderr": ""})()) as run:
+            result = read_kernel(START, START + 10**9)
+        command = run.call_args.args[0]
+        self.assertIn("_TRANSPORT=kernel", command)
+        self.assertNotIn("-k", command)
+        self.assertNotIn("-b", command)
+        self.assertEqual(result["status"], "no_records")
+
+    def test_cli_json_and_skip_usb(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = fixture(root / "bag")
+            output = root / "report.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = main([str(path), "--skip-usb", "--json", str(output)])
+            self.assertEqual(rc, 0)
+            self.assertEqual(json.loads(output.read_text())["usb"]["status"], "skipped")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = main([str(path), "--skip-usb", "--json", str(path/"metadata.yaml")])
+            self.assertEqual(rc, 2)
+            self.assertTrue((path/"metadata.yaml").read_text().startswith("rosbag2"))
+
+
+if __name__ == "__main__":
+    unittest.main()

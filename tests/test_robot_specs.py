@@ -1,10 +1,11 @@
 import json
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 from tinynav.core import robot_specs
-from tinynav.core.robot_specs import GO2_CONFIG, with_measured_camera
+from tinynav.core.robot_specs import B2_CONFIG, GO2_CONFIG, with_measured_camera
 
 
 def test_no_file_is_the_type_default(tmp_path):
@@ -15,9 +16,20 @@ def test_a_measurement_moves_the_camera_and_nothing_else(tmp_path):
     path = tmp_path / 'camera_offset.json'
     path.write_text(json.dumps({'forward_m': 0.31, 'left_m': -0.04, 'residual_m': 0.01}))
     got = with_measured_camera(GO2_CONFIG, path)
-    assert list(got.cam_offset_3d) == pytest.approx([-0.04, 0.0, 0.31])
+    assert list(got.cam_offset_3d) == pytest.approx([0.04, 0.0, 0.31])   # left is camera -x
     assert got.footprint_from_control() == GO2_CONFIG.footprint_from_control()
     assert got.name == GO2_CONFIG.name
+
+
+def test_a_floor_height_puts_the_band_bottom_above_that_floor(tmp_path):
+    path = tmp_path / 'camera_offset.json'
+    doc = {'forward_m': 0.3, 'left_m': 0.0, 'up_m': 0.6}
+    path.write_text(json.dumps(doc))
+    assert with_measured_camera(GO2_CONFIG, path).obstacle == GO2_CONFIG.obstacle
+    path.write_text(json.dumps({**doc, 'floor_at': '2026-11-04T08:04:32'}))
+    got = with_measured_camera(GO2_CONFIG, path).obstacle
+    assert got.robot_z_bottom == pytest.approx(-(0.6 - robot_specs.FLOOR_CLEARANCE_M))
+    assert replace(got, robot_z_bottom=GO2_CONFIG.obstacle.robot_z_bottom) == GO2_CONFIG.obstacle
 
 
 @pytest.mark.parametrize('body', ['{"forward_m": 0.3}', 'not json', '{"forward_m": "x", "left_m": 0}'])
@@ -35,14 +47,27 @@ def test_only_the_free_gait_has_floors_of_its_own(tmp_path):
     assert replace(classic, **floors) == free
 
 
-def test_known_types_carry_a_config_each():
-    import tinynav.core.robot_specs as specs
-    for t in specs.KNOWN_TYPES:
-        assert hasattr(specs, f'{t.upper()}_CONFIG'), t
-    assert 'as2w' in specs.KNOWN_TYPES
-    # the wheeled AS2 keeps AS2's geometry and only the name changes
-    from dataclasses import fields as dc_fields
-    a2, w = specs.AS2_CONFIG, specs.AS2W_CONFIG
-    for f in dc_fields(a2):
-        if f.name != 'name':
-            assert getattr(a2, f.name) == getattr(w, f.name), f.name
+def test_a_camera_to_the_left_has_the_origin_to_its_right():
+    """cam_offset_3d is in the camera's frame (x right, y down, z forward), as
+    pilot/geometry.camera_from_robot has it: a camera 0.05 m left of the origin puts
+    the origin 0.05 m to the camera's right."""
+    cfg = replace(GO2_CONFIG, camera_fwd=0.3, camera_left=0.05)
+    T = np.eye(4)
+    T[:3, :3] = [[0, 0, 1], [-1, 0, 0], [0, -1, 0]]   # camera z along world +x
+    origin = T[:3, 3] - T[:3, :3] @ cfg.cam_offset_3d
+    assert origin[:2] == pytest.approx([-0.3, -0.05])
+
+
+def test_the_rig_file_sets_the_footprint_by_hand_and_each_part_alone(tmp_path):
+    path = tmp_path / 'camera_offset.json'
+    path.write_text(json.dumps({'front_len': 0.44, 'rear_len': 0.44, 'half_width': 0.175,
+                                'why': 'a reason'}))
+    got = with_measured_camera(B2_CONFIG, path)
+    assert (got.front_len, got.rear_len, got.half_width) == (0.44, 0.44, 0.175)
+    assert got.camera_fwd == B2_CONFIG.camera_fwd and got.obstacle == B2_CONFIG.obstacle
+    path.write_text(json.dumps({'forward_m': 0.3, 'left_m': 0.02, 'front_len': 0.5,
+                                'rear_len': 0.5, 'half_width': 0.2}))
+    got = with_measured_camera(B2_CONFIG, path)
+    assert (got.camera_fwd, got.front_len) == (0.3, 0.5)
+    path.write_text('{"front_len": 0.44}')
+    assert with_measured_camera(B2_CONFIG, path) is B2_CONFIG

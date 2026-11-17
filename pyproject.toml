@@ -34,6 +34,7 @@ dependencies = [
     "pillow>=10.0.0",
     "httpx>=0.27.0",
     "tokenizers>=0.15.0",
+    "onnx", # tinynav/models/patch_flexglue_matcher.py (make flexglue)
 ]
 
 [tool.scikit-build]
@@ -50,10 +51,9 @@ lekiwi =[
     "lerobot[lekiwi]==0.3.3",
 ]
 unitree = [
-    # Discovery-lease fix (ghost readers hold the dog's writer sessions for the
-    # full 100s default): upstream PR unitreerobotics/unitree_sdk2_python#190,
-    # byte-identical to deploy/patches/unitree-sdk2py-814556d-lease. Re-pin to
-    # upstream once #190 merges.
+    # Has the as2 sport client, and the discovery-lease fix (ghost readers hold the
+    # dog's writer sessions for the full 100 s default): upstream PR
+    # unitreerobotics/unitree_sdk2_python#190. Re-pin to upstream once it merges.
     "unitree-sdk2py @ git+https://github.com/zhongyuanguo-code/unitree_sdk2_python.git@cd47a98be4b0699462ca995797169b09710a19a6",
 ]
 3dgs = [
@@ -65,3 +65,7 @@ unitree = [
     "pymeshlab==2022.2.post4",
     "newrawpy<=1.0.0b0",
 ]
+
+[tool.ruff.lint]
+# Pin ruff's classic default rules: CI runs the latest ruff via uvx, and newer releases enable many more.
+select = ["E4", "E7", "E9", "F"]
