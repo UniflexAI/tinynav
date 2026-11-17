@@ -349,7 +349,7 @@ def test_a_tread_above_the_robot_is_its_own_ground():
     assert build_obstacle_map(*args, robot_z=0.0, config=config)[1, 1]
     assert not build_obstacle_map(*args, robot_z=0.0, config=config,
                                   climb_region=_region((1, 1)))[1, 1]
-    grid[1, 1, base:base + 6] = 0.2
+    grid[1, 1, base:base + 8] = 0.2
     assert build_obstacle_map(*args, robot_z=0.0, config=config,
                               climb_region=_region((1, 1)))[1, 1]
 

@@ -126,7 +126,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
-                       climb_region=None, step_m=0.2):
+                       climb_region=None, step_m=0.3):
     """Obstacle = cells where occupied voxels span >= min_wall_span_m in z.
     The span filter only applies to cells whose lowest occupied voxel sits near
     the ground (within ground_band_m of robot_z_bottom): walls have large z-span
@@ -1104,8 +1104,9 @@ class PlanningNode(Node):
         self.declare_parameter('climb_region_ttl_s', 3.0)
         self._climb_region_ttl_ns = int(float(self.get_parameter('climb_region_ttl_s').value) * 1e9)
         # Above its own ground, what a cell may hold and still be a step: a cell on
-        # the edge of a step sees both treads.
-        self.declare_parameter('climb_step_m', 0.2)
+        # the edge of a step sees both treads. A riser is measured from the floor, so a
+        # step the robot climbs reads above its height.
+        self.declare_parameter('climb_step_m', 0.3)
         self._climb_step_m = float(self.get_parameter('climb_step_m').value)
         self._climb_points = np.empty((0, 2))
         self._climb_stamp_ns = None
