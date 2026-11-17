@@ -3,6 +3,8 @@ under their old topic names and types, each only while it has a subscriber.
 Run one instance: two publish every view twice.
 """
 import array
+from dataclasses import replace
+from functools import partial
 
 import cv2
 import numpy as np
@@ -14,10 +16,11 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from scipy.ndimage import distance_transform_edt
 from sensor_msgs.msg import Image, PointCloud, PointCloud2, PointField
-from std_msgs.msg import Header
+from std_msgs.msg import Float32, Header
 
 from tinynav.core.math_utils import msg2np
-from tinynav.core.robot_specs import ROBOT_CONFIG
+from tinynav.core.robot_specs import (ROBOT_CONFIG, FOOTPRINT_SCALE_DIRECTIONS,
+                                      FOOTPRINT_SCALE_IN_USE_TOPIC, FOOTPRINT_SCALE_RANGE)
 
 ESDF_CLOUD_FIELDS = [
     PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
@@ -49,12 +52,15 @@ def esdf_cloud_points(esdf, origin, resolution, max_dist=1.0):
     return points
 
 
-def footprint_points(T, samples=21):
+def footprint_points(T, samples=21, scale=None):
     """The control-frame rectangle's outline in world, `samples` points per edge. The
-    collision footprint, not the body: what the operator sees is what planning checks."""
+    collision footprint, not the body: what the operator sees is what planning checks.
+    `scale` is the footprint_scale planning has in use, (front, rear, width) -- a map's
+    or the rig's -- None for the rig's own."""
     forward, left = T[:3, 2], T[:3, 0]
     center = T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
-    fl, rl, hw = ROBOT_CONFIG.collision_footprint()
+    config = ROBOT_CONFIG if scale is None else replace(ROBOT_CONFIG, footprint_scale=tuple(scale))
+    fl, rl, hw = config.collision_footprint()
     corners = [center + forward * fl + left * hw, center + forward * fl - left * hw,
                center - forward * rl - left * hw, center - forward * rl + left * hw]
     t = (np.arange(samples) / (samples - 1))[:, None]
@@ -76,6 +82,13 @@ class PlanningVisNode(Node):
         self.grid_sub = None
         self.create_subscription(OccupancyGrid, "/planning/obstacle_mask", self.mask_callback, 10)
         self.create_subscription(Odometry, "/slam/odometry_visual", self.odom_callback, 10)
+        # The footprint_scale planning checks with right now, per direction (the loaded
+        # map's, or the rig's), so the outline drawn is the one checked even after a map
+        # changes it. None until planning says: the rig's, which is what planning starts on.
+        self.scale_in_use = None
+        for d in FOOTPRINT_SCALE_DIRECTIONS:
+            self.create_subscription(Float32, FOOTPRINT_SCALE_IN_USE_TOPIC.format(d),
+                                     partial(self.scale_in_use_callback, d), 10)
         # planning sends the grid only while it has a reader: read it only while a cloud is watched
         self.create_timer(1.0, self.sync_grid_subscription)
 
@@ -124,12 +137,24 @@ class PlanningVisNode(Node):
             points = esdf_cloud_points(esdf, origin, resolution)
             self.voxels_esdf_pub.publish(pc2.create_cloud(header, ESDF_CLOUD_FIELDS, points))
 
+    def scale_in_use_callback(self, direction, msg):
+        """One direction's factor in use; the others stay as last said, the rig's until
+        then. A value that is not a factor is not drawn."""
+        lo, hi = FOOTPRINT_SCALE_RANGE
+        value = float(msg.data)
+        if not (np.isfinite(value) and lo <= value <= hi):
+            return
+        scale = list(self.scale_in_use or ROBOT_CONFIG.footprint_scale)
+        scale[FOOTPRINT_SCALE_DIRECTIONS.index(direction)] = round(value, 4)
+        self.scale_in_use = tuple(scale)
+
     def odom_callback(self, msg):
         if self.footprint_pub.get_subscription_count() == 0:
             return
         T, _ = msg2np(msg)
         cloud = PointCloud(header=Header(stamp=msg.header.stamp, frame_id="world"))
-        cloud.points = [Point32(x=float(x), y=float(y), z=float(z)) for x, y, z in footprint_points(T)]
+        cloud.points = [Point32(x=float(x), y=float(y), z=float(z))
+                        for x, y, z in footprint_points(T, scale=self.scale_in_use)]
         self.footprint_pub.publish(cloud)
 
 

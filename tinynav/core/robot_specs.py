@@ -292,6 +292,12 @@ FOOTPRINT_FIELDS = ('front_len', 'rear_len', 'half_width')
 #: The directions footprint_scale has a factor for, in its order: front_len's,
 #: rear_len's and half_width's (both sides together).
 FOOTPRINT_SCALE_DIRECTIONS = ('front', 'rear', 'width')
+#: Where a map's factor arrives, one topic per direction (the pilot plugin `footprint`
+#: publishes the loaded map's, gated by pilot-nav.json's `planner.footprint_scale`
+#: capability; NaN is "this map sets none"), and where planning says the factor it
+#: uses: the map's while fresh, else the rig's.
+FOOTPRINT_SCALE_TOPIC = '/planning/footprint_scale/{}'
+FOOTPRINT_SCALE_IN_USE_TOPIC = '/planning/footprint_scale_in_use/{}'
 #: The factor a rig may set in each direction, the operators' range (2026-11-16): a
 #: scale is for a passage a little narrower than the outline. A bigger body is
 #: FOOTPRINT_FIELDS' job.

@@ -71,7 +71,46 @@ def test_the_footprint_drawn_is_the_one_checked():
     assert np.isclose(np.abs(rel[:, 1]).max(), 0.7 * body[2])
 
 
+def test_the_outline_follows_the_factors_planning_says_it_uses():
+    """A map's factors arrive on planning's in-use topics, one per direction; the
+    outline is drawn at them, so the operator never sees the rig's outline while
+    planning checks the map's."""
+    T = np.eye(4)
+    T[:3, :3] = [[0, 0, 1], [1, 0, 0], [0, 1, 0]]
+    rig = replace(ROBOT_CONFIG, footprint_scale=(1.0, 1.0, 1.0))
+    with mock.patch.object(planning_vis_node, 'ROBOT_CONFIG', rig):
+        full = footprint_points(T)
+        at = footprint_points(T, scale=(1.0, 0.7, 0.6))
+    center = T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
+    fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+    rel = at - center
+    assert np.isclose(rel[:, 0].max(), fl) and np.isclose(rel[:, 0].min(), -0.7 * rl)
+    assert np.isclose(np.abs(rel[:, 1]).max(), 0.6 * hw)
+
+    vis = types.SimpleNamespace(scale_in_use=None)
+    say = planning_vis_node.PlanningVisNode.scale_in_use_callback
+    with mock.patch.object(planning_vis_node, 'ROBOT_CONFIG', rig):
+        say(vis, 'rear', types.SimpleNamespace(data=float(np.float32(0.7))))
+        assert vis.scale_in_use == (1.0, 0.7, 1.0), 'the directions not said yet are the rig\'s'
+        say(vis, 'width', types.SimpleNamespace(data=float(np.float32(0.6))))
+        assert vis.scale_in_use == (1.0, 0.7, 0.6)
+        for not_a_factor in (float('nan'), 0.2, 1.5):
+            say(vis, 'width', types.SimpleNamespace(data=not_a_factor))
+            assert vis.scale_in_use == (1.0, 0.7, 0.6), not_a_factor
+
+        vis.footprint_pub = types.SimpleNamespace(get_subscription_count=lambda: 1,
+                                                  publish=lambda msg: setattr(vis, 'cloud', msg))
+        odom = mock.Mock()
+        odom.header.stamp = Time(sec=1)
+        with mock.patch.object(planning_vis_node, 'msg2np', return_value=(T, None)):
+            planning_vis_node.PlanningVisNode.odom_callback(vis, odom)
+    drawn = np.array([[p.x, p.y, p.z] for p in vis.cloud.points])
+    assert np.allclose(drawn, at, atol=1e-5)
+    assert not np.allclose(drawn, full, atol=1e-3)
+
+
 if __name__ == "__main__":
     test_mask_arrives_as_planning_holds_it()
     test_footprint_outlines_the_control_rectangle()
     test_the_footprint_drawn_is_the_one_checked()
+    test_the_outline_follows_the_factors_planning_says_it_uses()

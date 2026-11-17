@@ -2,9 +2,11 @@
 import ast
 from dataclasses import replace
 import numpy as np
+import pytest
 import time
 import sys
 import os
+import types
 from numba import njit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core'))
@@ -594,8 +596,12 @@ class _EscapeNode:
     change to the lattice or to the sampling reaches this test."""
 
     def __init__(self, obstacle_xy=None, resolution=0.05, origin=(-2.0, -2.0)):
+        import planning_node
         self.resolution = resolution
         self.origin = np.array(origin)
+        # What PlanningNode._use_footprint_scale leaves for the checks: the outline of
+        # planning_node's ROBOT_CONFIG as it is when the stand-in is made.
+        self._collision_fp = planning_node.ROBOT_CONFIG.collision_footprint()
         n = 120
         self.mask = np.zeros((n, n), dtype=bool)
         if obstacle_xy is not None:
@@ -681,8 +687,10 @@ class _Grid:
     score_trajectories = PlanningNode.score_trajectories
 
     def __init__(self, origin, resolution):
+        import planning_node
         self.origin, self.resolution = origin, resolution
         self._traj_dt, self.route_terminal_band = 0.1, 0.5
+        self._collision_fp = planning_node.ROBOT_CONFIG.collision_footprint()
 
 
 _SHAPE, _RES, _ORIGIN = (160, 160), 0.05, np.array([-3.0, -3.0])
@@ -1156,3 +1164,155 @@ def test_planning_reads_the_body_footprint_only_to_log_it():
 
     init = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '__init__')
     assert reads(tree) == reads(init) == 3
+
+
+# --- a map's footprint_scale, per direction, at run time -------------------------------
+DIRECTIONS = ('front', 'rear', 'width')
+
+
+class _Clock:
+    """A ROS clock the test turns by hand."""
+
+    def __init__(self):
+        self.ns = 10 ** 12
+
+    def now(self):
+        return types.SimpleNamespace(nanoseconds=self.ns)
+
+
+def _scale_node(monkeypatch, rig_scale=(1.0, 1.0, 1.0)):
+    """A PlanningNode with only its footprint_scale plumbing, via __new__ so none of
+    __init__'s loading runs: the rig is _BODY at `rig_scale`, the clock is _Clock, and
+    what it says on each in-use topic and what it logs are kept."""
+    import planning_node
+    monkeypatch.setattr(planning_node, 'ROBOT_CONFIG', replace(_BODY, footprint_scale=_three(rig_scale)))
+    node = planning_node.PlanningNode.__new__(planning_node.PlanningNode)
+    clock, said, logged = _Clock(), {d: [] for d in DIRECTIONS}, []
+    node.get_clock = lambda: clock
+    node.get_logger = lambda: types.SimpleNamespace(info=logged.append)
+    node.footprint_scale_in_use_pubs = {
+        d: types.SimpleNamespace(publish=lambda msg, d=d: said[d].append(msg.data)) for d in DIRECTIONS}
+    node._map_footprint_scale_ttl_ns = int(planning_node.MAP_FOOTPRINT_SCALE_TTL_S * 1e9)
+    node._map_footprint_scale = {d: float('nan') for d in DIRECTIONS}
+    node._map_footprint_scale_stamp_ns = {d: None for d in DIRECTIONS}
+    node._use_footprint_scale(_three(rig_scale))
+    return node, clock, said, logged
+
+
+def _send(node, direction, value):
+    """`value` on `direction`'s topic, as the wire carries it: float32's precision."""
+    from std_msgs.msg import Float32
+    node.footprint_scale_callback(direction, Float32(data=float(np.float32(value))))
+
+
+def test_a_direction_in_use_is_the_maps_while_fresh_and_a_factor():
+    from planning_node import footprint_scale_in_use
+    assert footprint_scale_in_use(float(np.float32(0.8)), True, 1.0) == 0.8   # rounded back
+    assert footprint_scale_in_use(0.5, True, 0.9) == 0.5 and footprint_scale_in_use(1.0, True, 0.7) == 1.0
+    for unset in (float('nan'), float('inf'), 0.45, 1.05, None):
+        assert footprint_scale_in_use(unset, True, 0.9) == 0.9, unset
+    assert footprint_scale_in_use(0.8, False, 0.9) == 0.9, 'a stale map factor still applied'
+
+
+def test_a_map_scaling_only_the_width_leaves_the_length_alone(monkeypatch):
+    node, _, said, logged = _scale_node(monkeypatch)
+    assert node._collision_fp == pytest.approx((0.42, 0.42, 0.18))
+    _send(node, 'width', 0.8)
+    assert node._footprint_scale_in_use == (1.0, 1.0, 0.8)
+    assert node._collision_fp == pytest.approx((0.42, 0.42, 0.8 * 0.18))
+    assert said == {'front': [1.0], 'rear': [1.0], 'width': [0.8]}, 'the change is said at once'
+    assert 'x1/1/1 -> x1/1/0.8 (map: width)' in logged[-1]
+    _send(node, 'width', 0.8)                     # the same value every second
+    assert said['width'] == [0.8] and len(logged) == 1, 'an unchanged scale is not a switch'
+
+
+def test_front_and_rear_take_their_own_factors(monkeypatch):
+    node, _, said, logged = _scale_node(monkeypatch)
+    _send(node, 'front', 0.9)
+    _send(node, 'rear', 0.6)
+    assert node._footprint_scale_in_use == (0.9, 0.6, 1.0)
+    assert node._collision_fp == pytest.approx((0.9 * 0.42, 0.6 * 0.42, 0.18))
+    assert 'x0.9/1/1 -> x0.9/0.6/1 (map: front, rear)' in logged[-1]
+
+
+def test_nan_or_a_value_out_of_range_is_the_rigs_factor_in_that_direction(monkeypatch):
+    for unset in (float('nan'), 0.3, 1.2):
+        node, _, said, logged = _scale_node(monkeypatch, rig_scale=(0.9, 0.95, 0.85))
+        _send(node, 'front', 0.7)
+        _send(node, 'width', 0.6)
+        assert node._footprint_scale_in_use == (0.7, 0.95, 0.6)
+        _send(node, 'width', unset)
+        assert node._footprint_scale_in_use == (0.7, 0.95, 0.85), unset
+        assert node._collision_fp == pytest.approx((0.7 * 0.42, 0.95 * 0.42, 0.85 * 0.18))
+        assert said['width'][-1] == pytest.approx(0.85) and '(map: front)' in logged[-1]
+
+
+def test_one_direction_gone_silent_hands_back_alone(monkeypatch):
+    """Each direction has its own freshness: the front stops arriving and goes back to
+    the rig's, while the width, still sent, holds."""
+    node, clock, said, logged = _scale_node(monkeypatch)
+    _send(node, 'front', 0.8)
+    _send(node, 'width', 0.7)
+    clock.ns += int(2.0e9)
+    _send(node, 'width', 0.7)                     # the width keeps coming, the front not
+    clock.ns += int(1.1e9)                        # front last heard 3.1 s ago
+    node._footprint_scale_tick()
+    assert node._footprint_scale_in_use == (1.0, 1.0, 0.7)
+    assert node._collision_fp == pytest.approx((0.42, 0.42, 0.7 * 0.18))
+    assert 'x0.8/1/0.7 -> x1/1/0.7 (map: width)' in logged[-1]
+    clock.ns += int(2.0e9)                        # width last heard 3.1 s ago too
+    node._footprint_scale_tick()
+    assert node._footprint_scale_in_use == (1.0, 1.0, 1.0) and '(map: none)' in logged[-1]
+
+
+def test_the_factors_in_use_go_out_every_second_unchanged_too(monkeypatch):
+    node, _, said, logged = _scale_node(monkeypatch, rig_scale=(0.85, 1.0, 0.9))
+    node._footprint_scale_tick()
+    node._footprint_scale_tick()
+    assert said == {'front': [0.85, 0.85], 'rear': [1.0, 1.0], 'width': [0.9, 0.9]}
+    assert logged == []
+
+
+def test_a_new_scale_reaches_the_checks_and_compiles_nothing(monkeypatch):
+    """The body hits follow the node's outline the cycle after a switch, and the njit
+    scorer takes the outline as arguments: scoring at other factors adds no
+    specialisation, so a map's scale costs no recompile mid-run."""
+    node, _, _, _ = _scale_node(monkeypatch)
+    nose_corner = (0.42, -0.18)
+    T = np.eye(4)
+    T[:3, :3] = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    stand_in = _EscapeNode(nose_corner)
+    stand_in._collision_fp = node._collision_fp
+    assert PlanningNode._footprint_hits(stand_in, T, stand_in.mask)[0]
+    _send(node, 'width', 0.6)
+    stand_in._collision_fp = node._collision_fp
+    assert PlanningNode._footprint_hits(stand_in, T, stand_in.mask)[0] == []
+
+    _planning_sees(monkeypatch, 1.0)
+    _score_rows(nose_corner, back_step=_RES)
+    compiled = len(score_trajectories_by_ESDF.signatures)
+    _planning_sees(monkeypatch, (0.9, 0.6, 0.8))
+    _score_rows(nose_corner, back_step=_RES)
+    assert len(score_trajectories_by_ESDF.signatures) == compiled
+
+
+def test_the_provider_declares_what_the_planner_reads():
+    """pilot-nav.json says the planner reads a map's footprint_scale
+    (`planner.footprint_scale`) and declares no map setting for it: the footprint
+    plugin owns the per-map factors and publishes them on the topics this process
+    reads, so pilot must not publish the same topics from a map setting too."""
+    import json
+    from tinynav.core.robot_specs import (FOOTPRINT_SCALE_RANGE, FOOTPRINT_SCALE_TOPIC,
+                                          FOOTPRINT_SCALE_IN_USE_TOPIC, FOOTPRINT_SCALE_DIRECTIONS)
+    root = os.path.join(os.path.dirname(__file__), '..')
+    provider = json.load(open(os.path.join(root, 'pilot-nav.json')))
+    assert 'planner.footprint_scale' in provider['capabilities']
+    settings = provider.get('map_settings', {})
+    assert not [k for k in settings if k.startswith('footprint_scale')]
+    topics = {s.get('topic') for s in settings.values()} | {s.get('in_use_topic') for s in settings.values()}
+    assert FOOTPRINT_SCALE_DIRECTIONS == DIRECTIONS
+    for d in DIRECTIONS:
+        assert FOOTPRINT_SCALE_TOPIC.format(d) not in topics
+        assert FOOTPRINT_SCALE_IN_USE_TOPIC.format(d) not in topics
+    # The plugin's range is this one (plugins/footprint/scales.py).
+    assert FOOTPRINT_SCALE_RANGE == (0.5, 1.0)

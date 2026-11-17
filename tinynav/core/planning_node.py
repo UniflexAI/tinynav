@@ -11,6 +11,7 @@ and a reverse gate. With no route available it falls back to distance-to-goal.
 import heapq
 import json
 import array
+from functools import partial
 import rclpy
 from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
@@ -33,7 +34,9 @@ from cv_bridge import CvBridge
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
 from tinynav.core.robot_specs import (ROBOT_CONFIG, ObstacleConfig, FLOOR_CLEARANCE_M,
-                                      footprint_scale_label)
+                                      footprint_scale_label, FOOTPRINT_SCALE_DIRECTIONS,
+                                      FOOTPRINT_SCALE_RANGE, FOOTPRINT_SCALE_TOPIC,
+                                      FOOTPRINT_SCALE_IN_USE_TOPIC)
 
 # === Helper functions ===
 @njit(cache=True)
@@ -637,6 +640,33 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
     return (along >= -rear_len) & (along <= front_len) & (np.abs(across) <= half_w)
 
 
+#: A map's footprint_scale factor outlives its last message by this long, in each
+#: direction on its own. The agent side (tinynav-pilot, from pilot-nav.json's map
+#: settings) sends the loaded map's every second, as it does strict follow, so a dead
+#: sender cannot leave a map's scale on.
+MAP_FOOTPRINT_SCALE_TTL_S = 3.0
+
+
+def map_footprint_scale_valid(value):
+    """Whether a map's footprint_scale message is a factor: finite and inside
+    FOOTPRINT_SCALE_RANGE. NaN is the sender's "this map sets none"; a value out of
+    range is not clamped -- it is not a factor the map may ask for."""
+    lo, hi = FOOTPRINT_SCALE_RANGE
+    return value is not None and bool(np.isfinite(value)) and lo <= value <= hi
+
+
+def footprint_scale_in_use(map_scale, map_fresh, rig_scale):
+    """One direction's footprint_scale factor collision checking uses: the map's while
+    it is fresh and a factor (map_footprint_scale_valid), else the rig's in that
+    direction -- ROBOT_CONFIG.footprint_scale, from the calibration file or
+    TINYNAV_FOOTPRINT_SCALE. The map's arrives as a Float32, so it is rounded back to
+    the 0.05 steps it was set in rather than carrying float32's tail into the outline
+    and the logs."""
+    if map_fresh and map_footprint_scale_valid(map_scale):
+        return round(float(map_scale), 4)
+    return float(rig_scale)
+
+
 #: The nav node's arrival (tinynav-pilot's nav_node; its test_arrival_contract holds
 #: these to it) at a tighter radius, its ticks at its 0.1 s nav tick: a row counts as
 #: arriving only well inside where the nav node ends the leg. The body's half-width,
@@ -974,6 +1004,10 @@ class PlanningNode(Node):
             f"safety_r={ROBOT_CONFIG.safety_radius}m, "
             f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
         )
+        # The outline collision is checked over, from the rig's scale until a map sends
+        # its own (footprint_scale_callback). Every check reads _collision_fp, so a
+        # change of scale takes effect from the next planning cycle, in this process.
+        self._use_footprint_scale(ROBOT_CONFIG.footprint_scale)
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         # Instantaneous (vx, omega) feedforward of the selected trajectory. cmd_vel_control
@@ -1148,6 +1182,26 @@ class PlanningNode(Node):
         self._stop_stamp_ns = None
         self.create_subscription(Odometry, '/control/stop_pose', self.stop_pose_callback, 10)
 
+        # The loaded map's footprint_scale, a factor per direction (the pilot plugin
+        # `footprint`, which pilot-nav.json's planner.footprint_scale capability gates),
+        # each sent at 1 Hz on its own
+        # topic: NaN, out of range or stale is the rig's factor in that direction. The
+        # factors in use go out every second and on each change, one topic each, for the
+        # outline planning_vis draws and the operator's notice that collision is checked
+        # over a smaller outline.
+        self.declare_parameter('footprint_scale_ttl_s', MAP_FOOTPRINT_SCALE_TTL_S)
+        self._map_footprint_scale_ttl_ns = int(
+            float(self.get_parameter('footprint_scale_ttl_s').value) * 1e9)
+        self._map_footprint_scale = {d: float('nan') for d in FOOTPRINT_SCALE_DIRECTIONS}
+        self._map_footprint_scale_stamp_ns = {d: None for d in FOOTPRINT_SCALE_DIRECTIONS}
+        self.footprint_scale_in_use_pubs = {
+            d: self.create_publisher(Float32, FOOTPRINT_SCALE_IN_USE_TOPIC.format(d), 10)
+            for d in FOOTPRINT_SCALE_DIRECTIONS}
+        for d in FOOTPRINT_SCALE_DIRECTIONS:
+            self.create_subscription(Float32, FOOTPRINT_SCALE_TOPIC.format(d),
+                                     partial(self.footprint_scale_callback, d), 10)
+        self.create_timer(1.0, self._footprint_scale_tick)
+
     # --- callbacks ---------------------------------------------------------
     def climb_region_callback(self, msg):
         # An empty cloud is a real answer ("no region here"), not a missed message:
@@ -1188,6 +1242,56 @@ class PlanningNode(Node):
     def strict_stand_callback(self, msg):
         self._strict_stand = bool(msg.data)
         self._strict_stand_stamp_ns = self.get_clock().now().nanoseconds
+
+    def footprint_scale_callback(self, direction, msg):
+        self._map_footprint_scale[direction] = float(msg.data)
+        self._map_footprint_scale_stamp_ns[direction] = self.get_clock().now().nanoseconds
+        self._refresh_footprint_scale()
+
+    def _footprint_scale_tick(self):
+        """Once a second: hand a direction whose map factor has gone stale back to the
+        rig's, and say the factors in use."""
+        self._refresh_footprint_scale()
+        self._say_footprint_scale()
+
+    def _say_footprint_scale(self):
+        for d, factor in zip(FOOTPRINT_SCALE_DIRECTIONS, self._footprint_scale_in_use):
+            self.footprint_scale_in_use_pubs[d].publish(Float32(data=factor))
+
+    def _refresh_footprint_scale(self):
+        """Switch to the factors footprint_scale_in_use picks now, direction by
+        direction, if any is another one. Callbacks run one at a time on this node's
+        executor, so a switch lands between planning cycles, never inside one."""
+        rig = ROBOT_CONFIG.footprint_scale
+        scale, from_map = [], []
+        for i, d in enumerate(FOOTPRINT_SCALE_DIRECTIONS):
+            value = self._map_footprint_scale[d]
+            fresh = self._signal_fresh(self._map_footprint_scale_stamp_ns[d],
+                                       self._map_footprint_scale_ttl_ns)
+            scale.append(footprint_scale_in_use(value, fresh, rig[i]))
+            if fresh and map_footprint_scale_valid(value):
+                from_map.append(d)
+        scale = tuple(scale)
+        if all(abs(a - b) <= 1e-6 for a, b in zip(scale, self._footprint_scale_in_use)):
+            return
+        was = self._footprint_scale_in_use
+        self._use_footprint_scale(scale)
+        fl, rl, hw = self._collision_fp
+        self.get_logger().info(
+            f"footprint_scale front/rear/width x{footprint_scale_label(was)} -> "
+            f"x{footprint_scale_label(scale)} (map: {', '.join(from_map) or 'none'}): "
+            f"collision fwd/rear/half-w {fl:.3f}/{rl:.3f}/{hw:.3f}m")
+        self._say_footprint_scale()
+
+    def _use_footprint_scale(self, scale):
+        """Check collision over the body times `scale` (front, rear, width). The outline
+        is computed here, once per change: the lattice, the body hits, the front
+        clearance, the half-width band and the decay under the body all read
+        _collision_fp each cycle, and the njit scorer takes it as arguments, so nothing
+        is rebuilt or recompiled."""
+        self._footprint_scale_in_use = tuple(float(f) for f in scale)
+        self._collision_fp = replace(ROBOT_CONFIG, footprint_scale=self._footprint_scale_in_use
+                                     ).collision_footprint()
 
     def _open_target_speed(self):
         """Open-space target forward speed: the gained capture-speed prior when a
@@ -1301,7 +1405,7 @@ class PlanningNode(Node):
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
         fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
         lx, ly = -fy, fx
-        fl, rl, hw = ROBOT_CONFIG.collision_footprint()
+        fl, rl, hw = self._collision_fp
         off_fwd, off_lat = footprint_lattice(fl, rl, hw, ROBOT_CONFIG.safety_radius)
         rows, cols = obstacle_mask.shape
         hits = []
@@ -1336,7 +1440,7 @@ class PlanningNode(Node):
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
         fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
         lx, ly = -fy, fx
-        fl, _, hw = ROBOT_CONFIG.collision_footprint()
+        fl, _, hw = self._collision_fp
         rows, cols = obstacle_mask.shape
         steps = int(max_dist / self.resolution) + 1
         for step in range(steps):
@@ -1386,7 +1490,7 @@ class PlanningNode(Node):
         n = np.hypot(fwd[0], fwd[1])
         if n > 1e-6:
             under = footprint_cells(self.grid_shape[:2], self.origin, self.resolution, center[:2],
-                                    fwd[:2] / n, *ROBOT_CONFIG.collision_footprint())
+                                    fwd[:2] / n, *self._collision_fp)
             self.occupancy_grid[under] *= self._footprint_decay
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
@@ -1434,7 +1538,7 @@ class PlanningNode(Node):
     def score_trajectories(self, trajectories, params, ESDF_map, path_dist_map, remaining_map,
                            route_heading_map, target, has_route):
         """score_trajectories_by_ESDF's columns, as arrays."""
-        front_len, rear_len, half_w = ROBOT_CONFIG.collision_footprint()
+        front_len, rear_len, half_w = self._collision_fp
         cam = ROBOT_CONFIG.cam_offset_3d
 
         def score(trajs):
@@ -1519,7 +1623,7 @@ class PlanningNode(Node):
                         and 0 <= yi < remaining_map.shape[1] else 1e3)
             # The width the body needs to fit, for strict follow below and the
             # around-obstacles band: the collision footprint's, as the rows are checked.
-            _, _, half_w = ROBOT_CONFIG.collision_footprint()
+            _, _, half_w = self._collision_fp
             # Strict follow: an obstacle on the route as far as the carrot aims DWA at
             # map_node's stop pose instead, so it does not start round it early; one as far
             # as the stop pose stands the robot. Off when either stream is stale.
