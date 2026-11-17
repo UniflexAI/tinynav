@@ -1,8 +1,12 @@
 import array
 import json
 import os
+from threading import Lock
 from time import perf_counter_ns
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.clock import Clock, ClockType
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
@@ -353,8 +357,18 @@ class PlanningNode(Node):
             self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
             self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
-        self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
-        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
+        self.latest_pair_only = os.environ.get("TINYNAV_PLANNING_LATEST_PAIR_ONLY") == "1"
+        self.input_lock = Lock()
+        self.pending_pair = None
+        self.latest_pair_stamp = None
+        self.dropped_synced_pairs = 0
+        input_group = MutuallyExclusiveCallbackGroup() if self.latest_pair_only else None
+        self.depth_sub = message_filters.Subscriber(
+            self, Image, '/slam/depth', callback_group=input_group,
+        )
+        self.pose_sub = message_filters.Subscriber(
+            self, Odometry, '/slam/odometry_visual', callback_group=input_group,
+        )
 
         self.timing_pub = None
         if os.environ.get("TINYNAV_PLANNING_TIMING") == "1":
@@ -364,11 +378,19 @@ class PlanningNode(Node):
             self.depth_sub.registerCallback(self.record_input_arrival, self.depth_arrivals)
             self.pose_sub.registerCallback(self.record_input_arrival, self.odom_arrivals)
         self.get_logger().info(
-            f"Planning timing: {self.timing_pub is not None}, diagnostic point clouds: {self.publish_diagnostic_clouds}"
+            f"Planning timing: {self.timing_pub is not None}, diagnostic point clouds: {self.publish_diagnostic_clouds}, "
+            f"latest synced pair only: {self.latest_pair_only}"
         )
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
-        self.ts.registerCallback(self.sync_callback)
+        if self.latest_pair_only:
+            self.ts.registerCallback(self.queue_latest_pair)
+            # Planning and other state-mutating callbacks stay in the default exclusive group.
+            self.latest_pair_timer = self.create_timer(
+                0.005, self.process_latest_pair, clock=Clock(clock_type=ClockType.STEADY_TIME),
+            )
+        else:
+            self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
         self.grid_shape = (100, 100, 40)  # 10m x 10m x 4m, camera +-2m
@@ -648,33 +670,63 @@ class PlanningNode(Node):
                 path.poses.append(pose)
         self.path_pub.publish(path)
 
+    def queue_latest_pair(self, depth_msg, odom_msg):
+        ready_ns = perf_counter_ns()
+        stamp = Time.from_msg(depth_msg.header.stamp).nanoseconds
+        with self.input_lock:
+            if self.latest_pair_stamp is not None and stamp <= self.latest_pair_stamp:
+                self.dropped_synced_pairs += 1
+                return
+            if self.pending_pair is not None:
+                self.dropped_synced_pairs += 1
+            self.latest_pair_stamp = stamp
+            self.pending_pair = (depth_msg, odom_msg, ready_ns)
+
+    def process_latest_pair(self):
+        with self.input_lock:
+            pair, self.pending_pair = self.pending_pair, None
+        if pair is not None:
+            self.sync_callback(*pair)
+
     def record_input_arrival(self, msg, arrivals):
         stamp = Time.from_msg(msg.header.stamp).nanoseconds
-        arrivals[stamp] = (perf_counter_ns(), self.get_clock().now().nanoseconds)
-        if len(arrivals) > 64:
-            del arrivals[next(iter(arrivals))]
+        arrival = (perf_counter_ns(), self.get_clock().now().nanoseconds)
+        with self.input_lock:
+            arrivals[stamp] = arrival
+            if len(arrivals) > 64:
+                del arrivals[next(iter(arrivals))]
 
-    def publish_frame_timing(self, stamp_ns, start_ns, start_ros_ns, stages):
-        depth = self.depth_arrivals.pop(stamp_ns, None)
-        odom = self.odom_arrivals.pop(stamp_ns, None)
+    def publish_frame_timing(self, stamp_ns, start_ns, start_ros_ns, stages, pair_ready_ns):
+        with self.input_lock:
+            depth = self.depth_arrivals.pop(stamp_ns, None)
+            odom = self.odom_arrivals.pop(stamp_ns, None)
+            dropped = self.dropped_synced_pairs
         timing = {
             "stamp_ns": stamp_ns,
             "sync_begin_age_ms": (start_ros_ns - stamp_ns) / 1e6,
             "diagnostic_clouds": self.publish_diagnostic_clouds,
+            "latest_pair_only": self.latest_pair_only,
+            "latest_pair_wait_ms": (start_ns - pair_ready_ns) / 1e6,
+            "dropped_synced_pairs": dropped,
             **{name: (end - begin) / 1e6 for name, (begin, end) in stages.items()},
         }
         for name, arrival in (("depth", depth), ("odom", odom)):
             timing[f"{name}_callback_age_ms"] = (arrival[1] - stamp_ns) / 1e6 if arrival else None
             timing[f"{name}_callback_to_sync_ms"] = (start_ns - arrival[0]) / 1e6 if arrival else None
+            timing[f"{name}_callback_to_pair_ms"] = (pair_ready_ns - arrival[0]) / 1e6 if arrival else None
         if depth is not None and odom is not None:
-            timing["second_input_to_sync_ms"] = (start_ns - max(depth[0], odom[0])) / 1e6
+            second_input = max(depth[0], odom[0])
+            timing["second_input_to_sync_ms"] = (start_ns - second_input) / 1e6
+            timing["second_input_to_pair_ms"] = (pair_ready_ns - second_input) / 1e6
         self.timing_pub.publish(String(data=json.dumps(timing, separators=(",", ":"))))
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def sync_callback(self, depth_msg, odom_msg):
+    def sync_callback(self, depth_msg, odom_msg, pair_ready_ns=None):
         if self.K is None:
             return
         start_ns = perf_counter_ns()
+        if pair_ready_ns is None:
+            pair_ready_ns = start_ns
         start_ros_ns = self.get_clock().now().nanoseconds if self.timing_pub is not None else None
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
@@ -724,7 +776,7 @@ class PlanningNode(Node):
                 "sync_to_mask_ready_ms": (start_ns, mask_ready),
                 "sync_to_mask_publish_ms": (start_ns, mask_published),
                 "sync_to_diagnostics_done_ms": (start_ns, perf_counter_ns()),
-            })
+            }, pair_ready_ns)
 
         if self.rl is not None:
             self.last_T, self.last_stamp = T, stamp
@@ -822,12 +874,16 @@ def main(args=None):
     rclpy.init(args=args)
     node = PlanningNode()
 
+    executor = MultiThreadedExecutor(num_threads=2) if node.latest_pair_only else None
     try:
-        rclpy.spin(node)
-        node.destroy_node()
-        rclpy.shutdown()
+        rclpy.spin(node, executor=executor)
     except KeyboardInterrupt:
         pass
+    finally:
+        if executor is not None:
+            executor.shutdown()
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 if __name__ == '__main__':
     main()
