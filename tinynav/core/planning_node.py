@@ -1,5 +1,7 @@
 import array
+import json
 import os
+from time import perf_counter_ns
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -14,7 +16,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32, Twist
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -346,11 +348,24 @@ class PlanningNode(Node):
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
-        self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
-        self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
+        self.publish_diagnostic_clouds = os.environ.get("TINYNAV_PLANNING_DIAGNOSTIC_CLOUDS", "1") == "1"
+        if self.publish_diagnostic_clouds:
+            self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
+            self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
+
+        self.timing_pub = None
+        if os.environ.get("TINYNAV_PLANNING_TIMING") == "1":
+            self.timing_pub = self.create_publisher(String, '/planning/timing', 10)
+            self.depth_arrivals, self.odom_arrivals = {}, {}
+            # These callbacks must run before the synchronizer sees each message.
+            self.depth_sub.registerCallback(self.record_input_arrival, self.depth_arrivals)
+            self.pose_sub.registerCallback(self.record_input_arrival, self.odom_arrivals)
+        self.get_logger().info(
+            f"Planning timing: {self.timing_pub is not None}, diagnostic point clouds: {self.publish_diagnostic_clouds}"
+        )
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
@@ -633,21 +648,50 @@ class PlanningNode(Node):
                 path.poses.append(pose)
         self.path_pub.publish(path)
 
+    def record_input_arrival(self, msg, arrivals):
+        stamp = Time.from_msg(msg.header.stamp).nanoseconds
+        arrivals[stamp] = (perf_counter_ns(), self.get_clock().now().nanoseconds)
+        if len(arrivals) > 64:
+            del arrivals[next(iter(arrivals))]
+
+    def publish_frame_timing(self, stamp_ns, start_ns, start_ros_ns, stages):
+        depth = self.depth_arrivals.pop(stamp_ns, None)
+        odom = self.odom_arrivals.pop(stamp_ns, None)
+        timing = {
+            "stamp_ns": stamp_ns,
+            "sync_begin_age_ms": (start_ros_ns - stamp_ns) / 1e6,
+            "diagnostic_clouds": self.publish_diagnostic_clouds,
+            **{name: (end - begin) / 1e6 for name, (begin, end) in stages.items()},
+        }
+        for name, arrival in (("depth", depth), ("odom", odom)):
+            timing[f"{name}_callback_age_ms"] = (arrival[1] - stamp_ns) / 1e6 if arrival else None
+            timing[f"{name}_callback_to_sync_ms"] = (start_ns - arrival[0]) / 1e6 if arrival else None
+        if depth is not None and odom is not None:
+            timing["second_input_to_sync_ms"] = (start_ns - max(depth[0], odom[0])) / 1e6
+        self.timing_pub.publish(String(data=json.dumps(timing, separators=(",", ":"))))
+
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
             return
+        start_ns = perf_counter_ns()
+        start_ros_ns = self.get_clock().now().nanoseconds if self.timing_pub is not None else None
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
-            stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
+            stamp_ns = Time.from_msg(odom_msg.header.stamp).nanoseconds
+            stamp = stamp_ns / 1e9
             T,_ = msg2np(odom_msg)
             self.update_velocity_estimate(T, stamp)
 
+        prep_done = perf_counter_ns()
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.occupancy_grid, self.origin = update_occupancy_grid(
                 self.occupancy_grid, self.origin, depth, T, self.K, self.resolution, self.step)
 
-            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+            grid_done = perf_counter_ns()
+            if self.publish_diagnostic_clouds:
+                self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+            cloud_done = perf_counter_ns()
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             obstacle_mask = build_obstacle_map(
@@ -656,12 +700,31 @@ class PlanningNode(Node):
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
+        mask_ready = perf_counter_ns()
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
+            if self.publish_diagnostic_clouds:
+                self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
+            esdf_cloud_done = perf_counter_ns()
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+            diagnostics_2d_done = perf_counter_ns()
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
+            mask_published = perf_counter_ns()
             self.publish_footprint(T, depth_msg.header.stamp)
+
+        if self.timing_pub is not None:
+            self.publish_frame_timing(stamp_ns, start_ns, start_ros_ns, {
+                "preprocess_ms": (start_ns, prep_done),
+                "raycast_grid_ms": (prep_done, grid_done),
+                "occupied_cloud_ms": (grid_done, cloud_done),
+                "obstacle_mask_esdf_ms": (cloud_done, mask_ready),
+                "esdf_cloud_ms": (mask_ready, esdf_cloud_done),
+                "diagnostics_2d_ms": (esdf_cloud_done, diagnostics_2d_done),
+                "mask_publish_ms": (diagnostics_2d_done, mask_published),
+                "sync_to_mask_ready_ms": (start_ns, mask_ready),
+                "sync_to_mask_publish_ms": (start_ns, mask_published),
+                "sync_to_diagnostics_done_ms": (start_ns, perf_counter_ns()),
+            })
 
         if self.rl is not None:
             self.last_T, self.last_stamp = T, stamp
