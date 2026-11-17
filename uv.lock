@@ -4082,7 +4082,7 @@ requires-dist = [
     { name = "tokenizers", specifier = ">=0.15.0" },
     { name = "torch", marker = "extra == '3dgs'", specifier = ">=2.4,<2.11" },
     { name = "tyro" },
-    { name = "unitree-sdk2py", marker = "extra == 'unitree'", git = "https://github.com/zhongyuanguo-code/unitree_sdk2_python.git?rev=cd47a98be4b0699462ca995797169b09710a19a6" },
+    { name = "unitree-sdk2py", marker = "extra == 'unitree'", git = "https://github.com/zhongyuanguo-code/unitree_sdk2_python.git?rev=e43c50fde7e3641bae6dc4ac9806e07f4344aa5a" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
     { name = "viser" },
 ]
@@ -4405,7 +4405,7 @@ wheels = [
 [[package]]
 name = "unitree-sdk2py"
 version = "1.0.1"
-source = { git = "https://github.com/zhongyuanguo-code/unitree_sdk2_python.git?rev=cd47a98be4b0699462ca995797169b09710a19a6#cd47a98be4b0699462ca995797169b09710a19a6" }
+source = { git = "https://github.com/zhongyuanguo-code/unitree_sdk2_python.git?rev=e43c50fde7e3641bae6dc4ac9806e07f4344aa5a#e43c50fde7e3641bae6dc4ac9806e07f4344aa5a" }
 dependencies = [
     { name = "cyclonedds" },
     { name = "numpy" },
