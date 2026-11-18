@@ -298,9 +298,8 @@ FOOTPRINT_SCALE_DIRECTIONS = ('front', 'rear', 'width')
 #: uses: the map's while fresh, else the rig's.
 FOOTPRINT_SCALE_TOPIC = '/planning/footprint_scale/{}'
 FOOTPRINT_SCALE_IN_USE_TOPIC = '/planning/footprint_scale_in_use/{}'
-#: The factor a rig may set in each direction, the operators' range (2026-11-16): a
-#: scale is for a passage a little narrower than the outline. A bigger body is
-#: FOOTPRINT_FIELDS' job.
+#: The factor a rig or a map may set in each direction: a scale is for a passage a
+#: little narrower than the outline. A bigger body is FOOTPRINT_FIELDS' job.
 FOOTPRINT_SCALE_RANGE = (0.5, 1.0)
 #: Overrides the file's footprint_scale when set and not empty, so a launch can try a
 #: scale without editing the rig's calibration: "0.8" for all three directions, or
@@ -324,6 +323,14 @@ def footprint_scale_in_range(value, source):
         print(f"robot_specs: footprint_scale {number} from {source} is outside "
               f"[{lo}, {hi}], using {held}", file=sys.stderr)
     return held
+
+
+def footprint_scale_valid(value):
+    """Whether a footprint_scale message is a factor: finite and inside
+    FOOTPRINT_SCALE_RANGE. NaN is the sender's "this map sets none"; a value out of
+    range is not clamped -- it is not a factor a map may ask for."""
+    lo, hi = FOOTPRINT_SCALE_RANGE
+    return value is not None and math.isfinite(value) and lo <= value <= hi
 
 
 def footprint_scale_label(scale):

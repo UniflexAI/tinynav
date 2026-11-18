@@ -34,8 +34,8 @@ from cv_bridge import CvBridge
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
 from tinynav.core.robot_specs import (ROBOT_CONFIG, ObstacleConfig, FLOOR_CLEARANCE_M,
-                                      footprint_scale_label, FOOTPRINT_SCALE_DIRECTIONS,
-                                      FOOTPRINT_SCALE_RANGE, FOOTPRINT_SCALE_TOPIC,
+                                      footprint_scale_label, footprint_scale_valid,
+                                      FOOTPRINT_SCALE_DIRECTIONS, FOOTPRINT_SCALE_TOPIC,
                                       FOOTPRINT_SCALE_IN_USE_TOPIC)
 
 # === Helper functions ===
@@ -641,28 +641,19 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
 
 
 #: A map's footprint_scale factor outlives its last message by this long, in each
-#: direction on its own. The agent side (tinynav-pilot, from pilot-nav.json's map
-#: settings) sends the loaded map's every second, as it does strict follow, so a dead
-#: sender cannot leave a map's scale on.
+#: direction on its own. The pilot plugin `footprint` sends the loaded map's every
+#: second, so a dead sender cannot leave a map's scale on.
 MAP_FOOTPRINT_SCALE_TTL_S = 3.0
-
-
-def map_footprint_scale_valid(value):
-    """Whether a map's footprint_scale message is a factor: finite and inside
-    FOOTPRINT_SCALE_RANGE. NaN is the sender's "this map sets none"; a value out of
-    range is not clamped -- it is not a factor the map may ask for."""
-    lo, hi = FOOTPRINT_SCALE_RANGE
-    return value is not None and bool(np.isfinite(value)) and lo <= value <= hi
 
 
 def footprint_scale_in_use(map_scale, map_fresh, rig_scale):
     """One direction's footprint_scale factor collision checking uses: the map's while
-    it is fresh and a factor (map_footprint_scale_valid), else the rig's in that
+    it is fresh and a factor (footprint_scale_valid), else the rig's in that
     direction -- ROBOT_CONFIG.footprint_scale, from the calibration file or
     TINYNAV_FOOTPRINT_SCALE. The map's arrives as a Float32, so it is rounded back to
     the 0.05 steps it was set in rather than carrying float32's tail into the outline
     and the logs."""
-    if map_fresh and map_footprint_scale_valid(map_scale):
+    if map_fresh and footprint_scale_valid(map_scale):
         return round(float(map_scale), 4)
     return float(rig_scale)
 
@@ -1184,11 +1175,10 @@ class PlanningNode(Node):
 
         # The loaded map's footprint_scale, a factor per direction (the pilot plugin
         # `footprint`, which pilot-nav.json's planner.footprint_scale capability gates),
-        # each sent at 1 Hz on its own
-        # topic: NaN, out of range or stale is the rig's factor in that direction. The
-        # factors in use go out every second and on each change, one topic each, for the
-        # outline planning_vis draws and the operator's notice that collision is checked
-        # over a smaller outline.
+        # each sent at 1 Hz on its own topic: NaN, out of range or stale is the rig's
+        # factor in that direction. The factors in use go out every second and on each
+        # change, one topic each, for the outline planning_vis draws and the operator's
+        # notice that collision is checked over a smaller outline.
         self.declare_parameter('footprint_scale_ttl_s', MAP_FOOTPRINT_SCALE_TTL_S)
         self._map_footprint_scale_ttl_ns = int(
             float(self.get_parameter('footprint_scale_ttl_s').value) * 1e9)
@@ -1269,7 +1259,7 @@ class PlanningNode(Node):
             fresh = self._signal_fresh(self._map_footprint_scale_stamp_ns[d],
                                        self._map_footprint_scale_ttl_ns)
             scale.append(footprint_scale_in_use(value, fresh, rig[i]))
-            if fresh and map_footprint_scale_valid(value):
+            if fresh and footprint_scale_valid(value):
                 from_map.append(d)
         scale = tuple(scale)
         if all(abs(a - b) <= 1e-6 for a, b in zip(scale, self._footprint_scale_in_use)):

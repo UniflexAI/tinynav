@@ -20,7 +20,7 @@ from std_msgs.msg import Float32, Header
 
 from tinynav.core.math_utils import msg2np
 from tinynav.core.robot_specs import (ROBOT_CONFIG, FOOTPRINT_SCALE_DIRECTIONS,
-                                      FOOTPRINT_SCALE_IN_USE_TOPIC, FOOTPRINT_SCALE_RANGE)
+                                      FOOTPRINT_SCALE_IN_USE_TOPIC, footprint_scale_valid)
 
 ESDF_CLOUD_FIELDS = [
     PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
@@ -140,9 +140,8 @@ class PlanningVisNode(Node):
     def scale_in_use_callback(self, direction, msg):
         """One direction's factor in use; the others stay as last said, the rig's until
         then. A value that is not a factor is not drawn."""
-        lo, hi = FOOTPRINT_SCALE_RANGE
         value = float(msg.data)
-        if not (np.isfinite(value) and lo <= value <= hi):
+        if not footprint_scale_valid(value):
             return
         scale = list(self.scale_in_use or ROBOT_CONFIG.footprint_scale)
         scale[FOOTPRINT_SCALE_DIRECTIONS.index(direction)] = round(value, 4)
