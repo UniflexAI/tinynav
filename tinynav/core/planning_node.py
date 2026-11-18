@@ -25,7 +25,7 @@ from numba import njit
 import rclpy
 import message_filters
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, HistoryPolicy, ReliabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped
@@ -35,8 +35,9 @@ from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
 from tinynav.core.robot_specs import (ROBOT_CONFIG, ObstacleConfig, FLOOR_CLEARANCE_M,
                                       footprint_scale_label, footprint_scale_valid,
-                                      FOOTPRINT_SCALE_DIRECTIONS, FOOTPRINT_SCALE_TOPIC,
-                                      FOOTPRINT_SCALE_IN_USE_TOPIC)
+                                      rig_footprint, FOOTPRINT_SCALE_DIRECTIONS,
+                                      FOOTPRINT_SCALE_TOPIC, FOOTPRINT_SCALE_IN_USE_TOPIC,
+                                      FOOTPRINT_TOPIC)
 
 # === Helper functions ===
 @njit(cache=True)
@@ -649,10 +650,9 @@ MAP_FOOTPRINT_SCALE_TTL_S = 3.0
 def footprint_scale_in_use(map_scale, map_fresh, rig_scale):
     """One direction's footprint_scale factor collision checking uses: the map's while
     it is fresh and a factor (footprint_scale_valid), else the rig's in that
-    direction -- ROBOT_CONFIG.footprint_scale, from the calibration file or
-    TINYNAV_FOOTPRINT_SCALE. The map's arrives as a Float32, so it is rounded back to
-    the 0.05 steps it was set in rather than carrying float32's tail into the outline
-    and the logs."""
+    direction -- ROBOT_CONFIG.footprint_scale, from the rig's calibration file. The
+    map's arrives as a Float32, so it is rounded back to the 0.05 steps it was set in
+    rather than carrying float32's tail into the outline and the logs."""
     if map_fresh and footprint_scale_valid(map_scale):
         return round(float(map_scale), 4)
     return float(rig_scale)
@@ -1191,6 +1191,11 @@ class PlanningNode(Node):
             self.create_subscription(Float32, FOOTPRINT_SCALE_TOPIC.format(d),
                                      partial(self.footprint_scale_callback, d), 10)
         self.create_timer(1.0, self._footprint_scale_tick)
+        # The body and the rig's scale this process read at start, latched for the
+        # plugin's page: what a footprint saved since is compared against.
+        self._footprint_pub = self.create_publisher(
+            String, FOOTPRINT_TOPIC, QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self._footprint_pub.publish(String(data=json.dumps(rig_footprint(ROBOT_CONFIG))))
 
     # --- callbacks ---------------------------------------------------------
     def climb_region_callback(self, msg):

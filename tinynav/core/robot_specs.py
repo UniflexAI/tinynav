@@ -73,7 +73,7 @@ class RobotConfig:
     #: side where it is tight. The fields themselves stay the body: the arrival radii
     #: are measured in it, and a smaller check must not move where a POI counts as
     #: reached. safety_radius is the margin around whatever is checked and is not scaled.
-    #: Set per rig (with_measured_camera, FOOTPRINT_SCALE_ENV), within FOOTPRINT_SCALE_RANGE.
+    #: Set per rig (with_measured_camera), within FOOTPRINT_SCALE_RANGE.
     footprint_scale: tuple = (1.0, 1.0, 1.0)
     # Bounds used to constrain trajectory-library velocity sampling and to clamp
     # the final published cmd_vel. Placeholder values, same for every robot until
@@ -278,16 +278,16 @@ G1_CONFIG = RobotConfig(
 #: `floor_at` says it was measured from the floor; the footprint (FOOTPRINT_FIELDS);
 #: `footprint_scale`, what collision checking shrinks that footprint by -- one number
 #: for all three directions, or `{"front", "rear", "width"}`, a direction left out
-#: being 1.0 (RobotConfig.footprint_scale; FOOTPRINT_SCALE_ENV overrides it); any other
-#: key is the writer's own record.
+#: being 1.0 (RobotConfig.footprint_scale). The pilot plugin `footprint` writes the
+#: footprint and the scale (pilot-nav.json's `robot.footprint`); any other key is the
+#: writer's own record.
 CAMERA_OFFSET_PATH = '/tinynav/tinynav_db/calib/camera_offset.json'
 #: How far above the floor the obstacle band starts once the camera's height is
 #: measured: what go2's -0.45 left on 65, whose camera is 0.515 m up (2026-11-04).
 FLOOR_CLEARANCE_M = 0.065
 
 
-#: The footprint fields a rig's file may set by hand (122 does, 2026-11-13: it keeps the
-#: footprint its routes, docks and narrow passages were run on, not the CAD's).
+#: The footprint fields a rig's file may set: all three, or none for the type's.
 FOOTPRINT_FIELDS = ('front_len', 'rear_len', 'half_width')
 #: The directions footprint_scale has a factor for, in its order: front_len's,
 #: rear_len's and half_width's (both sides together).
@@ -298,13 +298,11 @@ FOOTPRINT_SCALE_DIRECTIONS = ('front', 'rear', 'width')
 #: uses: the map's while fresh, else the rig's.
 FOOTPRINT_SCALE_TOPIC = '/planning/footprint_scale/{}'
 FOOTPRINT_SCALE_IN_USE_TOPIC = '/planning/footprint_scale_in_use/{}'
+#: Latched: the body and the rig's footprint_scale planning read at start (rig_footprint).
+FOOTPRINT_TOPIC = '/planning/footprint'
 #: The factor a rig or a map may set in each direction: a scale is for a passage a
 #: little narrower than the outline. A bigger body is FOOTPRINT_FIELDS' job.
 FOOTPRINT_SCALE_RANGE = (0.5, 1.0)
-#: Overrides the file's footprint_scale when set and not empty, so a launch can try a
-#: scale without editing the rig's calibration: "0.8" for all three directions, or
-#: "0.9,1.0,0.8" for front, rear and width. Read at process start, like the file.
-FOOTPRINT_SCALE_ENV = 'TINYNAV_FOOTPRINT_SCALE'
 
 
 def footprint_scale_in_range(value, source):
@@ -333,6 +331,13 @@ def footprint_scale_valid(value):
     return value is not None and math.isfinite(value) and lo <= value <= hi
 
 
+def rig_footprint(config):
+    """`config`'s body (FOOTPRINT_FIELDS, metres) and footprint_scale, as FOOTPRINT_TOPIC
+    carries them."""
+    return {**{k: float(getattr(config, k)) for k in FOOTPRINT_FIELDS},
+            'footprint_scale': [float(f) for f in config.footprint_scale]}
+
+
 def footprint_scale_label(scale):
     """(front, rear, width) as the logs say it: "1/1/0.8"."""
     return '/'.join(f'{factor:g}' for factor in scale)
@@ -342,8 +347,7 @@ def footprint_scale_of(value, source):
     """A footprint_scale as written, as (front, rear, width), each factor in range
     (footprint_scale_in_range): one number is all three; a mapping names directions
     (FOOTPRINT_SCALE_DIRECTIONS), one left out being 1.0, and a name that is not a
-    direction is a ValueError, as a typo should be; a string is the env's -- one number,
-    or three comma-separated in that order."""
+    direction is a ValueError, as a typo should be."""
     if isinstance(value, dict):
         unknown = set(value) - set(FOOTPRINT_SCALE_DIRECTIONS)
         if unknown:
@@ -351,13 +355,6 @@ def footprint_scale_of(value, source):
                              f"{sorted(unknown)}, only {FOOTPRINT_SCALE_DIRECTIONS}")
         return tuple(footprint_scale_in_range(value.get(d, 1.0), f"{source} {d}")
                      for d in FOOTPRINT_SCALE_DIRECTIONS)
-    if isinstance(value, str) and ',' in value:
-        parts = [p.strip() for p in value.split(',')]
-        if len(parts) != len(FOOTPRINT_SCALE_DIRECTIONS):
-            raise ValueError(f"footprint_scale {value!r} from {source} is one number "
-                             f"or three ({', '.join(FOOTPRINT_SCALE_DIRECTIONS)})")
-        return tuple(footprint_scale_in_range(p, f"{source} {d}")
-                     for p, d in zip(parts, FOOTPRINT_SCALE_DIRECTIONS))
     factor = footprint_scale_in_range(value, source)
     return (factor,) * len(FOOTPRINT_SCALE_DIRECTIONS)
 
@@ -415,17 +412,11 @@ FREE_GAIT_FLOORS = {'go2': {'min_linear_vel': 0.25, 'min_spin_vel': 0.45}}
 
 
 def robot_config(path=CAMERA_OFFSET_PATH, gait=CHASSIS_GAIT):
-    """This ROBOT_TYPE's config in `gait`, with the rig's file read from disk now and
-    FOOTPRINT_SCALE_ENV, when set, over the file's footprint_scale."""
+    """This ROBOT_TYPE's config in `gait`, with the rig's file read from disk now."""
     config = _TYPE_CONFIG
     if gait == 'free' and config.name in FREE_GAIT_FLOORS:
         config = replace(config, **FREE_GAIT_FLOORS[config.name])
-    config = with_measured_camera(config, path)
-    scale = os.environ.get(FOOTPRINT_SCALE_ENV, '').strip()
-    if scale:
-        config = replace(config, footprint_scale=footprint_scale_of(
-            scale, FOOTPRINT_SCALE_ENV))
-    return config
+    return with_measured_camera(config, path)
 
 
 #: Read once, at import: a process picks up a new measurement at its next launch.

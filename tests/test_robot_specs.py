@@ -73,7 +73,6 @@ def test_the_rig_file_sets_the_footprint_by_hand_and_each_part_alone(tmp_path):
     assert with_measured_camera(B2_CONFIG, path) is B2_CONFIG
 
 
-ENV = robot_specs.FOOTPRINT_SCALE_ENV
 TYPES = {n: c for n, c in vars(robot_specs).items()
          if n.endswith('_CONFIG') and not n.startswith('_') and n != 'ROBOT_CONFIG'}
 
@@ -88,8 +87,7 @@ def test_without_a_scale_the_collision_footprint_is_the_body(name):
     assert config.collision_footprint() == config.footprint_from_control()
 
 
-def test_a_file_without_a_scale_keeps_it_at_one(tmp_path, monkeypatch):
-    monkeypatch.delenv(ENV, raising=False)
+def test_a_file_without_a_scale_keeps_it_at_one(tmp_path):
     path = tmp_path / 'camera_offset.json'
     path.write_text(json.dumps({'forward_m': 0.3, 'left_m': 0.0, 'front_len': 0.4,
                                 'rear_len': 0.4, 'half_width': 0.2}))
@@ -140,52 +138,22 @@ def test_the_scale_applies_to_a_footprint_set_by_hand(tmp_path):
     assert got.collision_footprint() == pytest.approx((0.352, 0.352, 0.14))
 
 
-def test_the_env_overrides_the_file(tmp_path, monkeypatch):
-    path = tmp_path / 'camera_offset.json'
-    path.write_text(json.dumps({'forward_m': 0.3, 'left_m': 0.0,
-                                'footprint_scale': {'front': 0.9}}))
-    monkeypatch.delenv(ENV, raising=False)
-    assert robot_specs.robot_config(path).footprint_scale == (0.9, 1.0, 1.0)
-    monkeypatch.setenv(ENV, '0.7')
-    got = robot_specs.robot_config(path)
-    assert (got.footprint_scale, got.camera_fwd) == ((0.7, 0.7, 0.7), 0.3)   # the rest stands
-    assert robot_specs.robot_config(tmp_path / 'absent.json').footprint_scale == (0.7, 0.7, 0.7)
-    monkeypatch.setenv(ENV, '0.9, 1.0,0.8')                # front, rear, width
-    assert robot_specs.robot_config(path).footprint_scale == (0.9, 1.0, 0.8)
-    # Set but empty, as a compose file's `${TINYNAV_FOOTPRINT_SCALE:-}` passes it: unset.
-    monkeypatch.setenv(ENV, ' ')
-    assert robot_specs.robot_config(path).footprint_scale == (0.9, 1.0, 1.0)
-
-
 @pytest.mark.parametrize('value, held', [(0.3, 0.5), (1.4, 1.0), (0.5, 0.5), (1.0, 1.0), (0.75, 0.75)])
-def test_a_scale_out_of_range_is_clamped_and_says_so(tmp_path, monkeypatch, capsys, value, held):
-    monkeypatch.delenv(ENV, raising=False)
+def test_a_scale_out_of_range_is_clamped_and_says_so(tmp_path, capsys, value, held):
     path = tmp_path / 'camera_offset.json'
     path.write_text(json.dumps({'footprint_scale': value}))
     assert with_measured_camera(GO2_CONFIG, path).footprint_scale == (held,) * 3
     assert ('outside' in capsys.readouterr().err) == (value != held)
     path.write_text(json.dumps({'footprint_scale': {'rear': value}}))
     assert with_measured_camera(GO2_CONFIG, path).footprint_scale == (1.0, held, 1.0)
-    capsys.readouterr()
-    monkeypatch.setenv(ENV, str(value))
-    assert robot_specs.robot_config(tmp_path / 'absent.json').footprint_scale == (held,) * 3
-    err = capsys.readouterr().err
-    assert (ENV in err and 'outside' in err) == (value != held)
-    monkeypatch.setenv(ENV, f'1.0,1.0,{value}')
-    assert robot_specs.robot_config(tmp_path / 'absent.json').footprint_scale == (1.0, 1.0, held)
 
 
 @pytest.mark.parametrize('bad', ['"narrow"', 'NaN', 'null', '{"width": "narrow"}',
                                  '{"sides": 0.8}', '"0.9,0.8"'])
-def test_a_scale_that_is_not_a_scale_is_refused(tmp_path, monkeypatch, capsys, bad):
-    """Not a number, a direction that does not exist, two numbers where one or three
-    go: in the file it makes the file unreadable, as any bad key does; in the env it
-    stops the process, as a bad ROBOT_TYPE does."""
+def test_a_scale_that_is_not_a_scale_is_refused(tmp_path, capsys, bad):
+    """Not a number, or a direction that does not exist: the file is unreadable, as
+    any bad key makes it."""
     path = tmp_path / 'camera_offset.json'
     path.write_text('{"forward_m": 0.3, "left_m": 0.0, "footprint_scale": %s}' % bad)
     assert with_measured_camera(GO2_CONFIG, path) is GO2_CONFIG
     assert str(path) in capsys.readouterr().err
-    if not bad.startswith('{'):
-        monkeypatch.setenv(ENV, bad.strip('"'))
-        with pytest.raises(ValueError, match=ENV):
-            robot_specs.robot_config(tmp_path / 'absent.json')
