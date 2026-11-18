@@ -29,6 +29,8 @@ MAX_RECOVERY_ATTEMPTS = 5
 RECOVERY_RESPONSE_S = 0.8
 RECOVERY_MOVE, RECOVERY_TURN = 0.06, 0.12
 RECOVERY_PHASES = ((0.2, 0.6, 0.5), (-0.1, 0.6, 1.0), (-0.2, 0.3, 1.0), (-0.2, 0.0, 0.5))
+TURN_PREFERENCE_S = 0.45
+TURN_REVERSAL_COST = 0.04
 ESCAPE_TOL = 0.01  # m an escape move may lose to ESDF noise; never below 0 (touching the obstacle)
 
 
@@ -75,7 +77,8 @@ def route_guided_command(route, center, yaw, v, w):
     return speed, float(turn)
 
 
-def progress_command(center, yaw, goal, desired_turn, esdf, origin, *, edge=EDGE):
+def progress_command(center, yaw, goal, desired_turn, esdf, origin, *, edge=EDGE,
+                     min_forward=0.0, min_turn=0.0, preferred_turn=0.0):
     """Find a short forward motion with the same swept-footprint clearance rule."""
     relative = to_robot_frame(goal, center, yaw)
     if relative[0] <= abs(relative[1]) * .5:
@@ -84,7 +87,10 @@ def progress_command(center, yaw, goal, desired_turn, esdf, origin, *, edge=EDGE
     now = footprint_clearance(rollout(center, yaw, 0., 0., steps=0), esdf, origin, GRID_RES, edge=edge)[0]
     minimum = GUARD_MARGIN if now >= GUARD_MARGIN else max(0., now - ESCAPE_TOL)
     steps = round(GUARD_HORIZON / ROLLOUT_DT)
-    options = [(v, w) for v in (.04, .06, .08, .12, .16, .20) for w in (-.6, -.5, -.4, -.3, -.2, -.1, 0., .1, .2, .3, .4, .5, .6)]
+    speeds = sorted({max(min_forward, v) for v in (.04, .06, .08, .12, .16, .20)})
+    turns = [w for w in (-.6, -.5, -.4, -.3, -.2, -.1, 0., .1, .2, .3, .4, .5, .6)
+             if w == 0.0 or abs(w) >= min_turn]
+    options = [(v, w) for v in speeds for w in turns]
     poses = np.asarray([rollout(center, yaw, v, w, steps=steps) for v, w in options])
     clearance = footprint_clearance(poses.reshape(-1, 3), esdf, origin, GRID_RES, edge=edge)
     clearance = clearance.reshape(len(options), steps + 1)[:, 1:].min(axis=1)
@@ -93,19 +99,22 @@ def progress_command(center, yaw, goal, desired_turn, esdf, origin, *, edge=EDGE
     # Reward ending the rollout with room to continue, beyond the swept minimum.
     end_clearance = footprint_clearance(poses[:, -1], esdf, origin, GRID_RES, edge=edge)
     score = gain + .65 * np.minimum(end_clearance, .25) - .05 * np.abs(turn - desired_turn)
+    score -= TURN_REVERSAL_COST * (turn * preferred_turn < 0.0)
     score[(clearance < minimum) | (gain < .025)] = -np.inf
     selected = int(np.argmax(score))
     return options[selected] if np.isfinite(score[selected]) else None
 
 
-def search_forward_command(center, yaw, goal, guided, current, policy_speed, esdf, origin, *, edge=EDGE):
+def search_forward_command(center, yaw, goal, guided, current, policy_speed, esdf, origin, *, edge=EDGE,
+                           min_forward=0.0, min_turn=0.0, preferred_turn=0.0):
     """Search faster arcs with the same one-second swept clearance margin."""
     gv, gw = guided
-    if gv < .05:
+    if gv < .05 or min_forward > .55:
         return None
-    top = min(.55, max(gv, policy_speed))
-    speeds = sorted({min(top, v) for v in (.04, .08, .12, .16, .20, .25, .30, .35, .40, .45, .50, .55)})
-    turns = sorted({gw, *np.linspace(-W_MAX, W_MAX, 11)})
+    top = min(.55, max(gv, policy_speed, min_forward))
+    speeds = sorted({min(top, max(min_forward, v))
+                     for v in (.04, .08, .12, .16, .20, .25, .30, .35, .40, .45, .50, .55)})
+    turns = sorted({w if abs(w) >= min_turn else 0.0 for w in (gw, *np.linspace(-W_MAX, W_MAX, 11))})
     commands = np.array([(v, w) for v in speeds for w in turns])
     commands = np.vstack((current, commands))
     v, w = commands.T
@@ -132,6 +141,7 @@ def search_forward_command(center, yaw, goal, guided, current, policy_speed, esd
     room = room.reshape(len(v), -1).min(axis=1)
     forward_room = np.clip(room, -.05, .22)
     score += 1.9 * forward_room
+    score -= TURN_REVERSAL_COST * (w * preferred_turn < 0.0)
 
     score[(clearance.min(axis=1) < GUARD_MARGIN) | (gain < .025)] = -np.inf
     choice = int(np.argmax(score))
@@ -182,6 +192,7 @@ class RLPlanner:
         self.recovery = None
         self.recovery_start = None
         self.failed_recoveries = set()
+        self.turn_direction, self.turn_started = 0.0, 0.0
 
     def _checked_recovery(self, center, yaw, stamp, esdf, origin, phases):
         if phases in self.failed_recoveries:
@@ -279,17 +290,19 @@ class RLPlanner:
         left = np.array([-forward[1], forward[0]])
         return center + self.geometry.control_x * forward + self.geometry.control_y * left
 
-    def _guard_command(self, center, yaw, goal, guided, policy_speed, esdf, origin):
+    def _guard_command(self, center, yaw, goal, guided, policy_speed, esdf, origin, *, preferred_turn=0.0):
         requested_v, requested_w = guided
-        v, w, reason = safe_command(center, yaw, *guided, esdf, origin, GRID_RES, edge=self.edge)
+        guard = dict(edge=self.edge, min_forward=ROBOT_CONFIG.min_linear_vel,
+                     min_turn=ROBOT_CONFIG.min_angular_vel, preferred_turn=preferred_turn)
+        v, w, reason = safe_command(center, yaw, *guided, esdf, origin, GRID_RES, **guard)
         status = self.GUARD_REASONS[reason]
         if reason != 0 and requested_v > .05:
-            alternate = progress_command(center, yaw, goal, requested_w, esdf, origin, edge=self.edge)
+            alternate = progress_command(center, yaw, goal, requested_w, esdf, origin, **guard)
             if alternate is not None:
                 v, w = alternate
                 status = "progress fallback"
         alternate = search_forward_command(
-            center, yaw, goal, guided, (v, w), policy_speed, esdf, origin, edge=self.edge,
+            center, yaw, goal, guided, (v, w), policy_speed, esdf, origin, **guard,
         )
         if alternate is not None:
             v, w = alternate
@@ -320,7 +333,10 @@ class RLPlanner:
         policy_speed = v
         v, w = route_guided_command(getattr(self, "route_xy", None), center, yaw, v, w)
         self.guided_command = (v, w)
-        v, w, status = self._guard_command(center, yaw, goal_xy, (v, w), policy_speed, esdf, origin)
+        turn_age = stamp - self.turn_started
+        preferred_turn = self.turn_direction if 0.0 <= turn_age < TURN_PREFERENCE_S else 0.0
+        v, w, status = self._guard_command(center, yaw, goal_xy, (v, w), policy_speed, esdf, origin,
+                                          preferred_turn=preferred_turn)
         preferred = -1.0 if a[1] >= 0.0 else 1.0
         if status == "clearance blocked":
             self.motion.clear()
@@ -373,5 +389,8 @@ class RLPlanner:
                     v, w, status = 0.0, 0.0, "recovery complete"
         if self.stuck:
             v, w, status = 0.0, 0.0, "stuck"
+        direction = float(np.sign(w)) if abs(w) >= ROBOT_CONFIG.min_angular_vel else 0.0
+        if direction != self.turn_direction or turn_age < 0.0:
+            self.turn_direction, self.turn_started = direction, stamp
         self.motion_command_sent = bool(v or w)
         return v, w, rollout(center, yaw, v, w), bev, status

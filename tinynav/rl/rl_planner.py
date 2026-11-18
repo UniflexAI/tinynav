@@ -84,7 +84,8 @@ def footprint_clearance(poses, esdf, origin, res, *, edge=EDGE):
     return np.nan_to_num(d, nan=np.inf).min(axis=1) - res / 2
 
 
-def safe_command(center, yaw, v, w, esdf, origin, res, *, edge=EDGE):
+def safe_command(center, yaw, v, w, esdf, origin, res, *, edge=EDGE, min_forward=0.0,
+                 min_turn=0.0, preferred_turn=0.0):
     """First command in (policy, turn in place, turn the other way, creep forward, creep forward
     turning either way, straight back, stop) whose swept footprint keeps GUARD_MARGIN over
     GUARD_HORIZON. When the robot is already closer than the margin, a command also passes if it
@@ -93,9 +94,16 @@ def safe_command(center, yaw, v, w, esdf, origin, res, *, edge=EDGE):
     every turn sweeps a rear corner into it."""
     n = int(GUARD_HORIZON / ROLLOUT_DT)
     now = float(footprint_clearance(rollout(center, yaw, 0.0, 0.0, steps=0), esdf, origin, res, edge=edge)[0])
-    turn = np.sign(w) * max(abs(w), 0.3) if w != 0.0 else 0.3
-    options = ((v, w), (0.0, turn), (0.0, -turn), (CREEP_V, 0.0), (CREEP_V, turn), (CREEP_V, -turn), (V_MIN, 0.0))
-    for k, (cv, cw) in enumerate(options):
+    turn_rate = max(abs(w), 0.3, min_turn)
+    turn = -turn_rate if w < 0.0 else turn_rate
+    creep = max(CREEP_V, min_forward)
+    # Check the motion that can reach the controller, including the minimum forward speed.
+    v = max(v, min_forward) if v > 0.0 else v
+    w = 0.0 if abs(w) < min_turn else w
+    options = ((v, w), (0.0, turn), (0.0, -turn), (creep, 0.0), (creep, turn), (creep, -turn), (V_MIN, 0.0))
+    order = (0, 2, 1, 3, 5, 4, 6) if turn * preferred_turn < 0.0 else range(len(options))
+    for k in order:
+        cv, cw = options[k]
         clr = footprint_clearance(rollout(center, yaw, cv, cw, steps=n), esdf, origin, res, edge=edge)[1:]
         if clr.min() >= GUARD_MARGIN or (now < GUARD_MARGIN and clr.min() >= max(0.0, now - ESCAPE_TOL)):
             return cv, cw, k

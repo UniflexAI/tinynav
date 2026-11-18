@@ -202,3 +202,43 @@ def test_ppo_recovery_veto_rechecks_the_next_obstacle_map():
     assert (v, w, status) == (0.0, 0.0, "clearance blocked")
     v, _, _, _, status = planner.step(grid, origin, pose, (tick + 2) * 0.2, goal, clear)
     assert v > 0 and status == "ok"
+
+
+def test_ppo_checks_the_executable_forward_speed_before_selecting_it():
+    from tinynav.rl.ppo_planner import RLPlanner as PPOPlanner
+
+    planner = PPOPlanner(FakePolicy([0.08, 0.0]))
+    grid, origin, clear = _scene()
+    pose = _camera_pose(CAM, 0.0, 0.0)
+    goal = np.array([3.0, 0.0])
+    minimum = ROBOT_CONFIG.min_linear_vel
+    v, w, _, _, status = planner.step(grid, origin, pose, 0.0, goal, clear)
+    assert (v, w, status) == (minimum, 0.0, "ok")
+
+    # The original 0.08 m/s arc would clear the wall, but the 0.10 m/s arc would not.
+    wall = planner.geometry.front + 0.09 + 0.10
+    restricted = _field(origin, lambda X, Y: np.clip(wall + GRID_RES / 2 - X, 0, None))
+    planner.reset()
+    v, _, _, _, status = planner.step(grid, origin, pose, 0.0, goal, restricted)
+    assert v <= 0.0 and status != "ok"
+
+
+def test_ppo_fallback_prefers_a_recent_turn_only_while_safe():
+    from tinynav.rl.ppo_planner import RLPlanner as PPOPlanner
+
+    policy = FakePolicy([0.9, 0.5])
+    planner = PPOPlanner(policy)
+    grid, origin, _ = _scene()
+    symmetric = _field(origin, lambda X, Y: np.clip(0.68 + GRID_RES / 2 - X, 0, None))
+    pose = _camera_pose(CAM, 0.0, 0.0)
+    goal = np.array([3.0, 0.0])
+    first = planner.step(grid, origin, pose, 0.0, goal, symmetric)
+    assert first[0] == 0.0 and first[1] > 0.0
+    policy.action[1] *= -1
+    recent = planner.step(grid, origin, pose, 0.12, goal, symmetric)
+    assert recent[0] == 0.0 and recent[1] > 0.0
+    expired = planner.step(grid, origin, pose, 0.7, goal, symmetric)
+    assert expired[0] == 0.0 and expired[1] < 0.0
+
+    v, w, _, _, status = planner.step(grid, origin, pose, 0.8, goal, np.zeros_like(symmetric))
+    assert (v, w, status) == (0.0, 0.0, "clearance blocked")
