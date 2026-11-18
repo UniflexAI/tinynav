@@ -8,10 +8,10 @@
                 "cmd_vel_control": "tinynav/platforms/cmd_vel_control.py"},
   "map_settings": {
     "strict_follow": {"type": "boolean", "title": "Strict Follow",
-                      "description": "Keep to the route: don't start round an obstacle on it early",
+                      "description": "Don't go round route obstacles early",
                       "topic": "/planning/strict_follow", "default": false},
     "strict_stand": {"type": "boolean", "title": "Strict Stand",
-                     "description": "With strict follow, wait for a close obstacle on the route to clear",
+                     "description": "Wait for route obstacles to clear",
                      "topic": "/planning/strict_stand", "default": true}
   }
 }
