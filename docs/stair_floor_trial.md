@@ -60,3 +60,35 @@ The App Web build and this DOWN integration check pass. Upstairs physical
 operation and real L-corner recovery still need field validation. The older
 backend suite has four failures also present on the base commit, covering map
 image dimensions, yaw conversion, and two map-build API fixtures.
+
+## DOWN two-floor simulation (2026-11-19)
+
+Use `--floors 2 --capture /tmp/stair-floors-down-two.npz` with the integration
+command above. This builds four stacked flights and requests four landings from
+StairNode. The course builder uses 1.8 m flight widths for the multi-floor stack
+and 1.75 m deep turning platforms. It differs from the narrower two-flight scene.
+The navigation receives only calibrated single-front depth and simulated odometry;
+world geometry is used for rendering and validation, not target generation.
+
+The initial unchanged run failed the independent shaft-footprint check on the
+first flight. Visible area across floors confused the railing-side heuristic,
+and post-selection target nudging could pull targets off the current flight.
+The target generator now prefers solid walls above the local stair plane for
+side evidence, fits observed reachable treads to keep flight targets aligned,
+and estimates landing crossing width from observed level ground rather than
+using only fixed spacing. All resulting targets still pass through PlanningNode
+and CmdVelControlNode. This is a simulation fix; field validation is pending.
+
+The repeated final run completed landing counts 1, 2, 3, 4 at 27.3, 71.3, 96.2,
+and 120.5 seconds after task start. The first full floor continues with floors=1/2;
+arrival is latched only at landings=4/4, floors=2/2. Every count transition is
+checked against simulated height (one 1.44 m flight per landing), with no skipped
+or duplicate count. No fall, wall/railing contact, or shaft footprint overlap
+occurred. Minimum rectangular-footprint shaft clearance was 0.4954 m.
+
+The destination stop held zero published velocity for 1.5 seconds while stair and
+controller timers continued. Horizontal physical drift was 7.5 mm. The updated
+one-floor simulation also passes (minimum shaft clearance 0.1979 m), and the
+focused tests pass 20/20, including continuing after the first full floor.
+The capture includes actual local height/observed/reachable grids, planner
+obstacles, selected target/path, published drive commands and landing events.

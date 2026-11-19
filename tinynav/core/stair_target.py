@@ -531,9 +531,16 @@ class StairTargetGenerator:
             # with more cells seen far to the side. This works both up and down.
             ref = self.flight_dir if self.flight_dir is not None else fwd
             lateral, along = lateral_to(ref), rel_xy @ ref
-            beside = observed & (np.abs(along) < 1.5)
+            beside = observed & ~obstacle & (height < foot_z + along * np.tan(np.radians(self.pitch)) + cfg.max_step) & (np.abs(along) < 1.5)
             seen_l = np.sum(beside & (lateral > cfg.side_view_min) & (lateral < cfg.side_view_max))
             seen_r = np.sum(beside & (lateral < -cfg.side_view_min) & (lateral > -cfg.side_view_max))
+            # Solid side walls rise above the stair plane; thin railing beams do not.
+            # Prefer this evidence over visible area, which includes lower floors.
+            solid = obstacle & (np.abs(along) < 1.5) & (height > foot_z + along * np.tan(np.radians(self.pitch)) + 0.45)
+            wall_l = np.sum(solid & (lateral > 0.2) & (lateral < cfg.side_view_max))
+            wall_r = np.sum(solid & (lateral < -0.2) & (lateral > -cfg.side_view_max))
+            if max(wall_l, wall_r) > 10 and max(wall_l, wall_r) > 2 * min(wall_l, wall_r):
+                seen_l, seen_r = wall_r, wall_l
             if seen_l + seen_r > 0:
                 self.well_side = cfg.well_decay * self.well_side + (1 - cfg.well_decay) * (seen_l - seen_r) / (seen_l + seen_r) * 10
             # among cells of the extreme level, take the nearest in path cost
@@ -566,13 +573,24 @@ class StairTargetGenerator:
                 if self.uturn_entry is None:
                     self.uturn_entry = self.next_entry if self.next_entry is not None else \
                         start + side * cfg.next_flight_lateral * left - cfg.next_flight_back * fwd
+                # Center the crossing on the observed landing width rather than
+                # assuming every pair of flights has the configured spacing.
+                from_start = cell_xy - start
+                across = side * (from_start @ left)
+                platform = reachable & observed & (np.abs(height - foot_z) < 0.20) & (across > 0.5) & (across < 3.2) & ((from_start @ fwd) > -0.2) & ((from_start @ fwd) < 1.2)
+                if np.sum(platform) > 20:
+                    width = max(cfg.next_flight_lateral, float(np.quantile(across[platform], 0.95)) - cfg.wall_keep)
+                    current = side * ((self.uturn_entry - start) @ left)
+                    if width > current:
+                        self.uturn_entry += side * (width - current) * left
                 entry, back = self.uturn_entry, -fwd
+                crossing_width = side * ((entry - start) @ left)
                 in_from_flight, crossed = (cam[:2] - start) @ fwd, side * ((cam[:2] - start) @ left)
-                self.uturn_crossed |= crossed >= cfg.next_flight_lateral - cfg.uturn_cross_slack
+                self.uturn_crossed |= crossed >= crossing_width - cfg.uturn_cross_slack
                 if self.uturn_crossed and not self.uturn_at_entry and np.linalg.norm(entry - cam[:2]) <= cfg.search_reached:
                     self.uturn_at_entry = True
                 if not self.uturn_crossed:
-                    aim = start + fwd * cfg.uturn_step_in + side * cfg.next_flight_lateral * left
+                    aim = start + fwd * cfg.uturn_step_in + side * crossing_width * left
                 elif not self.uturn_at_entry:
                     aim = entry
                 else:  # keep the aim ahead of us along the next flight
@@ -668,6 +686,29 @@ class StairTargetGenerator:
             if np.any(near):
                 c = np.unravel_index(np.argmax(np.where(near, np.minimum(clearance, cfg.target_open_cap), -np.inf)), near.shape)
                 target = np.array([*cell_xy[c], height[c]])
+        if self.on_flight and travel is not None:
+            # Fit the visible treads, excluding walls and the other flight.
+            along = rel_xy @ travel
+            lateral = travel[0] * rel_xy[..., 1] - travel[1] * rel_xy[..., 0]
+            tread = observed & reachable & ~obstacle & (along > 0.1) & (along < 1.6) & (np.abs(lateral) < 0.45)
+            if np.sum(tread) >= 20:
+                xy, z = rel_xy[tread], height[tread]
+                design = np.column_stack((xy, np.ones(len(xy))))
+                coef = np.linalg.lstsq(design, z, rcond=None)[0]
+                for _ in range(2):
+                    keep = np.abs(design @ coef - z) < 0.12
+                    if np.sum(keep) < 20:
+                        break
+                    coef = np.linalg.lstsq(design[keep], z[keep], rcond=None)[0]
+                slope = np.linalg.norm(coef[:2])
+                axis = sign * coef[:2] / max(slope, 1e-9)
+                if 0.2 < slope < cfg.max_slope and axis @ travel > 0.85:
+                    aim = cam[:2] + axis * min(cfg.lookahead, max(0.5, (target[:2] - cam[:2]) @ axis))
+                    candidate = reachable & observed & (np.linalg.norm(cell_xy - aim, axis=-1) < 0.2)
+                    if np.any(candidate):
+                        c = np.unravel_index(np.argmin(np.where(candidate, np.linalg.norm(cell_xy - aim, axis=-1), np.inf)), height.shape)
+                        target = np.array([*cell_xy[c], height[c]])
+                        out['tread_aligned'] = True
         target = self._keep_in_front(target, cam, heading, reachable, observed, clearance, cell_xy, height, rel_xy, r_robot, out)
         out.update(goal=path_xyz[-1], target=target, path=path_xyz)
         return out

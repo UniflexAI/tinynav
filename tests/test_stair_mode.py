@@ -247,3 +247,21 @@ def test_stationary_search_replans_on_the_observed_landing():
             index = np.floor((res['path'][:, :2] - res['origin']) / cfg.resolution).astype(int)
             assert res['free'][index[:, 0], index[:, 1]].all()
         assert gen.landings == 0
+
+
+def test_two_floors_continues_through_first_floor_and_stops_at_four(node):
+    node.floors, node.landings_goal = 2, 4
+    node.gen.compute = Mock(return_value={'target': np.array([1., 0., -1.44]), 'path': None, 'status': 'search'})
+    for landing in range(4):
+        node.gen.landings = landing
+        node.timer_callback()
+        assert not node.arrived
+        assert f'floors={landing // 2}/2' in node.status_pub.publish.call_args.args[0].data
+    assert node.target_pub.publish.call_count == 4
+    node.gen.landings = 4
+    node.timer_callback()
+    assert node.arrived
+    assert 'landings=4/4 floors=2/2' in node.status_pub.publish.call_args.args[0].data
+    for _ in range(5):
+        node.timer_callback()
+    assert node.target_pub.publish.call_count == 4
