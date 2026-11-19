@@ -1,15 +1,17 @@
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import Twist
-from nav_msgs.msg import Path
-from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
-from rclpy.qos import DurabilityPolicy, QoSProfile
-from scipy.spatial.transform import Rotation as R
-import numpy as np
 import logging
 import time
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry, Path
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from scipy.spatial.transform import Rotation as R
+from std_msgs.msg import Bool
+
 from tinynav.core.robot_specs import ROBOT_CONFIG
+from tinynav.platforms.path_tracking import PathTracker
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
@@ -44,6 +46,14 @@ class CmdVelControlNode(Node):
         self.max_angular_acc = 0.8  # rad/s^2
         self.max_angular_speed = self.robot.max_angular_vel  # rad/s
         self.max_forward_speed = self.robot.max_linear_vel  # m/s
+        self.tracker = PathTracker(
+            self.max_forward_speed, self.max_angular_speed,
+            self.declare_parameter('tracking_linear_pid', [1.2, 0.1, 0.05]).value,
+            self.declare_parameter('tracking_angular_pid', [1.8, 0.05, 0.05]).value,
+            self.declare_parameter('tracking_lateral_gain', 1.5).value,
+        )
+        self.odom_stale_stop_s = 0.5
+        self.last_odom_time = None
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -72,6 +82,7 @@ class CmdVelControlNode(Node):
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
+        self.tracker.reset()
         if not self._paused:
             # Reset prev_cmd so resume starts from zero cleanly
             self.prev_cmd = Twist()
@@ -83,12 +94,31 @@ class CmdVelControlNode(Node):
             self.latest_cmd = Twist()
             self.prev_cmd = Twist()
             self.last_path_update_time = None
+            self.tracker.reset()
             # Send one stop when navigation is deactivated, then stay silent so
             # manual teleop can own /cmd_vel without being overwritten by zeros.
             self.cmd_pub.publish(Twist())
 
     def pose_callback(self, msg):
         self.pose = msg
+        self.last_odom_time = time.monotonic()
+
+    @staticmethod
+    def _pose_transform(pose):
+        position, rotation = pose.position, pose.orientation
+        values = [position.x, position.y, position.z,
+                  rotation.x, rotation.y, rotation.z, rotation.w]
+        if not np.all(np.isfinite(values)) or np.linalg.norm(values[3:]) < 1e-8:
+            raise ValueError('Pose must contain a finite position and nonzero quaternion')
+        transform = np.eye(4)
+        transform[:3, :3] = R.from_quat(values[3:]).as_matrix()
+        transform[:3, 3] = values[:3]
+        return transform
+
+    @staticmethod
+    def _planar_pose(transform):
+        return [transform[0, 3], transform[1, 3],
+                np.arctan2(transform[1, 0], transform[0, 0])]
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
@@ -106,6 +136,12 @@ class CmdVelControlNode(Node):
             self.prev_cmd = Twist()
             return
 
+        if self.last_odom_time is None or now - self.last_odom_time > self.odom_stale_stop_s:
+            self.cmd_pub.publish(Twist())
+            self.prev_cmd = Twist()
+            self.tracker.reset()
+            return
+
         # Stale-path protection: slow down, then stop if planner has not refreshed.
         age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
         stale_slow_s = max(self.path_stale_slow_s, self.path_period_ema * self.path_stale_slow_factor)
@@ -113,9 +149,22 @@ class CmdVelControlNode(Node):
         target_cmd = Twist()
         target_cmd.linear.x = self.latest_cmd.linear.x
         target_cmd.angular.z = self.latest_cmd.angular.z
+        try:
+            camera = self._pose_transform(self.pose.pose.pose)
+            pose = camera @ self.T_robot_to_camera
+            pose[:3, 3] -= camera[:3, :3] @ self.robot.cam_offset_3d
+        except ValueError:
+            self.cmd_pub.publish(Twist())
+            self.prev_cmd = Twist()
+            self.tracker.reset()
+            return
+        if age <= stale_stop_s and target_cmd.linear.x >= 0.0:
+            target_cmd.linear.x, target_cmd.angular.z = self.tracker.command(
+                self._planar_pose(pose), age, dt)
         if age > stale_stop_s:
             target_cmd.linear.x = 0.0
             target_cmd.angular.z = 0.0
+            self.tracker.reset()
         elif age > stale_slow_s:
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
@@ -126,6 +175,7 @@ class CmdVelControlNode(Node):
         # Reverse is a predefined planner vocabulary: straight back at fixed speed.
         # Do not smooth or re-lock it here; just pass it through while stale/paused guards still work.
         if target_cmd.linear.x < 0.0:
+            self.tracker.reset()
             out.linear.x = target_cmd.linear.x
             out.angular.z = 0.0
             self.cmd_pub.publish(out)
@@ -135,7 +185,7 @@ class CmdVelControlNode(Node):
         # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
         max_dv = self.max_linear_acc * dt
         # If we just left reverse mode, do not let acceleration limiting leak another reverse command.
-        prev_linear_x = 0.0 if self.prev_cmd.linear.x < 0.0 else self.prev_cmd.linear.x
+        prev_linear_x = max(self.prev_cmd.linear.x, 0.0)
         out.linear.x = self._clamp_step(target_cmd.linear.x, prev_linear_x, max_dv)
         # Do not acceleration-limit yaw. The planner/control layer already decides the turn rate,
         # and forced rotate-in-place should take effect immediately.
@@ -175,18 +225,22 @@ class CmdVelControlNode(Node):
             self.path_period_ema = 0.85 * self.path_period_ema + 0.15 * float(period)
         self.last_path_update_time = now_mono
 
-        def msg2np(msg):
-            T = np.eye(4)
-            position = msg.pose.position
-            rot = msg.pose.orientation
-            quat = [rot.x, rot.y, rot.z, rot.w]
-            T[:3, :3] = R.from_quat(quat).as_matrix()
-            T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
-            return T
-        
-        T1 = msg2np(self.path.poses[0])
+        try:
+            transforms = [self._pose_transform(pose.pose) for pose in msg.poses]
+            stamps = [pose.header.stamp.sec + pose.header.stamp.nanosec * 1e-9
+                      for pose in msg.poses]
+            self.tracker.set_path(
+                [self._planar_pose(pose @ self.T_robot_to_camera) for pose in transforms],
+                stamps, self.planner_dt * self.path_pose_stride)
+        except ValueError:
+            self.last_path_update_time = None
+            self.latest_cmd = Twist()
+            self.tracker.reset()
+            return
+
+        T1 = transforms[0]
         step_idx = int(min(self.lookahead_steps, len(self.path.poses) - 1))
-        T2 = msg2np(self.path.poses[step_idx])
+        T2 = transforms[step_idx]
         T_robot_1 = T1 @ self.T_robot_to_camera
         T_robot_2 = T2 @ self.T_robot_to_camera
         T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
