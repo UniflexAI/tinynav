@@ -20,7 +20,9 @@ from std_msgs.msg import Bool
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--sim-root", type=Path, required=True)
 parser.add_argument("--course-script", type=Path, required=True)
+parser.add_argument("--capture", type=Path)
 args = parser.parse_args()
+capture_path = args.capture
 sys.path.insert(0, str(args.sim_root / "mujoco"))
 from sim import plant
 from sim.keyboard import ConstantCmd
@@ -74,6 +76,90 @@ bridge = CvBridge()
 min_clearance = np.inf
 wall_ids = {i for i in range(model.ngeom)
             if model.geom(i).name.endswith("_wall") or "rail" in model.geom(i).name}
+frames = []
+capture_times, capture_poses, capture_maps = [], [], []
+capture_targets, capture_paths, capture_commands, capture_status = [], [], [], []
+capture_landings, capture_clearance = [], []
+latest_result = {}
+original_compute = stair.gen.compute
+
+
+def record_compute(*values, **options):
+    result = original_compute(*values, **options)
+    latest_result.clear()
+    latest_result.update(result)
+    points = np.concatenate([p for _, p in stair.gen.frames])
+    _, _, observed, _ = build_height_map(
+        points, values[0][:2, 3], values[0][2, 3], stair.gen.cfg)
+    latest_result["observed"] = observed
+    return result
+
+
+def record_path(msg):
+    latest_path.clear()
+    latest_path.extend((p.pose.position.x, p.pose.position.y) for p in msg.poses)
+    control.path_callback(msg)
+
+
+def record_frame():
+    q = data.qpos[binding.root_qpos_adr:binding.root_qpos_adr + 7].copy()
+    yaw = course.yaw_of(q[3:])
+    offset = (31.5 - np.arange(64)) * .08
+    x, y = np.meshgrid(offset, offset, indexing="ij")
+    c, s = np.cos(yaw), np.sin(yaw)
+    world = np.stack((q[0] + c * x - s * y, q[1] + s * x + c * y), axis=-1)
+
+    def sample(grid, origin, resolution, fill=0):
+        ij = np.floor((world - origin) / resolution).astype(int)
+        inside = ((ij >= 0) & (ij < grid.shape)).all(axis=-1)
+        ix, iy = np.moveaxis(np.clip(ij, 0, np.array(grid.shape) - 1), -1, 0)
+        return np.where(inside, grid[ix, iy], fill)
+
+    res = latest_result
+    local = np.zeros((4, 64, 64), dtype=np.float32)
+    if res:
+        local[0] = sample(res["height"], res["origin"], stair.gen.cfg.resolution, np.nan)
+        local[1] = sample(res["observed"], res["origin"], stair.gen.cfg.resolution)
+        local[2] = sample(res.get("reachable", res["free"]), res["origin"], stair.gen.cfg.resolution)
+    if latest_mask:
+        mask = latest_mask[-1]
+        grid = np.asarray(mask.data).reshape((mask.info.height, mask.info.width), order="F")
+        origin = np.array((mask.info.origin.position.x, mask.info.origin.position.y))
+        local[3] = sample(grid > 0, origin, mask.info.resolution)
+    camera.lookat[:] = q[:3] + (0., 0., -.16)
+    camera.azimuth = 277. if q[1] > .7 else 105.
+    camera.elevation = -45.
+    renderer.update_scene(data, camera=camera, scene_option=display)
+    frames.append(renderer.render().copy())
+    capture_times.append(float(data.time) - start_time)
+    capture_poses.append(q)
+    capture_maps.append(local.astype(np.float16))
+    target = planner.target_pose
+    capture_targets.append(np.full(2, np.nan) if target is None else target[:2].copy())
+    path = np.full((32, 2), np.nan)
+    if latest_path:
+        path[:min(32, len(latest_path))] = latest_path[:32]
+    capture_paths.append(path)
+    capture_commands.append((drive.vx, drive.wz))
+    capture_status.append(status.last or "")
+    capture_landings.append(stair.gen.landings)
+    capture_clearance.append(min_clearance)
+
+
+latest_mask, latest_path = [], []
+renderer = None
+start_time = float(data.time)
+if capture_path:
+    from tinynav.core.stair_target import build_height_map
+    stair.gen.compute = record_compute
+    planner.obstacle_mask_pub = SimpleNamespace(publish=lambda msg: latest_mask.append(msg))
+    planner.path_pub = SimpleNamespace(publish=record_path)
+    renderer = mujoco.Renderer(model, height=400, width=720)
+    camera = mujoco.MjvCamera()
+    camera.distance = 2.3
+    display = mujoco.MjvOption()
+    display.geomgroup[1] = 0
+    display.geomgroup[3] = 1
 try:
     for tick in range(1800):
         mujoco.mj_camlight(model,data)
@@ -91,6 +177,8 @@ try:
         control.pose_callback(pose)
         if tick % 5 == 0:
             stair.timer_callback()
+        latest_path.clear()
+        latest_mask.clear()
         with contextlib.redirect_stdout(io.StringIO()):
             planner.sync_callback(depth,pose)
         control.cmd_timer_callback()
@@ -99,6 +187,8 @@ try:
         drive.wz = command.angular.z if command else 0.
         if tick%30 == 0:
             print("pose",round(data.time,2),runtime.base_pos().round(3),round(drive.vx,3),round(drive.wz,3),flush=True)
+        if renderer:
+            record_frame()
         for _ in range(5):
             runtime.tick()
             assert not runtime.is_fallen(), ("fallen",runtime.base_pos())
@@ -112,12 +202,21 @@ try:
             assert stair.gen.landings==2 and drive.vx==drive.wz==0
             stop = runtime.base_pos().copy()
             assert stop[0] < -.5 and abs(stop[2] + 2.88 - robot.spawn_drop) < .12, stop
-            for _ in range(75):
+            for i in range(75):
                 runtime.tick()
                 assert not runtime.is_fallen(), ("fallen at stop",runtime.base_pos())
+                if renderer and i % 5 == 4:
+                    record_frame()
             hold = runtime.base_pos().copy()
             assert np.linalg.norm(hold[:2] - stop[:2]) < .12
             print("PASS DOWN 1 floor", stop, "hold", hold, "shaft clearance", min_clearance, flush=True)
+            if capture_path:
+                capture_path.parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(capture_path, detail=frames, time=capture_times,
+                                    qpos=capture_poses, bev=capture_maps, target=capture_targets,
+                                    path=capture_paths, cmd=capture_commands, status=capture_status,
+                                    landings=capture_landings, clearance=capture_clearance,
+                                    stop=stop, hold=hold)
             break
     else:
         raise RuntimeError(("did not arrive",runtime.base_pos(),stair.gen.landings))
@@ -125,5 +224,7 @@ finally:
     for n in (stair, planner,control):
         n.destroy_node()
     rclpy.shutdown()
+    if renderer:
+        renderer.close()
     nav_camera.close()
     runtime.close()
