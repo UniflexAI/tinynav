@@ -32,6 +32,19 @@ def test_a_floor_height_puts_the_band_bottom_above_that_floor(tmp_path):
     assert replace(got, robot_z_bottom=GO2_CONFIG.obstacle.robot_z_bottom) == GO2_CONFIG.obstacle
 
 
+def test_raw_band_keys_pin_the_band_and_win_over_the_floor_derivation(tmp_path):
+    path = tmp_path / 'camera_offset.json'
+    path.write_text(json.dumps({'z_bottom_m': -0.09, 'z_top_m': 0.3}))
+    got = with_measured_camera(GO2_CONFIG, path).obstacle
+    assert (got.robot_z_bottom, got.robot_z_top) == (-0.09, 0.3)
+    assert replace(got, robot_z_bottom=GO2_CONFIG.obstacle.robot_z_bottom,
+                   robot_z_top=GO2_CONFIG.obstacle.robot_z_top) == GO2_CONFIG.obstacle
+    path.write_text(json.dumps({'z_top_m': 0.3, 'floor_at': '2026-11-19', 'up_m': 0.515}))
+    got = with_measured_camera(GO2_CONFIG, path).obstacle
+    assert (got.robot_z_bottom, got.robot_z_top) == (
+        GO2_CONFIG.obstacle.robot_z_bottom, 0.3)
+
+
 @pytest.mark.parametrize('body', ['{"forward_m": 0.3}', 'not json', '{"forward_m": "x", "left_m": 0}'])
 def test_an_unreadable_file_is_the_type_default_and_says_so(tmp_path, capsys, body):
     path = tmp_path / 'camera_offset.json'

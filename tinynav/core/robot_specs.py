@@ -257,7 +257,9 @@ G1_CONFIG = RobotConfig(
 
 #: This rig's measured camera offset, over the robot type's. `forward_m` / `left_m`
 #: in metres, in the body frame above; `up_m` the camera's height above the floor when
-#: `floor_at` says it was measured from the floor; any other key is the writer's own record.
+#: `floor_at` says it was measured from the floor; `z_bottom_m` / `z_top_m` the obstacle
+#: band outright, for a rig whose camera is not the type's nominal height (they win over
+#: the `floor_at` derivation); any other key is the writer's own record.
 CAMERA_OFFSET_PATH = '/tinynav/tinynav_db/calib/camera_offset.json'
 #: How far above the floor the obstacle band starts once the camera's height is
 #: measured: what go2's -0.45 left on 65, whose camera is 0.515 m up (2026-11-04).
@@ -273,7 +275,9 @@ def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
     """`config` with what the rig's file at `path` sets, each part optional: the camera
     offset (`forward_m` / `left_m`, the looper plugin's), the obstacle band's bottom
     FLOOR_CLEARANCE_M above the floor when its height was measured (`floor_at` /
-    `up_m`), and the footprint (all of FOOTPRINT_FIELDS, written by hand); the type's
+    `up_m`), the obstacle band outright (`z_bottom_m` / `z_top_m`, when the rig's
+    camera is not the type's nominal height; they win over the `floor_at`
+    derivation), and the footprint (all of FOOTPRINT_FIELDS, written by hand); the type's
     value for anything it does not set. `config` itself when there is no file or it
     cannot be read. An unreadable one is said on stderr, because every process that
     plans imports this and none of them should fail to start over it."""
@@ -290,7 +294,12 @@ def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
                           camera_left=float(doc['left_m']))
         if any(k in doc for k in FOOTPRINT_FIELDS):
             out = replace(out, **{k: float(doc[k]) for k in FOOTPRINT_FIELDS})
-        if 'floor_at' in doc:
+        if 'z_bottom_m' in doc or 'z_top_m' in doc:
+            out = replace(out, obstacle=replace(
+                out.obstacle,
+                robot_z_bottom=float(doc.get('z_bottom_m', out.obstacle.robot_z_bottom)),
+                robot_z_top=float(doc.get('z_top_m', out.obstacle.robot_z_top))))
+        elif 'floor_at' in doc:
             out = replace(out, obstacle=replace(
                 out.obstacle, robot_z_bottom=-(float(doc['up_m']) - FLOOR_CLEARANCE_M)))
         return out
