@@ -355,6 +355,14 @@ class PlanningNode(Node):
         )
         self.bridge = CvBridge()
         self.navigation_limits = NavigationLimits.from_environment() if shared_safety() else None
+        self.response_profile = None
+        if os.environ.get("TINYNAV_GO2_RESPONSE_GUARD") == "1":
+            if self.navigation_limits is None or ROBOT_CONFIG.name != "go2" or not route_guidance():
+                raise ValueError("Go2 response guard requires Go2, PPO route guidance and shared safety")
+            from pathlib import Path as FilePath
+            from tinynav.rl import calibrated_guard
+            self.response_profile = calibrated_guard.compile_profile(json.loads(
+                FilePath(calibrated_guard.__file__).with_name("go2_response.json").read_text()))
         self.live_odom = None
         self.drive_command = (0., 0.)
         if self.navigation_limits is not None:
@@ -489,7 +497,21 @@ class PlanningNode(Node):
         guard = self.make_navigation_guard(guard.esdf)
         command = guard.limits.executable([requested])[0]
         valid, room, paths = guard.evaluate([command])
-        if not valid[0]:
+        calibrated_room = None
+        if self.response_profile is not None and policy is not None:
+            from tinynav.rl.calibrated_guard import select
+            if status in ("stuck", "recovery no motion", "recovery blocked", "clearance blocked", "recovery complete"):
+                command = np.zeros(2)
+            else:
+                v, w, calibrated_room = select(guard, self.target_pose[:2], self.rl.route_xy,
+                                               command.tolist(), self.response_profile, self.rl.vel)
+                command = np.array([v, w])
+                status = "calibrated route selection"
+            valid, room, paths = guard.evaluate([command])
+            if calibrated_room is not None:
+                room[0] = min(room[0], calibrated_room)
+                valid[0] &= room[0] >= guard.limits.margin
+        elif not valid[0]:
             v, w, status = guard.select(command, self.target_pose[:2])
             command = np.array([v, w])
             valid, room, paths = guard.evaluate([command])

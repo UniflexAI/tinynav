@@ -209,6 +209,7 @@ def main():
     paths.update(repo / name for name in ("tinynav/core/robot_specs.py", "tinynav/core/planner_config.py",
                                         "tinynav/core/map_node.py",
                                         "tinynav/core/navigation_safety.py", "tinynav/rl/route_rejoin.py",
+                                        "tinynav/rl/calibrated_guard.py", "tinynav/rl/go2_response.json",
                                         "tinynav/rl/ppo_planner.py"))
     for path in sorted(paths):
         (sources / path.name).write_bytes(path.read_bytes())
