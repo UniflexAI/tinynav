@@ -1504,6 +1504,8 @@ class _StairButtonState extends ConsumerState<_StairButton> {
   bool _loading = false;
   // U-turn side at landings; kept between uses since a stairwell always turns the same way.
   String _turn = 'auto';
+  int? _floors;
+  int _landingsPerFloor = 2;
 
   Future<void> _post(String path, [Map<String, dynamic>? data]) async {
     setState(() => _loading = true);
@@ -1522,41 +1524,94 @@ class _StairButtonState extends ConsumerState<_StairButton> {
   }
 
   Future<void> _start() async {
+    setState(() => _loading = true);
+    try {
+      final response = await ref.read(dioProvider).get('/nav/stair/settings');
+      final settings = Map<String, dynamic>.from(response.data as Map);
+      final savedFloors = (settings['floors'] as num?)?.toInt() ?? 0;
+      _floors ??= savedFloors > 0 ? savedFloors : 1;
+      _landingsPerFloor =
+          (settings['landings_per_floor'] as num?)?.toInt() ?? 2;
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail']?.toString() ??
+              e.message ??
+              'Could not load stair settings'),
+        ));
+      }
+      return;
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+    if (!mounted) return;
     final direction = await showDialog<String>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
           title: const Text('Stair mode'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                  'Stops map navigation and follows the stairs. The robot starts moving right away.'),
-              const SizedBox(height: 16),
-              const Text('Turn at landings'),
-              const SizedBox(height: 8),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'left', label: Text('Left')),
-                  ButtonSegment(value: 'right', label: Text('Right')),
-                  ButtonSegment(value: 'auto', label: Text('Auto')),
-                ],
-                selected: {_turn},
-                onSelectionChanged: (v) => setDialogState(() => _turn = v.first),
-              ),
-            ],
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                    'Stops map navigation and follows the stairs. The robot starts moving right away.'),
+                const SizedBox(height: 16),
+                DropdownButtonFormField<int>(
+                  value: _floors,
+                  decoration:
+                      const InputDecoration(labelText: 'Floors to travel'),
+                  items: List.generate(
+                      51,
+                      (n) => DropdownMenuItem(
+                            value: n,
+                            child: Text(n == 0 ? 'No limit' : '$n'),
+                          )),
+                  onChanged: (n) => setDialogState(() => _floors = n),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                    '$_landingsPerFloor flights per floor. Stops at the destination landing.'),
+                const SizedBox(height: 8),
+                const Text('Upstairs operation needs field validation.'),
+                const SizedBox(height: 16),
+                const Text('Turn at landings'),
+                const SizedBox(height: 8),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'left', label: Text('Left')),
+                    ButtonSegment(value: 'right', label: Text('Right')),
+                    ButtonSegment(value: 'auto', label: Text('Auto')),
+                  ],
+                  selected: {_turn},
+                  onSelectionChanged: (v) =>
+                      setDialogState(() => _turn = v.first),
+                ),
+              ],
+            ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-            TextButton(onPressed: () => Navigator.pop(ctx, 'up'), child: const Text('Up')),
-            TextButton(onPressed: () => Navigator.pop(ctx, 'down'), child: const Text('Down')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, 'up'),
+                child: const Text('Up')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, 'down'),
+                child: const Text('Down')),
           ],
         ),
       ),
     );
     if (direction == null) return;
-    await _post('/nav/stair/start', {'direction': direction, 'turn': _turn});
+    await _post('/nav/stair/start', {
+      'direction': direction,
+      'turn': _turn,
+      'floors': _floors,
+      'landings_per_floor': _landingsPerFloor,
+    });
   }
 
   @override
@@ -1567,7 +1622,12 @@ class _StairButtonState extends ConsumerState<_StairButton> {
     // stairStatus is "<direction> <status> well_side=..."
     final parts = (status?.stairStatus ?? '').split(' ');
     final detail = parts.length > 1 ? parts[1] : '';
-    final stopped = detail == 'odom_invalid' || detail == 'no_seed';
+    final stopped = detail == 'odom_invalid' ||
+        detail == 'no_seed' ||
+        detail == 'depth_invalid';
+    final floors = parts
+        .firstWhere((p) => p.startsWith('floors='), orElse: () => '')
+        .replaceFirst('floors=', '');
     // walked the flight and stopped on the landing, or reached the floor set in the Stairs page
     final landed = detail == 'landing' || detail == 'arrived';
     // "landings=2/4": landings counted / landings to go (no "/4" without a floor count)
@@ -1576,11 +1636,17 @@ class _StairButtonState extends ConsumerState<_StairButton> {
         .replaceFirst('landings=', '');
 
     return FilledButton.icon(
-      onPressed: _loading ? null : (active ? () => _post('/nav/stair/stop') : _start),
+      onPressed:
+          _loading ? null : (active ? () => _post('/nav/stair/stop') : _start),
       style: FilledButton.styleFrom(
         backgroundColor: !active
             ? Colors.black87
-            : (stopped ? Colors.red : (landed ? const Color(0xFF45C95A) : const Color(0xFF2196F3))).withOpacity(0.9),
+            : (stopped
+                    ? Colors.red
+                    : (landed
+                        ? const Color(0xFF45C95A)
+                        : const Color(0xFF2196F3)))
+                .withOpacity(0.9),
         foregroundColor: Colors.white,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       ),
@@ -1588,13 +1654,21 @@ class _StairButtonState extends ConsumerState<_StairButton> {
           ? const SizedBox(
               width: 14,
               height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+              child: CircularProgressIndicator(
+                  strokeWidth: 2, color: Colors.white),
             )
           : Icon(
-              !active ? Icons.stairs : (mode == 'up' ? Icons.north_rounded : Icons.south_rounded),
+              !active
+                  ? Icons.stairs
+                  : (mode == 'up' ? Icons.north_rounded : Icons.south_rounded),
               size: 16,
             ),
-      label: Text(active ? 'Stairs ${mode == 'up' ? '↑' : '↓'} $detail $landings'.trim() : 'Stairs'),
+      label: Text(active
+          ? 'Stairs ${mode == 'up' ? '↑' : '↓'} $detail ${floors.isEmpty ? landings : '$floors floors'}'
+              .trim()
+          : (detail == 'arrived' && floors.isNotEmpty
+              ? 'Stairs arrived · $floors floors'
+              : 'Stairs')),
     );
   }
 }

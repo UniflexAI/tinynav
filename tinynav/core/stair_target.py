@@ -62,6 +62,10 @@ class StairConfig:
     turn_target_dist: float = 0.6   # last-resort in-place turn target distance
     search_clearance: float = 0.35  # landing targets keep this far from walls (planning backs off near walls)
     search_commit_s: float = 4.0    # keep a landing target this long instead of re-picking every call
+    search_stall_s: float = 6.0   # landing target has produced neither translation nor turning
+    search_recovery_s: float = 4.0
+    search_progress_m: float = 0.12
+    search_progress_deg: float = 15.0
     search_reached: float = 0.4     # a landing target this close counts as reached
     search_unknown_margin: float = 0.2  # landing targets stay this far from unseen cells: turn to look, don't walk in
     turn_in_place_dist: float = 0.3     # with no room to the side, a target this close only turns the robot
@@ -204,6 +208,9 @@ class StairTargetGenerator:
         self.last_position = None
         self.last_jump_stamp = -np.inf
         self.latest_stamp = -np.inf
+        self.search_progress = None
+        self.search_recovery_until = -np.inf
+        self.stalled_goal = None
 
     def add_pose(self, stamp, position):
         """Feed every raw odometry pose (e.g. 100 Hz), not only the ones matched to depth."""
@@ -214,6 +221,9 @@ class StairTargetGenerator:
             self.last_jump_stamp = stamp
             self.frames.clear()
             self.track.clear()
+            self.search_progress = None
+            self.search_recovery_until = -np.inf
+            self.stalled_goal = None
             if self.landing_ref_z is not None and self.last_position is not None:
                 self.landing_ref_z += position[2] - self.last_position[2]  # the jump is not progress
             if self.flight_dir is not None or self.flight_end is not None:
@@ -343,6 +353,9 @@ class StairTargetGenerator:
         self.flight_end = None
         self.landings, self.landing_ref_z = 0, None
         self.recovering, self.recover_turned = False, None
+        self.search_progress = None
+        self.search_recovery_until = -np.inf
+        self.stalled_goal = None
 
     def reset(self):
         self.frames.clear()
@@ -352,6 +365,25 @@ class StairTargetGenerator:
         self.last_position = None
         self.last_jump_stamp = -np.inf
         self.latest_stamp = -np.inf
+
+    def _check_search_progress(self, cam, heading):
+        cfg = self.cfg
+        if self.on_flight or self.last_status != 'search':
+            self.search_progress = None
+            return
+        yaw = np.degrees(np.arctan2(heading[1], heading[0]))
+        if self.search_progress is not None:
+            stamp, xy, last_yaw = self.search_progress
+            moved = np.linalg.norm(cam[:2] - xy) >= cfg.search_progress_m
+            turned = abs((yaw - last_yaw + 180) % 360 - 180) >= cfg.search_progress_deg
+            if not moved and not turned:
+                if self.latest_stamp - stamp < cfg.search_stall_s:
+                    return
+                self.stalled_goal = None if self.search_goal is None else self.search_goal[0].copy()
+                self.search_goal = None
+                self.uturn_entry = None
+                self.search_recovery_until = self.latest_stamp + cfg.search_recovery_s
+        self.search_progress = (self.latest_stamp, cam[:2].copy(), yaw)
 
     def compute(self, T_cam_to_world, direction: str, prior_dir=None):
         """direction: 'up' or 'down'. Returns dict with status in {'ok', 'no_seed', 'search', 'odom_invalid', 'landing'}.
@@ -424,6 +456,9 @@ class StairTargetGenerator:
         fwd = T_cam_to_world[:2, :3] @ np.array([0.0, 0.0, 1.0])
         fwd = fwd / (np.linalg.norm(fwd) + 1e-9)
         heading = fwd
+        self._check_search_progress(cam, heading)
+        search_recovery = self.latest_stamp < self.search_recovery_until
+        out['search_recovery'] = search_recovery
 
         def lateral_to(d):  # >0 on the left of direction d
             return d[0] * rel_xy[..., 1] - d[1] * rel_xy[..., 0]
@@ -522,7 +557,7 @@ class StairTargetGenerator:
             side = self.turn_side or np.sign(self.well_side)
             roomy = reachable & (clearance >= cfg.search_clearance)
             goal = None
-            if self.uturn_side != 0 and self.flight_dir is not None:
+            if self.uturn_side != 0 and self.flight_dir is not None and not search_recovery:
                 # turn side given: the next flight runs back beside the last one, on that side. Walk straight on into
                 # the landing, cross it sideways, then turn back along the next flight; 'ok' takes over once the
                 # U-turn is done and its steps show up ahead
@@ -564,13 +599,16 @@ class StairTargetGenerator:
             if goal is None and self.search_goal is not None and self.latest_stamp - self.search_goal[1] < cfg.search_commit_s \
                     and np.linalg.norm(self.search_goal[0] - cam[:2]) > cfg.search_reached:
                 gi = tuple(np.floor((self.search_goal[0] - origin) / cfg.resolution).astype(int))
-                if 0 <= gi[0] < n and 0 <= gi[1] < n and reachable[gi]:
+                if (0 <= gi[0] < n and 0 <= gi[1] < n and reachable[gi]
+                        and observed[gi] and clearance[gi] >= cfg.search_clearance):
                     goal = gi
             if goal is None and not out.get('uturn'):
                 # only seen, roomy cells away from anything unseen: we turn to look instead of walking into the
                 # unknown, which is where railings and the stairwell edge hide
                 near_unknown = binary_dilation(~(observed | blind), iterations=max(1, int(round(cfg.search_unknown_margin / cfg.resolution))))
                 seen_room = roomy & observed & ~near_unknown & (r_robot > 0.4)
+                if search_recovery and self.stalled_goal is not None:
+                    seen_room &= np.linalg.norm(cell_xy - self.stalled_goal, axis=-1) > cfg.search_reached
                 toward_next = seen_room & (r_robot < 2.0)
                 seen = seen_room & (r_robot < 1.5) & (rel_xy @ fwd > -0.3)
                 if side != 0:
@@ -599,7 +637,7 @@ class StairTargetGenerator:
                     goal = np.unravel_index(np.argmax(np.where(cand, clearance, -np.inf)), cand.shape)
                 self.search_goal = (cell_xy[goal].copy(), self.latest_stamp)
         self.last_status = out['status']
-        if prior_dir is not None:
+        if prior_dir is not None and not search_recovery:
             d = np.asarray(prior_dir, dtype=np.float64)
             d = d / (np.linalg.norm(d) + 1e-9)
             cos = (rel_xy @ d) / np.maximum(r_robot, 1e-6)

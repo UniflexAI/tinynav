@@ -78,6 +78,7 @@ class CmdVelControlNode(Node):
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
         self._stair_status_time = -float('inf')
+        self._stair_blocked = False
         self.create_subscription(String, '/stair/status', self._on_stair_status, 10)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
@@ -100,6 +101,14 @@ class CmdVelControlNode(Node):
 
     def _on_stair_status(self, msg):
         self._stair_status_time = time.monotonic()
+        parts = msg.data.split()
+        self._stair_blocked = len(parts) > 1 and parts[1] in (
+            'no_seed', 'odom_invalid', 'depth_invalid', 'paused', 'arrived', 'landing', 'stopped')
+        if self._stair_blocked and self._nav_active:
+            self.latest_cmd = Twist()
+            self.prev_cmd = Twist()
+            self.last_path_update_time = None
+            self.cmd_pub.publish(Twist())
 
     @property
     def stair_mode(self):
@@ -119,7 +128,7 @@ class CmdVelControlNode(Node):
         if not self._nav_active:
             return
 
-        if self._paused:
+        if self._paused or (self.stair_mode and self._stair_blocked):
             self.cmd_pub.publish(Twist())
             self.prev_cmd = Twist()
             return
@@ -180,7 +189,7 @@ class CmdVelControlNode(Node):
         self.prev_cmd = out
         
     def path_callback(self, msg):
-        if not self._nav_active:
+        if not self._nav_active or (self.stair_mode and self._stair_blocked):
             return
         if msg is None or self.pose is None:
             return

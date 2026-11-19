@@ -10,6 +10,7 @@ cleared through /mapping/poi_change, so planning stops publishing paths and cmd_
 """
 import argparse
 import asyncio
+import time
 
 import message_filters
 import numpy as np
@@ -20,7 +21,8 @@ from nav_msgs.msg import Odometry, Path
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
+from rclpy.qos import DurabilityPolicy, QoSProfile
 
 from tinynav.core.math_utils import msg2np, np2msg
 from tinynav.core.robot_specs import ROBOT_CONFIG
@@ -29,6 +31,7 @@ from tinynav.core.stair_target import StairConfig, StairTargetGenerator
 
 STOP_STATUSES = ('no_seed', 'odom_invalid', 'landing')
 TURN_SIDES = {'auto': 0, 'left': 1, 'right': -1}
+DEPTH_TIMEOUT_S = 0.75
 ODOM_TIMEOUT_S = 0.5  # no VIO pose for this long (receive time): VIO stopped, stop instead of reusing the old target
 
 
@@ -43,7 +46,13 @@ class StairNode(Node):
         self.gen = StairTargetGenerator(StairConfig(camera_height=camera_height))
         self.gen.turn_side = TURN_SIDES[args.turn]
         # stop on the landing that ends the last floor; 0: no limit (stop stair mode by hand)
-        self.landings_goal = max(0, args.floors) * max(1, args.landings_per_floor)
+        self.floors = args.floors
+        self.landings_per_floor = args.landings_per_floor
+        self.landings_goal = self.floors * self.landings_per_floor
+        self.paused = False
+        self.arrived = False
+        self.last_depth_rx = None
+        self.last_depth_stamp = None
         self.bridge = CvBridge()
         self.K = None
         self.direction = args.direction  # None: stair mode inactive
@@ -62,6 +71,8 @@ class StairNode(Node):
             self.get_logger().info(f'stair memory: {len(self.memory)} frames from {args.memory}')
         self.create_subscription(Odometry, '/slam/odometry', self.odom_callback, 100)
         self.create_subscription(String, '/stair/cmd', self.cmd_callback, 10)
+        pause_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(Bool, '/nav/paused', self.pause_callback, pause_qos)
         depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
         self.ts = message_filters.TimeSynchronizer([depth_sub, pose_sub], queue_size=10)
@@ -81,6 +92,8 @@ class StairNode(Node):
     def cmd_callback(self, msg):
         words = msg.data.strip().lower().split()
         if words and words[0] in ('up', 'down') and (len(words) == 1 or (len(words) == 2 and words[1] in TURN_SIDES)):
+            self.stop_robot('new stair task')
+            self.arrived = False
             self.gen.new_run()  # keeps the recent height map
             self.gen.turn_side = TURN_SIDES[words[1] if len(words) == 2 else 'auto']
             self.direction = words[0]
@@ -88,25 +101,39 @@ class StairNode(Node):
         elif words == ['stop']:
             self.direction = None
             self.stop_robot('stair mode off')
+            self.publish_status('stopped')
         else:
             self.get_logger().warning(f'unknown /stair/cmd {msg.data!r}, expected "up|down [left|right|auto]" or "stop"')
 
+    def pause_callback(self, msg):
+        self.paused = msg.data
+        self.gen.search_progress = None
+        if self.paused:
+            self.stop_robot('paused')
+            self.publish_status('paused')
+
     def odom_callback(self, msg):
         was_valid = self.gen.odom_valid
-        self.last_odom_rx = self.get_clock().now()
+        self.last_odom_rx = time.monotonic()
         p = msg.pose.pose.position
         self.gen.add_pose(stamp_sec(msg.header.stamp), (p.x, p.y, p.z))
         if self.direction is not None and was_valid and not self.gen.odom_valid:
             # do not wait for the next timer tick
+            self.last_depth_stamp = None
             self.stop_robot('odometry jump')
             self.publish_status('odom_invalid')
 
     def depth_callback(self, depth_msg, odom_msg):
         if self.K is None:
             return
+        stamp = stamp_sec(depth_msg.header.stamp)
+        if self.last_depth_stamp is not None and stamp <= self.last_depth_stamp:
+            return
+        self.last_depth_stamp = stamp
+        self.last_depth_rx = time.monotonic()
         depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
         T, _ = msg2np(odom_msg)
-        self.last_odom_rx = self.get_clock().now()  # bags without vio_100hz have only these poses
+        self.last_odom_rx = time.monotonic()  # bags without vio_100hz have only these poses
         self.gen.add_depth(stamp_sec(odom_msg.header.stamp), depth, self.K, T)
         self.latest_T = T
 
@@ -121,14 +148,27 @@ class StairNode(Node):
         return None if bearing is None else prior_direction(self.latest_T, bearing)
 
     def timer_callback(self):
-        if self.direction is None or self.latest_T is None:
+        if self.direction is None:
             return
-        if (self.get_clock().now() - self.last_odom_rx).nanoseconds * 1e-9 > ODOM_TIMEOUT_S:
+        if self.arrived:
+            self.publish_status('arrived')
+            return
+        if self.paused:
+            self.stop_robot('paused')
+            self.publish_status('paused')
+            return
+        now = time.monotonic()
+        if self.latest_T is None or self.last_odom_rx is None or now - self.last_odom_rx > ODOM_TIMEOUT_S:
             # the depth that built the map stops with it (the bridge pairs depth with VIO poses): nothing is fresh
             self.publish_status('odom_invalid')
             self.stop_robot('odometry stream stalled')
             return
+        if self.last_depth_rx is None or now - self.last_depth_rx > DEPTH_TIMEOUT_S:
+            self.publish_status('depth_invalid')
+            self.stop_robot('depth stream stalled')
+            return
         if self.landings_goal and self.gen.landings >= self.landings_goal:
+            self.arrived = True
             self.publish_status('arrived')
             self.stop_robot(f'arrived: {self.gen.landings} landings')
             return
@@ -158,6 +198,8 @@ class StairNode(Node):
     def publish_status(self, status):
         text = f'{self.direction} {status} well_side={self.gen.well_side:+.1f} cam_h={self.gen.camera_height:.2f} pitch={self.gen.pitch:+.0f}'
         text += f' landings={self.gen.landings}' + (f'/{self.landings_goal}' if self.landings_goal else '')
+        text += f' floors={self.gen.landings // self.landings_per_floor}' + (f'/{self.floors}' if self.floors else '')
+        text += f' recovery={int(self.gen.latest_stamp < self.gen.search_recovery_until)}'
         if self.memory is not None:
             text += f' memory={self.memory_similarity:.2f}{" guided" if self.guided else ""}'
         self.status_pub.publish(String(data=text))
@@ -184,6 +226,10 @@ def main():
     parser.add_argument('--memory_min_similarity', type=float, default=0.8, help='trust the memory only above this')
     parser.add_argument('--image_topic', default='/camera/camera/infra1/image_rect_raw')
     args, ros_args = parser.parse_known_args()
+    if not 0 <= args.floors <= 50 or not 1 <= args.landings_per_floor <= 4:
+        parser.error('floors must be 0..50 and landings_per_floor must be 1..4')
+    if args.rate <= 0:
+        parser.error('rate must be positive')
     rclpy.init(args=ros_args)
     node = StairNode(args)
     try:

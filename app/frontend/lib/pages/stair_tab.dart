@@ -169,8 +169,10 @@ class _StairTabState extends ConsumerState<StairTab> {
           title: 'Live',
           children: [
             _Row('Stair mode', active ? '${status!.stairMode}' : 'off'),
-            _Row('Status', active && parts.length > 1 ? parts[1] : '—'),
-            _Row('Landings', active ? (field('landings').isEmpty ? '—' : field('landings')) : '—'),
+            _Row('Status', parts.length > 1 ? parts[1] : '—'),
+            _Row('Floors', field('floors').isEmpty ? '—' : field('floors')),
+            _Row('Landings', field('landings').isEmpty ? '—' : field('landings')),
+            if (field('recovery') == '1') const _Row('Recovery', 'Looking for a reachable target'),
             _Row('Camera height', active && field('cam_h').isNotEmpty ? '${field('cam_h')} m' : '—'),
           ],
         ),
