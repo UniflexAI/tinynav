@@ -8,13 +8,13 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
-import os
 import time
 from tinynav.core.robot_specs import ROBOT_CONFIG
+from tinynav.core.planner_config import planner_mode
 
 # Must match planning_node: with "rl" the planner publishes (v, w) on /planning/rl_cmd and this
 # node executes it directly instead of tracking /planning/trajectory_path.
-PLANNER = os.environ.get("TINYNAV_PLANNER", "library").strip().lower()
+PLANNER = planner_mode()
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)

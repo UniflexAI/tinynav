@@ -25,12 +25,11 @@ from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
+from tinynav.core.planner_config import planner_mode, route_guidance
 
 # "library": sample + ESDF-score the trajectory library (default). "rl": the learned policy in
 # tinynav/rl picks (v, w) and publishes it on /planning/rl_cmd for cmd_vel_control.
-PLANNER = os.environ.get("TINYNAV_PLANNER", "library").strip().lower()
-if PLANNER not in ("library", "rl"):
-    raise ValueError(f"Unsupported TINYNAV_PLANNER: {PLANNER!r}")
+PLANNER = planner_mode()
 
 # === Helper functions ===
 @njit(cache=True)
@@ -352,12 +351,12 @@ class PlanningNode(Node):
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
-        self.publish_diagnostic_clouds = os.environ.get("TINYNAV_PLANNING_DIAGNOSTIC_CLOUDS", "1") == "1"
+        self.publish_diagnostic_clouds = os.environ.get("TINYNAV_PLANNING_DIAGNOSTIC_CLOUDS", "0") == "1"
         if self.publish_diagnostic_clouds:
             self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
             self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
-        self.latest_pair_only = os.environ.get("TINYNAV_PLANNING_LATEST_PAIR_ONLY") == "1"
+        self.latest_pair_only = os.environ.get("TINYNAV_PLANNING_LATEST_PAIR_ONLY", "1") == "1"
         self.input_lock = Lock()
         self.pending_pair = None
         self.latest_pair_stamp = None
@@ -424,7 +423,7 @@ class PlanningNode(Node):
         self.rl = None
         if PLANNER == "rl":
             from tinynav.rl.rl_planner import RLPlanner, TRTPolicy
-            self.ppo_route_guidance = os.environ.get("TINYNAV_RL_ROUTE_GUIDANCE") == "1"
+            self.ppo_route_guidance = route_guidance()
             if self.ppo_route_guidance:
                 from tf2_ros import Buffer, TransformListener
                 from tinynav.rl.ppo_planner import PPOGeometry, RLPlanner

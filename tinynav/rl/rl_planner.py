@@ -8,11 +8,11 @@ including turning in place, and falls back to the first safe alternative or a st
 stays put while being commanded to move is declared stuck and stopped until the next goal.
 """
 import asyncio
-import os
 
 import numpy as np
 
 from tinynav.core.robot_specs import RL_FOOTPRINT, ROBOT_CONFIG
+from tinynav.core.planner_config import policy_engine_path
 from tinynav.rl.bev import GRID_RES, TRAIL_LEN, camera_yaw, make_bev, to_robot_frame, trail_channel
 
 # Action scaling shared with NavSim (which imports these): action[0] in [-1, 1] maps to
@@ -35,8 +35,7 @@ class TRTPolicy:
     TINYNAV_RL_ENGINE overrides the engine path, e.g. to go back to an older policy."""
     def __init__(self):
         from tinynav.core.models_trt import RLNavPolicyTRT
-        engine = os.environ.get("TINYNAV_RL_ENGINE")
-        self.trt = RLNavPolicyTRT(engine) if engine else RLNavPolicyTRT()
+        self.trt = RLNavPolicyTRT(policy_engine_path())
         self.loop = asyncio.new_event_loop()
 
     def reset(self):
