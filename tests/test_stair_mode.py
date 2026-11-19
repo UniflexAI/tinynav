@@ -265,3 +265,29 @@ def test_two_floors_continues_through_first_floor_and_stops_at_four(node):
     for _ in range(5):
         node.timer_callback()
     assert node.target_pub.publish.call_count == 4
+
+
+@pytest.mark.parametrize('enabled', ['0', 'false', 'no'])
+def test_deployment_can_disable_unitree_backend(monkeypatch, enabled):
+    from app.backend.node_manager import BackendNode
+    monkeypatch.setenv('TINYNAV_UNITREE_ENABLED', enabled)
+    fake = Mock()
+    BackendNode._start_unitree_if_configured(fake)
+    fake._launch_proc.assert_not_called()
+
+
+def test_deployment_uses_configured_unitree_interface(monkeypatch):
+    from app.backend.node_manager import BackendNode
+    monkeypatch.setenv('TINYNAV_UNITREE_ENABLED', '1')
+    monkeypatch.setenv('UNITREE_NETWORK_INTERFACE', 'enp3s0')
+    fake = Mock()
+    BackendNode._start_unitree_if_configured(fake)
+    cmd = fake._launch_proc.call_args.args[1]
+    assert cmd[-2:] == ['--network-interface', 'enp3s0']
+
+
+def test_deployment_rejects_unknown_unitree_enable_value(monkeypatch):
+    from app.backend.node_manager import BackendNode
+    monkeypatch.setenv('TINYNAV_UNITREE_ENABLED', 'typo')
+    with pytest.raises(ValueError):
+        BackendNode._start_unitree_if_configured(Mock())

@@ -19,7 +19,7 @@ from std_msgs.msg import Bool
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--sim-root", type=Path, required=True)
-parser.add_argument("--course-script", type=Path, required=True)
+parser.add_argument("--course-script", type=Path, default=Path(__file__).with_name("stair_sim_course.py"))
 parser.add_argument("--capture", type=Path)
 parser.add_argument("--floors", type=int, choices=range(1, 6), default=1)
 args = parser.parse_args()

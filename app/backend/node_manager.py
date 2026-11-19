@@ -672,11 +672,21 @@ class BackendNode(Ros2NodeManager):
         return snapshot
 
     def _start_unitree_if_configured(self):
+        enabled = os.environ.get('TINYNAV_UNITREE_ENABLED', '1').strip().lower()
+        if enabled not in ('1', 'true', 'yes', '0', 'false', 'no'):
+            raise ValueError('TINYNAV_UNITREE_ENABLED must be 1/0, true/false, or yes/no')
+        if enabled in ('0', 'false', 'no'):
+            self.get_logger().info('unitree_control disabled by TINYNAV_UNITREE_ENABLED')
+            return
+        interface = os.environ.get('UNITREE_NETWORK_INTERFACE', 'enP8p1s0').strip()
+        if not interface:
+            raise ValueError('UNITREE_NETWORK_INTERFACE must not be empty')
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         self._unitree_proc = self._launch_proc(
             'unitree',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py'],
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py',
+             '--network-interface', interface],
             env=_env,
         )
         self.get_logger().info('unitree_control started')

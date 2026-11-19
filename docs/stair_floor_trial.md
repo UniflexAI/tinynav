@@ -40,14 +40,14 @@ goal recovery, API compatibility, and retained arrival results:
 python3 -m pytest -q tests/test_stair_mode.py
 ```
 
-The Go2 integration check requires the MuJoCo runtime and course builder from
-the independent simulation worktree:
+The Go2 integration check requires the external MuJoCo runtime; the course builder is now
+bundled as tool/stair_sim_course.py in this branch:
 
 ```bash
-PYTHONPATH=$PWD:/path/to/tinynav-stairs:/path/to/mujoco/dependencies \
+PYTHONPATH=$PWD:/path/to/mujoco/dependencies \
 python3 tool/stair_mode_sim.py \
   --sim-root /path/to/tinynav-sim \
-  --course-script /path/to/tinynav-stairs/scripts/simulate_stair_descent.py
+  --floors 1
 ```
 
 Run inside a localhost-only ROS domain with the Go2 ONNX runtime and EGL renderer.
@@ -92,3 +92,8 @@ one-floor simulation also passes (minimum shaft clearance 0.1979 m), and the
 focused tests pass 20/20, including continuing after the first full floor.
 The capture includes actual local height/observed/reachable grids, planner
 obstacles, selected target/path, published drive commands and landing events.
+
+
+For deployment on a separate Ubuntu x64 computer and optional isolated simulation,
+see [the complete handoff](stair_floors_ubuntu_x64_deployment.md).
+The course is bundled and no longer needs the rl-stairs worktree.

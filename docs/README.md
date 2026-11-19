@@ -101,3 +101,11 @@ ping 192.168.123.161
 
 For more detailed setup instructions, refer to the official Unitree documentation:
 https://support.unitree.com/home/en/developer/Quick_start
+
+
+## Stair-floors Ubuntu x64 deployment
+
+For the independent finite-floor stair branch, see the complete
+[Ubuntu x64 deployment and GPT handoff](stair_floors_ubuntu_x64_deployment.md).
+It covers App installation, external depth/VIO inputs, robot-interface configuration,
+isolated simulation, validation, logs and rollback.
