@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
@@ -10,7 +10,8 @@ import numpy as np
 import logging
 import time
 from tinynav.core.robot_specs import ROBOT_CONFIG
-from tinynav.core.planner_config import planner_mode
+from tinynav.core.planner_config import planner_mode, shared_safety
+from tinynav.core.navigation_safety import NavigationLimits, executable_speed
 
 # Must match planning_node: with "rl" the planner publishes (v, w) on /planning/rl_cmd and this
 # node executes it directly instead of tracking /planning/trajectory_path.
@@ -26,7 +27,10 @@ class CmdVelControlNode(Node):
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
-        if PLANNER == "rl":
+        self.navigation_limits = NavigationLimits.from_environment() if shared_safety() else None
+        if self.navigation_limits is not None:
+            self.create_subscription(TwistStamped, '/planning/nav_cmd', self.nav_cmd_callback, 10)
+        elif PLANNER == "rl":
             self.create_subscription(Twist, '/planning/rl_cmd', self.rl_cmd_callback, 10)
         else:
             self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
@@ -52,6 +56,10 @@ class CmdVelControlNode(Node):
         self.max_angular_acc = 0.8  # rad/s^2
         self.max_angular_speed = self.robot.max_angular_vel  # rad/s
         self.max_forward_speed = self.robot.max_linear_vel  # m/s
+        if self.navigation_limits is not None:
+            self.max_forward_speed = self.navigation_limits.max_forward
+            self.max_angular_speed = self.navigation_limits.max_turn
+            self.max_linear_acc = self.navigation_limits.linear_acceleration
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -63,6 +71,8 @@ class CmdVelControlNode(Node):
         self.min_effective_angular_speed = self.robot.min_angular_vel
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.3
+        if self.navigation_limits is not None:
+            self.fixed_reverse_speed = self.navigation_limits.max_reverse
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
@@ -133,7 +143,7 @@ class CmdVelControlNode(Node):
 
         # Reverse is a predefined planner vocabulary: straight back at fixed speed.
         # Do not smooth or re-lock it here; just pass it through while stale/paused guards still work.
-        if target_cmd.linear.x < 0.0:
+        if target_cmd.linear.x < 0.0 and self.navigation_limits is None:
             out.linear.x = target_cmd.linear.x
             out.angular.z = target_cmd.angular.z if PLANNER == "rl" else 0.0  # the policy may reverse while turning
             self.cmd_pub.publish(out)
@@ -143,8 +153,12 @@ class CmdVelControlNode(Node):
         # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
         max_dv = self.max_linear_acc * dt
         # If we just left reverse mode, do not let acceleration limiting leak another reverse command.
-        prev_linear_x = 0.0 if self.prev_cmd.linear.x < 0.0 else self.prev_cmd.linear.x
+        prev_linear_x = self.prev_cmd.linear.x
+        if self.navigation_limits is None and prev_linear_x < 0.0:
+            prev_linear_x = 0.0
         out.linear.x = self._clamp_step(target_cmd.linear.x, prev_linear_x, max_dv)
+        if self.navigation_limits is not None:
+            out.linear.x = float(executable_speed(prev_linear_x, target_cmd.linear.x, dt, self.navigation_limits))
         # Do not acceleration-limit yaw. The planner/control layer already decides the turn rate,
         # and forced rotate-in-place should take effect immediately.
         out.angular.z = float(np.clip(target_cmd.angular.z, -self.max_angular_speed, self.max_angular_speed))
@@ -153,7 +167,7 @@ class CmdVelControlNode(Node):
         # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
         if 0.0 < out.linear.x < self.min_effective_linear_speed:
             out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed else 0.0
-        elif abs(out.linear.x) < self.min_effective_linear_speed:
+        elif (out.linear.x >= 0.0 or self.navigation_limits is None) and abs(out.linear.x) < self.min_effective_linear_speed:
             out.linear.x = 0.0
 
         # Angular z: same idea; tiny requested turns snap to executable min, decays snap to 0.
@@ -181,6 +195,13 @@ class CmdVelControlNode(Node):
         self._mark_planner_update()
         self.latest_cmd.linear.x = float(np.clip(msg.linear.x, -self.fixed_reverse_speed, self.max_forward_speed))
         self.latest_cmd.angular.z = float(np.clip(msg.angular.z, -self.max_angular_speed, self.max_angular_speed))
+
+    def nav_cmd_callback(self, msg):
+        age = self.get_clock().now().nanoseconds / 1e9 - (msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9)
+        if age > self.path_stale_stop_s:
+            self.latest_cmd = Twist()
+            return
+        self.rl_cmd_callback(msg.twist)
 
     def path_callback(self, msg):
         if not self._nav_active:

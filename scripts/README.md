@@ -45,6 +45,46 @@ device as described in [the PPO deployment guide](../docs/rl_navigation_ppo_2026
 `TINYNAV_RL_ENGINE` can select an explicitly built engine. The legacy
 `library` and `rl` values also work.
 
+The `dwa` and `ppo` entry points enable shared navigation safety. Both
+use the same forward limit (0.55 m/s), turn limit (0.75 rad/s), linear
+acceleration limit (0.6 m/s2), and swept-outline clearance of 0.10 m.
+The check uses the latest received odometry, the previous base command,
+the delay to the next control tick, and the distance needed to brake.
+Both planners send their selected command through `/planning/nav_cmd`.
+The velocity controller applies the same acceleration and executable
+minimum-speed rules to both.
+
+For the measured 0.60 x 0.30 m Go2 outline, set the following in the app's
+startup environment for both runs.
+
+```bash
+export TINYNAV_NAV_FRONT_M=0.30
+export TINYNAV_NAV_REAR_M=0.30
+export TINYNAV_NAV_HALF_WIDTH_M=0.15
+export TINYNAV_NAV_CONTROL_X_M=0.0
+export TINYNAV_NAV_CONTROL_Y_M=0.0
+export TINYNAV_NAV_MAX_FORWARD_MPS=0.55
+```
+
+Geometry settings also accept the existing `TINYNAV_PPO_*_M` variables
+when the corresponding `TINYNAV_NAV_*_M` value is absent. The startup
+log and recording manifest contain the effective shared limits. A robot
+already closer than 0.10 m can take an escape motion that loses at most
+0.005 m to grid interpolation and finishes with increasing clearance.
+Motion starting at or above the margin and forward route merges require
+the full 0.10 m margin.
+Set `TINYNAV_NAV_SHARED_SAFETY=0` to use the previous deployment behavior.
+The legacy `library` and `rl` entry points enable this mode explicitly
+with `TINYNAV_NAV_SHARED_SAFETY=1`.
+
+PPO checks a forward merge into a downstream route section when the
+nearest section would force an in-place turn. The complete merge and
+its continuation are checked before selecting the first command. Each
+new obstacle map checks the current command and remaining merge again.
+Route changes invalidate a merge whose target has moved off the route.
+An ordinary nonzero command is checked against measured translation or
+rotation after 0.8 s, using the same response checks as recovery motions.
+
 Use the same map, POIs, robot configuration, target lookahead, and measured
 start pose for both runs. The deployed 3 m local-target change can be used
 for both planners. The recorder saves the active map-node source so its
@@ -67,8 +107,12 @@ is accessible, selected engine path and SHA-256, PPO footprint and center,
 robot profile, and controller
 constants. The corresponding source files are saved under `sources/`.
 The recording is under `bag/` and includes the obstacle mask, height map,
-global route, local target, poses, both velocity-command topics, timing,
+global route, local target, poses, velocity-command topics, timing,
 navigation state, logs, and one front camera topic.
+`/planning/decision` records the observed pose, command already sent to
+the base, observation delay, checked clearance, PPO proposal, route
+guidance, and selected command. `/planning/nav_cmd` contains the common
+command before the controller's acceleration limit.
 
 Camera selection prefers compressed color images, followed by available
 raw color or infrared images. Supply `--image-topic /your/front/image`

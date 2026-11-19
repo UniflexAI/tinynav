@@ -13,6 +13,12 @@ def planner_mode(environ=None):
     return modes[name]
 
 
+def shared_safety(environ=None):
+    environ = os.environ if environ is None else environ
+    default = "1" if environ.get("TINYNAV_PLANNER", "").strip().lower() in ("dwa", "ppo") else "0"
+    return environ.get("TINYNAV_NAV_SHARED_SAFETY", default) == "1"
+
+
 def route_guidance(environ=None):
     environ = os.environ if environ is None else environ
     if environ.get("TINYNAV_PLANNER", "").strip().lower() == "ppo":

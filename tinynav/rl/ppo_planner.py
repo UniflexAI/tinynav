@@ -178,6 +178,8 @@ class RLPlanner:
         self.edge = _edge_points(footprint=RLFootprint(
             self.geometry.front, self.geometry.rear, self.geometry.half_width,
         ))
+        self.navigation_guard_factory = None
+        self.navigation_guard = None
         self.reset()
 
     def reset(self):
@@ -193,9 +195,32 @@ class RLPlanner:
         self.recovery_start = None
         self.failed_recoveries = set()
         self.turn_direction, self.turn_started = 0.0, 0.0
+        self.navigation_guard = None
+        from tinynav.core.navigation_safety import MotionResponse
+        from tinynav.rl.route_rejoin import RouteRejoin
+        self.response = MotionResponse()
+        self.route_rejoin = RouteRejoin()
 
     def _checked_recovery(self, center, yaw, stamp, esdf, origin, phases):
         if phases in self.failed_recoveries:
+            return None
+        if self.navigation_guard is not None:
+            from tinynav.core.navigation_safety import NavigationGuard
+            initial = self.navigation_guard
+            guard = initial
+            whole = []
+            for v, w, duration in phases:
+                path = guard.trajectories([(v, w)], duration=duration, braking=False)[0]
+                whole.append(path)
+                ticks = int(np.ceil(duration / guard.limits.period))
+                from tinynav.core.navigation_safety import executable_speed
+                speed = guard.command[0]
+                for _ in range(ticks):
+                    speed = float(executable_speed(speed, v, guard.limits.period, guard.limits))
+                guard = NavigationGuard(guard.limits, path[-1], (speed, w), esdf, origin, GRID_RES)
+            room = initial.clearance(np.vstack(whole))
+            if room.min() >= initial.minimum and room[-1] >= min(initial.limits.margin, initial.now + .015):
+                return stamp, phases, initial.minimum
             return None
         now = footprint_clearance(rollout(center, yaw, 0.0, 0.0, steps=0), esdf, origin, GRID_RES, edge=self.edge)[0]
         if now < 0.0:
@@ -249,6 +274,7 @@ class RLPlanner:
 
     def _activate_recovery(self, recovery, center, yaw):
         self.recovery = recovery
+        self.route_rejoin.reset()
         self.recovery_start = (center.copy(), yaw)
         self.stuck_count += 1
 
@@ -262,6 +288,9 @@ class RLPlanner:
         elapsed = stamp - started
         for index, (v, w, duration) in enumerate(phases):
             if elapsed < duration:
+                if self.navigation_guard is not None:
+                    valid, _, _ = self.navigation_guard.evaluate([(v, w)])
+                    return (v, w, f"recovery {index + 1}/{len(phases)}") if valid[0] else (0., 0., "recovery blocked")
                 steps = max(1, int(np.ceil((duration - elapsed) / ROLLOUT_DT - 1e-8)))
                 poses = rollout(center, yaw, v, w, steps=steps)
                 clearance = footprint_clearance(poses, esdf, origin, GRID_RES, edge=self.edge)
@@ -272,6 +301,8 @@ class RLPlanner:
         return None
 
     def _check_stuck(self, stamp, center, yaw):
+        if self.navigation_guard is not None:
+            return self.response.stalled(stamp, np.array([*center, yaw]))
         # The command returned on the previous tick is the one that could have moved this pose.
         if not self.motion_command_sent:
             self.motion.clear()
@@ -291,6 +322,14 @@ class RLPlanner:
         return center + self.geometry.control_x * forward + self.geometry.control_y * left
 
     def _guard_command(self, center, yaw, goal, guided, policy_speed, esdf, origin, *, preferred_turn=0.0):
+        if self.navigation_guard is not None:
+            guard = self.navigation_guard
+            if self.route_rejoin.curve is not None or guided[0] < .05:
+                merge = self.route_rejoin.choose(guard, getattr(self, "route_xy", None), goal)
+                if merge is not None:
+                    guard.last_clearance = self.route_rejoin.clearance
+                    return *merge, "forward route merge"
+            return guard.select(guided, goal, preferred_turn)
         requested_v, requested_w = guided
         guard = dict(edge=self.edge, min_forward=ROBOT_CONFIG.min_linear_vel,
                      min_turn=ROBOT_CONFIG.min_angular_vel, preferred_turn=preferred_turn)
@@ -331,6 +370,11 @@ class RLPlanner:
         v = float(a[0] * V_MAX if a[0] >= 0 else -a[0] * V_MIN)
         w = float(a[1] * W_MAX)
         policy_speed = v
+        self.policy_action = a.copy()
+        if self.navigation_guard_factory is not None:
+            self.navigation_guard = self.navigation_guard_factory()
+            center, yaw = self.navigation_guard.pose[:2], self.navigation_guard.pose[2]
+            stamp = self.navigation_guard.stamp
         v, w = route_guided_command(getattr(self, "route_xy", None), center, yaw, v, w)
         self.guided_command = (v, w)
         turn_age = stamp - self.turn_started
@@ -393,4 +437,5 @@ class RLPlanner:
         if direction != self.turn_direction or turn_age < 0.0:
             self.turn_direction, self.turn_started = direction, stamp
         self.motion_command_sent = bool(v or w)
+        self.response.issued((v, w))
         return v, w, rollout(center, yaw, v, w), bev, status
