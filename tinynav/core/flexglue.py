@@ -48,11 +48,17 @@ class FlexGlueTRT:
 
     def add_features(self, features, image):
         # Persist with scratch keyframes: their video encoder cannot be read yet.
-        return {**features, FEATURE_KEY: self.describe(image)}
+        # FP16 engine output is usually exact in FP16, which halves the map size; keep FP32 otherwise.
+        value = self.describe(image)
+        half = value['features'].astype(np.float16)
+        if np.array_equal(half.astype(np.float32), value['features']):
+            value = {**value, 'features': half}
+        return {**features, FEATURE_KEY: value}
 
     def _description(self, features, image):
         if FEATURE_KEY in features:
-            return features[FEATURE_KEY]
+            value = features[FEATURE_KEY]
+            return {**value, 'features': np.asarray(value['features'], dtype=np.float32)}
         return self.describe(image() if callable(image) else image)
 
     def match_keypoints(self, feats0, feats1, image0=None, image1=None):
