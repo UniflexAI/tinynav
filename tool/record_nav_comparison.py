@@ -214,6 +214,9 @@ def main():
     for path in sorted(paths):
         (sources / path.name).write_bytes(path.read_bytes())
     topics = [*TOPICS]
+    for topic in (os.environ.get("TINYNAV_EKF_TOPIC", "/go2/ekf/odometry"), "/camera/camera/vio_image"):
+        if topic in available and topic not in topics:
+            topics.append(topic)
     if camera:
         topics.append(camera)
     if args.depth:
