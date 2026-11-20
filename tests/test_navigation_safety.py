@@ -161,3 +161,33 @@ def test_retry_budget_requires_measured_ordinary_forward_motion():
     planner._track_forward_progress(np.array([.21, 0.]), 0., .2)
     assert planner.stuck_count == 0
     assert not planner.failed_recoveries
+
+
+def test_calibrated_route_cap_and_braking_margin():
+    import json
+    from pathlib import Path
+    from tinynav.rl import calibrated_guard as cg
+    profile = cg.compile_profile(json.loads(Path(cg.__file__).with_name("go2_response.json").read_text()))
+    route = np.array([[0., 0.], [2., 0.]])
+    guard = context(speed=.35, delay=cg.SELECTION_BUDGET_S + .12)
+    v, _, room = cg.select(guard, route[-1], route, (.55, 0.), profile, np.array([.35, 0.]), route_speed=.16)
+    assert 0 < v <= .16 and room >= .1
+    blocked = context(wall_x=.65, speed=.55, delay=cg.SELECTION_BUDGET_S + .12)
+    v, w, room = cg.select(blocked, route[-1], route, (.55, 0.), profile, np.array([.55, 0.]), route_speed=.16)
+    assert (v, w) == (0., 0.) and room < .10
+
+
+def test_retreat_requires_clear_corridor_to_wider_ground():
+    import json
+    from pathlib import Path
+    from tinynav.rl import calibrated_guard as cg
+    profile = cg.compile_profile(json.loads(Path(cg.__file__).with_name("go2_response.json").read_text()))
+    front_wall = context(wall_x=.45)
+    assert .10 <= front_wall.now < .15
+    v, w, room = cg.retreat(front_wall, profile, np.zeros(2))
+    assert v < 0 and w == 0 and room >= .10
+    parallel_wall = context(wall_y=.30)
+    parallel_wall.pose[1] += .02
+    parallel_wall.now = float(parallel_wall.clearance(parallel_wall.pose[None])[0])
+    assert .10 <= parallel_wall.now < .15
+    assert cg.retreat(parallel_wall, profile, np.zeros(2)) is None

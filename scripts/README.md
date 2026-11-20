@@ -179,6 +179,13 @@ Go2 PPO (`TINYNAV_PLANNER=ppo`) with shared safety uses the measured
 0.15 m half width and zero control offsets above. The selector ranks
 route progress under the observed low and high speed responses and
 checks the command interval and braking tail against the current BEV.
-Moving candidates reserve half a grid cell beyond the 10 cm margin.
+Forward commands respect the speed selected by route guidance. The guard
+budgets 200 ms for final command selection and checks the braking tail.
+An over-budget selection yields zero. The controller starts braking when
+a calibrated command has not been refreshed within 400 ms of publication.
+Ordinary moving candidates reserve half a grid cell beyond the 10 cm margin.
+Inside that reserve, the planner may back straight up at 0.20 m/s when
+the current BEV shows a corridor back to wider clearance and the retreat,
+including braking, preserves the full 10 cm. It rechecks each frame.
 Right-turn sustain has not been measured. Clearance checks also model
 loss of right yaw. Set `TINYNAV_GO2_RESPONSE_GUARD=0` and restart for the original behavior.

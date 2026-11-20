@@ -9,6 +9,9 @@ from tinynav.core.robot_specs import RLFootprint, RL_FOOTPRINT, ROBOT_CONFIG
 from tinynav.rl.rl_planner import _edge_points, footprint_clearance
 
 
+CALIBRATED_COMMAND_LEASE_S = .40
+
+
 @dataclass(frozen=True)
 class NavigationLimits:
     front: float = RL_FOOTPRINT.front
@@ -90,6 +93,7 @@ class NavigationGuard:
         self.limits = limits
         self.pose = np.asarray(pose, dtype=float)
         self.command = np.asarray(command, dtype=float)
+        self.pending_command = self.command
         self.esdf, self.origin, self.resolution = esdf, np.asarray(origin)[:2], resolution
         self.delay = max(0., float(delay))
         self.stamp = stamp
@@ -122,7 +126,10 @@ class NavigationGuard:
         prediction_delay = min(self.delay, .50)
         delay_steps = int(np.ceil(prediction_delay / .025))
         for _ in range(delay_steps):
-            current = advance(current, speed, self.command[1], prediction_delay / delay_steps)
+            step = prediction_delay / delay_steps
+            if self.pending_command is not self.command:
+                speed = executable_speed(speed, self.pending_command[0], step, self.limits)
+            current = advance(current, speed, self.pending_command[1], step)
             result.append(current.copy())
         ticks = int(np.ceil(duration / self.limits.period))
         for _ in range(ticks):

@@ -10,8 +10,8 @@ import numpy as np
 import logging
 import time
 from tinynav.core.robot_specs import ROBOT_CONFIG
-from tinynav.core.planner_config import planner_mode, shared_safety
-from tinynav.core.navigation_safety import NavigationLimits, executable_speed
+from tinynav.core.planner_config import go2_response_guard, planner_mode, shared_safety
+from tinynav.core.navigation_safety import CALIBRATED_COMMAND_LEASE_S, NavigationLimits, executable_speed
 
 # Must match planning_node: with "rl" the planner publishes (v, w) on /planning/rl_cmd and this
 # node executes it directly instead of tracking /planning/trajectory_path.
@@ -24,6 +24,8 @@ class CmdVelControlNode(Node):
     def __init__(self):
         super().__init__('cmd_vel_control_node')
         self.robot = ROBOT_CONFIG
+        self.nav_command_deadline = 0.
+        self.calibrated = go2_response_guard(self.robot.name)
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
@@ -131,7 +133,7 @@ class CmdVelControlNode(Node):
         target_cmd = Twist()
         target_cmd.linear.x = self.latest_cmd.linear.x
         target_cmd.angular.z = self.latest_cmd.angular.z
-        if age > stale_stop_s:
+        if age > stale_stop_s or (self.calibrated and now >= self.nav_command_deadline):
             target_cmd.linear.x = 0.0
             target_cmd.angular.z = 0.0
         elif age > stale_slow_s:
@@ -198,6 +200,8 @@ class CmdVelControlNode(Node):
 
     def nav_cmd_callback(self, msg):
         age = self.get_clock().now().nanoseconds / 1e9 - (msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9)
+        if self.calibrated:
+            self.nav_command_deadline = time.monotonic() + CALIBRATED_COMMAND_LEASE_S - max(0., age)
         if age > self.path_stale_stop_s:
             self.latest_cmd = Twist()
             return

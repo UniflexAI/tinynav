@@ -27,7 +27,7 @@ import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 from tinynav.core.planner_config import go2_response_guard, planner_mode, route_guidance, shared_safety
-from tinynav.core.navigation_safety import NavigationGuard, NavigationLimits
+from tinynav.core.navigation_safety import CALIBRATED_COMMAND_LEASE_S, NavigationGuard, NavigationLimits
 
 # "library": sample + ESDF-score the trajectory library (default). "rl": the learned policy in
 # tinynav/rl picks (v, w) and publishes it on /planning/rl_cmd for cmd_vel_control.
@@ -364,6 +364,8 @@ class PlanningNode(Node):
         self.get_logger().info(f"Go2 measured response guard: {self.response_profile is not None}")
         self.live_odom = None
         self.drive_command = (0., 0.)
+        self.nav_command_until = 0.
+        self.last_nav_command = (0., 0.)
         if self.navigation_limits is not None:
             self.nav_cmd_pub = self.create_publisher(TwistStamped, '/planning/nav_cmd', 10)
             self.decision_pub = self.create_publisher(String, '/planning/decision', 10)
@@ -493,32 +495,49 @@ class PlanningNode(Node):
                                self.resolution, delay=max(0., now - source) + limits.period, stamp=now)
 
     def publish_navigation_command(self, requested, guard, header, status, *, policy=None, guided=None):
+        selection_start = perf_counter_ns()
         guard = self.make_navigation_guard(guard.esdf)
+        calibrated = self.response_profile is not None and policy is not None
+        if calibrated:
+            from tinynav.rl.calibrated_guard import SELECTION_BUDGET_S, select
+            guard.delay += SELECTION_BUDGET_S
+            guard.pending_command = self.last_nav_command if guard.stamp < self.nav_command_until else guard.command
         command = guard.limits.executable([requested])[0]
-        valid, room, paths = guard.evaluate([command])
         calibrated_room = None
-        if self.response_profile is not None and policy is not None:
-            from tinynav.rl.calibrated_guard import select
-            if status in ("stuck", "recovery no motion", "recovery blocked", "clearance blocked", "recovery complete"):
+        if calibrated:
+            escape_band = guard.limits.margin <= guard.now < guard.limits.margin + .5 * guard.resolution
+            if status in ("stuck", "recovery no motion", "recovery blocked", "recovery complete") or (
+                    status == "clearance blocked" and not escape_band):
                 command = np.zeros(2)
             else:
                 v, w, calibrated_room = select(guard, self.target_pose[:2], self.rl.route_xy,
-                                               command.tolist(), self.response_profile, self.rl.vel)
+                                               command.tolist(), self.response_profile, self.rl.vel,
+                                               route_speed=guided[0] if guided is not None else requested[0])
                 command = np.array([v, w])
-                status = "calibrated route selection"
+                status = "calibrated clearance retreat" if escape_band and v < 0 else "calibrated route selection"
             valid, room, paths = guard.evaluate([command])
             if calibrated_room is not None:
                 room[0] = min(room[0], calibrated_room)
                 valid[0] &= room[0] >= guard.limits.margin
-        elif not valid[0]:
-            v, w, status = guard.select(command, self.target_pose[:2])
-            command = np.array([v, w])
+        else:
             valid, room, paths = guard.evaluate([command])
+            if not valid[0]:
+                v, w, status = guard.select(command, self.target_pose[:2])
+                command = np.array([v, w])
+                valid, room, paths = guard.evaluate([command])
+        selection_s = (perf_counter_ns() - selection_start) * 1e-9
+        if calibrated and selection_s > SELECTION_BUDGET_S and np.any(command):
+            command = np.zeros(2)
+            valid, room, paths = guard.evaluate([command])
+            status = "selection deadline exceeded"
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "base_link"
         msg.twist.linear.x, msg.twist.angular.z = map(float, command)
         self.nav_cmd_pub.publish(msg)
+        if calibrated:
+            self.last_nav_command = tuple(command)
+            self.nav_command_until = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 + CALIBRATED_COMMAND_LEASE_S
         path = Path()
         path.header = header
         path.header.frame_id = "world"
@@ -536,7 +555,7 @@ class PlanningNode(Node):
         self.path_pub.publish(path)
         details = dict(limits=asdict(guard.limits), pose=guard.pose.tolist(),
                        observation_stamp_ns=header.stamp.sec * 10**9 + header.stamp.nanosec,
-                       current_command=guard.command.tolist(), delay_s=guard.delay, stamp=guard.stamp,
+                       current_command=guard.command.tolist(), delay_s=guard.delay, selection_s=selection_s, stamp=guard.stamp,
                        observed_clearance_m=guard.now if np.isfinite(guard.now) else None,
                        checked_clearance_m=float(room[0]) if np.isfinite(room[0]) else None,
                        required_clearance_m=guard.minimum, requested=list(map(float, requested)),
