@@ -1,0 +1,78 @@
+name: Jetson Lean Image Check
+
+# docker/jetson-lean/Dockerfile follows the root Dockerfile by hand: any change to either
+# re-runs the drift check, so the lean image cannot silently fall behind.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - Dockerfile
+      - docker/jetson-lean/**
+      - .github/workflows/jetson_lean_check.yml
+  pull_request:
+    branches: [ main ]
+    paths:
+      - Dockerfile
+      - docker/jetson-lean/**
+      - .github/workflows/jetson_lean_check.yml
+  workflow_dispatch:
+    inputs:
+      build_arm64:
+        description: Also build the image for arm64 through emulation (slow, about 2-4 hours)
+        type: boolean
+        default: false
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Lean Dockerfile follows the root Dockerfile
+        run: python3 docker/jetson-lean/check_sync.py
+
+      - name: Script tests
+        run: python3 -m unittest discover -s docker/jetson-lean -p 'test_*.py'
+
+      - name: Shell scripts
+        run: |
+          for f in docker/jetson-lean/*.sh; do bash -n "$f"; done
+          shellcheck -S warning docker/jetson-lean/*.sh
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Dockerfile lint
+        run: docker buildx build --check -f docker/jetson-lean/Dockerfile .
+
+  build-arm64:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_arm64
+    needs: check
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/jetson-lean/Dockerfile
+          platforms: linux/arm64
+          build-args: |
+            WITH_APP=0
+          load: true
+          tags: tinynav:jetson-lean-check
+
+      - name: Imports without a GPU (TensorRT itself needs a Jetson)
+        run: |
+          docker run --rm --platform linux/arm64 -e TINYNAV_SKIP_GPU_CHECK=1 tinynav:jetson-lean-check \
+            bash -lc 'source /opt/ros/humble/setup.bash && python -c "import gtsam, cv2, numpy, rclpy; print(\"ok\")"'

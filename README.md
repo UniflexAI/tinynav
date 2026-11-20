@@ -201,6 +201,7 @@ Before you begin, make sure you have the following installed:
 **Platform-specific requirements:**
 - For **x86_64** (PC): [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) (for GPU support)
 - For **Jetson Orin**: [JetPack SDK](https://developer.nvidia.com/embedded/jetpack) version 6.2 or higher
+  - On JetPack 6.1 – 6.2.x, a smaller image that reuses the host's CUDA, cuDNN and TensorRT instead of carrying them: [docker/jetson-lean](docker/jetson-lean/README.md)
 
 ## 🚀 Quick Start
 
