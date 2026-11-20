@@ -191,3 +191,17 @@ def test_retreat_requires_clear_corridor_to_wider_ground():
     parallel_wall.now = float(parallel_wall.clearance(parallel_wall.pose[None])[0])
     assert .10 <= parallel_wall.now < .15
     assert cg.retreat(parallel_wall, profile, np.zeros(2)) is None
+
+
+def test_go2_runtime_geometry_matches_real_robot_without_exports(monkeypatch):
+    from tinynav.core.robot_specs import ROBOT_CONFIG
+    from tinynav.rl.ppo_planner import PPOGeometry
+    if ROBOT_CONFIG.name != "go2":
+        pytest.skip("Go2 runtime profile")
+    for prefix in ("TINYNAV_NAV_", "TINYNAV_PPO_"):
+        for name in ("FRONT", "REAR", "HALF_WIDTH", "MARGIN"):
+            monkeypatch.delenv(prefix + name + "_M", raising=False)
+    limits = NavigationLimits.from_environment()
+    for geometry in (limits, PPOGeometry()):
+        assert (geometry.front, geometry.rear, geometry.half_width) == (.30, .30, .15)
+    assert limits.margin == .10

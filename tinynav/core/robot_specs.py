@@ -127,3 +127,6 @@ try:
     ROBOT_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
 except KeyError:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}") from None
+
+# Go2 guard geometry used for the Nov 19 real-robot comparison.
+NAV_FOOTPRINT = RLFootprint(front=.30, rear=.30, half_width=.15) if ROBOT_CONFIG.name == "go2" else RL_FOOTPRINT

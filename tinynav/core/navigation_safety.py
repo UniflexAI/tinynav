@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 
-from tinynav.core.robot_specs import RLFootprint, RL_FOOTPRINT, ROBOT_CONFIG
+from tinynav.core.robot_specs import RLFootprint, NAV_FOOTPRINT, ROBOT_CONFIG
 from tinynav.rl.rl_planner import _edge_points, footprint_clearance
 
 
@@ -14,9 +14,9 @@ CALIBRATED_COMMAND_LEASE_S = .40
 
 @dataclass(frozen=True)
 class NavigationLimits:
-    front: float = RL_FOOTPRINT.front
-    rear: float = RL_FOOTPRINT.rear
-    half_width: float = RL_FOOTPRINT.half_width
+    front: float = NAV_FOOTPRINT.front
+    rear: float = NAV_FOOTPRINT.rear
+    half_width: float = NAV_FOOTPRINT.half_width
     control_x: float = 0.0
     control_y: float = 0.0
     max_forward: float = .55

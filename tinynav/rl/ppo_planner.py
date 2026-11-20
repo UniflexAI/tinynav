@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from tinynav.core.robot_specs import RL_FOOTPRINT, RLFootprint, ROBOT_CONFIG
+from tinynav.core.robot_specs import NAV_FOOTPRINT, RLFootprint, ROBOT_CONFIG
 from tinynav.rl.bev import GRID_RES, TRAIL_LEN, camera_yaw, make_bev, to_robot_frame, trail_channel
 
 # Action scaling shared with NavSim (which imports these): action[0] in [-1, 1] maps to
@@ -154,9 +154,9 @@ def search_forward_command(center, yaw, goal, guided, current, policy_speed, esd
 class PPOGeometry:
     """Body extents from the configured control center and its shift from the robot default."""
 
-    front: float = RL_FOOTPRINT.front
-    rear: float = RL_FOOTPRINT.rear
-    half_width: float = RL_FOOTPRINT.half_width
+    front: float = NAV_FOOTPRINT.front
+    rear: float = NAV_FOOTPRINT.rear
+    half_width: float = NAV_FOOTPRINT.half_width
     control_x: float = 0.0
     control_y: float = 0.0
 
