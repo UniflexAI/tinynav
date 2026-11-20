@@ -26,7 +26,7 @@ from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
-from tinynav.core.planner_config import planner_mode, route_guidance, shared_safety
+from tinynav.core.planner_config import go2_response_guard, planner_mode, route_guidance, shared_safety
 from tinynav.core.navigation_safety import NavigationGuard, NavigationLimits
 
 # "library": sample + ESDF-score the trajectory library (default). "rl": the learned policy in
@@ -356,13 +356,12 @@ class PlanningNode(Node):
         self.bridge = CvBridge()
         self.navigation_limits = NavigationLimits.from_environment() if shared_safety() else None
         self.response_profile = None
-        if os.environ.get("TINYNAV_GO2_RESPONSE_GUARD") == "1":
-            if self.navigation_limits is None or ROBOT_CONFIG.name != "go2" or not route_guidance():
-                raise ValueError("Go2 response guard requires Go2, PPO route guidance and shared safety")
+        if go2_response_guard(ROBOT_CONFIG.name):
             from pathlib import Path as FilePath
             from tinynav.rl import calibrated_guard
             self.response_profile = calibrated_guard.compile_profile(json.loads(
                 FilePath(calibrated_guard.__file__).with_name("go2_response.json").read_text()))
+        self.get_logger().info(f"Go2 measured response guard: {self.response_profile is not None}")
         self.live_odom = None
         self.drive_command = (0., 0.)
         if self.navigation_limits is not None:

@@ -173,12 +173,12 @@ TinyNav supports several key modes to fit different robotics workflows:
      ```
    - The robot will follow the designated POIs in the order you specify.
 
-For the Go2 calibrated on 2026-11-19, start the original PPO with
-`TINYNAV_GO2_RESPONSE_GUARD=1` and `TINYNAV_PLANNER=ppo` to try the
-experimental final command selector. Use the measured 0.30 m front/rear,
+Go2 PPO (`TINYNAV_PLANNER=ppo`) with shared safety uses the measured
+2026-11-19 motion response by default. The startup log reports
+`Go2 measured response guard: True`. Use the measured 0.30 m front/rear,
 0.15 m half width and zero control offsets above. The selector ranks
 route progress under the observed low and high speed responses and
 checks the command interval and braking tail against the current BEV.
 Moving candidates reserve half a grid cell beyond the 10 cm margin.
 Right-turn sustain has not been measured. Clearance checks also model
-loss of right yaw. Set the switch to 0 and restart for the original behavior.
+loss of right yaw. Set `TINYNAV_GO2_RESPONSE_GUARD=0` and restart for the original behavior.

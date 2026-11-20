@@ -26,6 +26,17 @@ def route_guidance(environ=None):
     return planner_mode(environ) == "rl" and environ.get("TINYNAV_RL_ROUTE_GUIDANCE") == "1"
 
 
+def go2_response_guard(robot, environ=None):
+    environ = os.environ if environ is None else environ
+    supported = robot == "go2" and route_guidance(environ) and shared_safety(environ)
+    value = environ.get("TINYNAV_GO2_RESPONSE_GUARD")
+    if value is None:
+        return supported
+    if value not in ("0", "1") or (value == "1" and not supported):
+        raise ValueError("Go2 response guard requires 0 or a supported Go2 PPO shared-safety configuration")
+    return value == "1"
+
+
 def policy_engine_path(environ=None):
     environ = os.environ if environ is None else environ
     if environ.get("TINYNAV_RL_ENGINE"):

@@ -191,6 +191,7 @@ class RLPlanner:
         self.motion, self.stuck = [], False
         self.motion_command_sent = False
         self.stuck_count = 0
+        self.forward_progress_start = None
         self.recovery = None
         self.recovery_start = None
         self.failed_recoveries = set()
@@ -274,6 +275,7 @@ class RLPlanner:
 
     def _activate_recovery(self, recovery, center, yaw):
         self.recovery = recovery
+        self.forward_progress_start = None
         self.route_rejoin.reset()
         self.recovery_start = (center.copy(), yaw)
         self.stuck_count += 1
@@ -299,6 +301,21 @@ class RLPlanner:
                 return 0.0, 0.0, "recovery blocked"
             elapsed -= duration
         return None
+
+    def _track_forward_progress(self, center, yaw, forward_speed):
+        # Budget retries per obstruction. Recovery arcs and on-the-spot turns
+        # must not erase failed attempts at the same obstruction.
+        if self.recovery is not None or self.stuck or not self.stuck_count or forward_speed <= 0:
+            self.forward_progress_start = None
+            return
+        if self.forward_progress_start is None:
+            self.forward_progress_start = (center.copy(), np.array([np.cos(yaw), np.sin(yaw)]))
+            return
+        start, forward = self.forward_progress_start
+        if (center - start) @ forward >= STUCK_MOVE:
+            self.stuck_count = 0
+            self.failed_recoveries.clear()
+            self.forward_progress_start = None
 
     def _check_stuck(self, stamp, center, yaw):
         if self.navigation_guard is not None:
@@ -375,6 +392,7 @@ class RLPlanner:
             self.navigation_guard = self.navigation_guard_factory()
             center, yaw = self.navigation_guard.pose[:2], self.navigation_guard.pose[2]
             stamp = self.navigation_guard.stamp
+            self._track_forward_progress(center, yaw, self.navigation_guard.command[0])
         v, w = route_guided_command(getattr(self, "route_xy", None), center, yaw, v, w)
         self.guided_command = (v, w)
         turn_age = stamp - self.turn_started

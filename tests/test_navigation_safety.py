@@ -132,3 +132,32 @@ def test_ppo_ordinary_command_enters_checked_recovery_on_no_response():
     assert planner.stuck_count == 1
     assert status.startswith("recovery")
     assert guard.evaluate([(v, w)])[0][0]
+
+
+def test_go2_response_default_and_opt_out():
+    from tinynav.core.planner_config import go2_response_guard
+    assert go2_response_guard("go2", {"TINYNAV_PLANNER": "ppo"})
+    assert not go2_response_guard("go2", {"TINYNAV_PLANNER": "dwa"})
+    assert not go2_response_guard("go2", {"TINYNAV_PLANNER": "ppo", "TINYNAV_GO2_RESPONSE_GUARD": "0"})
+    assert not go2_response_guard("a2", {"TINYNAV_PLANNER": "ppo"})
+
+
+def test_retry_budget_requires_measured_ordinary_forward_motion():
+    from tests.test_rl_planner import FakePolicy
+    from tinynav.rl.ppo_planner import RLPlanner
+    planner = RLPlanner(FakePolicy([.2, 0.]))
+    planner.stuck_count = 4
+    planner.failed_recoveries.add(((.2, .6, 1.),))
+    origin = np.zeros(2)
+    planner.recovery = object()
+    planner._track_forward_progress(origin, 0., .2)
+    planner._track_forward_progress(np.array([.4, 0.]), 0., .2)
+    planner.recovery = None
+    planner._track_forward_progress(origin, 0., .2)
+    planner._track_forward_progress(origin, 1., .2)
+    planner._track_forward_progress(np.array([-.3, 0.]), 0., -.2)
+    assert planner.stuck_count == 4
+    planner._track_forward_progress(origin, 0., .2)
+    planner._track_forward_progress(np.array([.21, 0.]), 0., .2)
+    assert planner.stuck_count == 0
+    assert not planner.failed_recoveries

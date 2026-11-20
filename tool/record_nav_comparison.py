@@ -39,7 +39,7 @@ PROBE = """
 import json, os
 from dataclasses import asdict
 from tinynav.core.robot_specs import ROBOT_CONFIG
-from tinynav.core.planner_config import planner_mode, route_guidance, policy_engine_path, shared_safety
+from tinynav.core.planner_config import go2_response_guard, planner_mode, route_guidance, policy_engine_path, shared_safety
 from tinynav.core.navigation_safety import NavigationLimits
 from tinynav.rl.ppo_planner import PPOGeometry, GUARD_MARGIN
 limits = NavigationLimits.from_environment() if shared_safety() else None
@@ -60,7 +60,7 @@ print(json.dumps(dict(
     diagnostic_clouds=os.environ.get('TINYNAV_PLANNING_DIAGNOSTIC_CLOUDS', '0') == '1',
     latest_pair_only=os.environ.get('TINYNAV_PLANNING_LATEST_PAIR_ONLY', '1') == '1',
     timing_enabled=os.environ.get('TINYNAV_PLANNING_TIMING') == '1',
-    shared_safety=shared_safety(),
+    shared_safety=shared_safety(), go2_response_guard=go2_response_guard(ROBOT_CONFIG.name),
     navigation_limits=asdict(limits) if limits is not None else None,
     engine=policy_engine_path() if planner_mode() == 'rl' else None,
 )))
