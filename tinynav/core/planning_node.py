@@ -1,6 +1,7 @@
 import array
 from dataclasses import asdict
 import json
+import hashlib
 import os
 from threading import Lock
 from time import perf_counter_ns
@@ -448,6 +449,11 @@ class PlanningNode(Node):
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
         self.rl = None
+        self.poi_trace = None
+        if PLANNER == "rl" and os.environ.get("TINYNAV_POI_DIAGNOSTICS") == "1":
+            self.poi_trace = self.create_publisher(String, "/planning/poi_diagnostics", 10)
+            self.trace_route_stamp = None
+            self.trace_target_stamp = None
         if PLANNER == "rl":
             from tinynav.rl.rl_planner import RLPlanner, TRTPolicy
             self.ppo_route_guidance = route_guidance()
@@ -564,31 +570,62 @@ class PlanningNode(Node):
         self.decision_pub.publish(String(data=json.dumps(details, separators=(",", ":"))))
         return tuple(command)
 
+    def publish_poi_trace(self, event, **fields):
+        self.poi_trace.publish(String(data=json.dumps(dict(
+            event=event, node_time_ns=self.get_clock().now().nanoseconds, **fields))))
+
+    @staticmethod
+    def trace_stamp(header):
+        return header.stamp.sec * 10**9 + header.stamp.nanosec
+
     def poi_change_callback(self, msg):
         self.target_pose = None
         if getattr(self, "ppo_route_guidance", False):
             self.global_route = None
             self.rl.reset()
 
+        if self.poi_trace is not None:
+            p = msg.pose.pose.position
+            self.publish_poi_trace("poi_change", stamp_ns=self.trace_stamp(msg.header),
+                                   child_frame=msg.child_frame_id, position=[p.x, p.y, p.z])
+
     def global_route_callback(self, msg):
         self.global_route = np.asarray(
             [[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses]
         ) if msg.header.frame_id == "map" and msg.poses else None
+
+        if self.poi_trace is not None:
+            self.trace_route_stamp = (self.global_route, self.trace_stamp(msg.header))
+            self.publish_poi_trace("route_received", stamp_ns=self.trace_stamp(msg.header),
+                                   points=len(msg.poses), frame=msg.header.frame_id)
 
     def route_in_world(self):
         from tf2_ros import TransformException
         if self.global_route is None:
             return None
         try:
-            transform = self.route_tf_buffer.lookup_transform("world", "map", Time()).transform
+            tf = self.route_tf_buffer.lookup_transform("world", "map", Time())
+            transform = tf.transform
         except TransformException:
             return None
         q, t = transform.rotation, transform.translation
         rotation = quat_to_matrix(np.array([q.x, q.y, q.z, q.w]))
-        return (self.global_route @ rotation.T + np.array([t.x, t.y, t.z]))[:, :2]
+        route = self.global_route
+        if self.poi_trace is not None and route is not None:
+            metadata = self.trace_route_stamp
+            self.trace_route_lookup = dict(
+                stamp_ns=metadata[1] if metadata is not None and metadata[0] is route else None,
+                sha256=hashlib.sha256(route.tobytes()).hexdigest(),
+                points=len(route), endpoint_map=route[-1].tolist(),
+                tf=dict(source=tf.child_frame_id, target=tf.header.frame_id, query_ns=0,
+                        stamp_ns=self.trace_stamp(tf.header), translation=[t.x, t.y, t.z],
+                        quaternion=[q.x, q.y, q.z, q.w]))
+        return (route @ rotation.T + np.array([t.x, t.y, t.z]))[:, :2]
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        if self.poi_trace is not None:
+            self.trace_target_stamp = (self.target_pose, self.trace_stamp(msg.header))
 
     def info_callback(self, msg):
         if self.K is None:
@@ -979,6 +1016,10 @@ class PlanningNode(Node):
             self.publish_selected_path(trajectories, top_indices, depth_msg.header)
 
     def rl_plan(self, T, stamp, ESDF_map, header):
+        diagnostic = self.poi_trace is not None
+        if diagnostic:
+            started_ns = self.get_clock().now().nanoseconds
+            self.trace_route_lookup = None
         if self.target_pose is None:
             self.rl.reset()  # next goal starts with fresh memory; no command -> cmd_vel_control stops
             return
@@ -986,7 +1027,10 @@ class PlanningNode(Node):
             self.rl.route_xy = self.route_in_world()
             if self.navigation_limits is not None:
                 self.rl.navigation_guard_factory = lambda: self.make_navigation_guard(ESDF_map)
-        v, w, poses, bev, status = self.rl.step(self.occupancy_grid, self.origin, T, stamp, self.target_pose[:2], ESDF_map)
+        target = self.target_pose
+        target_metadata = self.trace_target_stamp if diagnostic else None
+        issued = None
+        v, w, poses, bev, status = self.rl.step(self.occupancy_grid, self.origin, T, stamp, target[:2], ESDF_map)
         if getattr(self, "ppo_route_guidance", False) and status == "stuck":
             self.get_logger().error(
                 "PPO stuck: no measured motion after publishing nonzero commands; stopped until the next goal",
@@ -1018,6 +1062,18 @@ class PlanningNode(Node):
                      guided=list(getattr(self.rl, "guided_command", (v, w))))
             if hasattr(self.rl, "response"):
                 self.rl.response.issued(issued)
+
+        if diagnostic:
+            self.publish_poi_trace(
+                "frame", observation_stamp_ns=self.trace_stamp(header),
+                planning_start_ns=started_ns, target_world=target.tolist(),
+                target_stamp_ns=target_metadata[1] if target_metadata is not None and target_metadata[0] is target else None,
+                route_lookup=self.trace_route_lookup,
+                policy_command=getattr(self.rl, "policy_command", None),
+                guided_command=getattr(self.rl, "guided_command", None),
+                guard_output=getattr(self.rl, "guard_output", None),
+                planner_output=list(map(float, (v, w))), issued_command=list(map(float, issued)) if issued is not None else None,
+                status=status)
 
         # Same pose convention as the library path: control-center position, camera orientation.
         path = Path()

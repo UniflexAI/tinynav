@@ -387,6 +387,7 @@ class RLPlanner:
         v = float(a[0] * V_MAX if a[0] >= 0 else -a[0] * V_MIN)
         w = float(a[1] * W_MAX)
         policy_speed = v
+        self.policy_command = (v, w)
         self.policy_action = a.copy()
         if self.navigation_guard_factory is not None:
             self.navigation_guard = self.navigation_guard_factory()
@@ -399,6 +400,7 @@ class RLPlanner:
         preferred_turn = self.turn_direction if 0.0 <= turn_age < TURN_PREFERENCE_S else 0.0
         v, w, status = self._guard_command(center, yaw, goal_xy, (v, w), policy_speed, esdf, origin,
                                           preferred_turn=preferred_turn)
+        self.guard_output = (float(v), float(w), status)
         preferred = -1.0 if a[1] >= 0.0 else 1.0
         if status == "clearance blocked":
             self.motion.clear()
