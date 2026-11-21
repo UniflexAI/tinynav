@@ -63,12 +63,23 @@ class CmdVelControlNode(Node):
         self.prev_cmd = Twist()
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
+        self._manual_control = False
         self._paused = False
         self._nav_active = False
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
+        self.create_subscription(Bool, '/nav/manual_control', self._on_manual_control, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
+
+    def _on_manual_control(self, msg: Bool):
+        self._manual_control = msg.data
+        self.last_cmd_pub_time = time.monotonic()
+        self.prev_cmd = Twist()
+        self.latest_cmd = Twist()
+        self.last_path_update_time = None
+        if self._manual_control:
+            self.cmd_pub.publish(Twist())
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
@@ -94,6 +105,8 @@ class CmdVelControlNode(Node):
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
     def cmd_timer_callback(self):
+        if self._manual_control:
+            return
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
@@ -159,7 +172,7 @@ class CmdVelControlNode(Node):
         self.prev_cmd = out
         
     def path_callback(self, msg):
-        if not self._nav_active:
+        if self._manual_control or not self._nav_active:
             return
         if msg is None or self.pose is None:
             return
