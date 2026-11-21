@@ -804,3 +804,14 @@ startup/restart/stop commands, camera/NIC settings, checks and their real output
 remaining blockers and rollback steps. Do not publish credentials in that report.
 Explain results to me in Chinese.
 ```
+
+
+## 15. Later narrow ten-level scene
+
+The 2026-11-21 scene update adds `--levels`, `--flight-width` and
+`--landing-depth`. See [the ten-level narrow trial](stair_ten_level_narrow_trial.md)
+for the distinction between ten platform levels and relative DOWN 9. This
+1.2 m case currently fails the first-flight shaft footprint assertion and is not
+a successful traversal result. The original validated DOWN 1/2 results above
+remain the baseline. With the additional geometry suite, run both
+`tests/test_stair_mode.py` and `tests/test_stair_sim_course.py` (31 tests).

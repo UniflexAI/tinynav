@@ -44,13 +44,14 @@ def add_landing_door(box, wall_x, lower, upper, z, pose, wall_color, flight):
     box(prefix + "door_leaf", cx - length / 2, cx + length / 2, cy - .033, cy + .033,
         z + .015, z + 1.05, brown, True, yaw=yaw, moving=pose == "moving")
 
-def add_floor_stack(box, flights, direction, doors):
+def add_floor_stack(box, flights, direction, doors, lane_width=1.8, landing_depth=LANDING_DEPTH):
     """Build two flights per floor around the same open stairwell."""
     rise = RISE * direction
     landing_height = (STEPS + 1) * rise
-    lower_side, upper_side = -0.90, MULTI_LANE_END
-    near_lane = (lower_side, MULTI_SHAFT[2])
-    far_lane = (MULTI_SHAFT[3], upper_side)
+    shaft = shaft_bounds(flights, lane_width)
+    lower_side, upper_side = -lane_width / 2, shaft[3] + lane_width
+    near_lane = (lower_side, shaft[2])
+    far_lane = (shaft[3], upper_side)
     wall_color = (0.57, 0.60, 0.64, 1)
     floor_color = (0.30, 0.51, 0.57, 1)
     box("upper", -5.1, LIP, *near_lane, -.20, 0, floor_color)
@@ -69,11 +70,11 @@ def add_floor_stack(box, flights, direction, doors):
             box(f"flight_{flight}_tread_{tread}", x0, x1, *lane, top - .22, top, color)
             box(f"flight_{flight}_outer_{tread}_wall", x0, x1, *outer,
                 top - .19, top + .68, wall_color, True)
-            rail_y = (MULTI_SHAFT[3] - .035, MULTI_SHAFT[3]) if reverse else (MULTI_SHAFT[2], MULTI_SHAFT[2] + .035)
+            rail_y = (shaft[3] - .035, shaft[3]) if reverse else (shaft[2], shaft[2] + .035)
             box(f"flight_{flight}_rail_{tread}", x0, x1, *rail_y, top + .30, top + .37,
                 (0.93, 0.65, 0.22, 1), True)
         z += landing_height
-        a, b = (-LANDING_DEPTH, LIP) if reverse else (FOOT, FOOT + LANDING_DEPTH)
+        a, b = (-landing_depth, LIP) if reverse else (FOOT, FOOT + landing_depth)
         box(f"landing_{flight}", a, b, lower_side, upper_side, z - .20, z, floor_color)
         wall_x = (a - .12, a) if reverse else (b, b + .12)
         if flight in doors:
@@ -85,7 +86,18 @@ def add_floor_stack(box, flights, direction, doors):
             box(f"landing_{flight}_{side}_wall", a, b, y0, y0 + .12,
                 z - .20, z + .68, wall_color, True)
 
-def build_world(plant, robot, flights, *, direction=-1, mapping_rig=True, doors=None):
+def shaft_bounds(flights, lane_width=None, landing_depth=LANDING_DEPTH):
+    if lane_width is None and landing_depth != LANDING_DEPTH:
+        lane_width = 1.8
+    if lane_width is None:
+        return MULTI_SHAFT if flights > 2 else SHAFT
+    if not 0.8 <= lane_width <= 3.0:
+        raise ValueError("Flight width must be in [0.8, 3.0] meters")
+    return (LIP, FOOT, lane_width / 2, lane_width / 2 + 0.14)
+
+
+def build_world(plant, robot, flights, *, direction=-1, mapping_rig=True, doors=None,
+                lane_width=None, landing_depth=LANDING_DEPTH):
     spec = mujoco.MjSpec.from_string(
         '<mujoco model="stairs"><visual><headlight diffuse=".84 .84 .84" ambient=".38 .38 .38"/>'
         '</visual><worldbody/></mujoco>'
@@ -107,8 +119,12 @@ def build_world(plant, robot, flights, *, direction=-1, mapping_rig=True, doors=
                       group=1 if wall and "rail" not in name and not name.endswith("door_leaf") else 0)
         (walls if wall else surfaces).append((x0, x1, y0, y1, top))
 
-    if flights > 2:
-        add_floor_stack(box, flights, direction, doors or {})
+    if not 1.0 <= landing_depth <= 3.0:
+        raise ValueError("Landing depth must be in [1.0, 3.0] meters")
+    shaft_bounds(flights, lane_width, landing_depth)
+    if flights > 2 or lane_width is not None or landing_depth != LANDING_DEPTH:
+        add_floor_stack(box, flights, direction, doors or {},
+                        1.8 if lane_width is None else lane_width, landing_depth)
     else:
         stack = flights == 2
         step = RISE * direction

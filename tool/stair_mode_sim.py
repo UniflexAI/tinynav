@@ -21,11 +21,20 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--sim-root", type=Path, required=True)
 parser.add_argument("--course-script", type=Path, default=Path(__file__).with_name("stair_sim_course.py"))
 parser.add_argument("--capture", type=Path)
-parser.add_argument("--floors", type=int, choices=range(1, 6), default=1)
+parser.add_argument("--floors", type=int, choices=range(1, 51), default=1)
+parser.add_argument("--levels", type=int, choices=range(2, 52),
+                    help="Number of full-floor platforms; default: task floors + 1")
+parser.add_argument("--flight-width", type=float, help="Clear stair flight width in meters")
+parser.add_argument("--landing-depth", type=float, default=1.75)
 args = parser.parse_args()
 capture_path = args.capture
 floors = args.floors
 flights = floors * 2
+levels = args.levels or floors + 1
+if levels <= floors:
+    parser.error("--levels must be greater than the relative --floors task")
+scene_flights = 2 * (levels - 1)
+lane_width, landing_depth = args.flight_width, args.landing_depth
 sys.path.insert(0, str(args.sim_root / "mujoco"))
 from sim import plant
 from sim.keyboard import ConstantCmd
@@ -41,7 +50,11 @@ spec = importlib.util.spec_from_file_location("course", str(args.course_script))
 course = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(course)
 robot = get_robot("go2")
-model, binding, surfaces, walls = course.build_world(plant, robot, flights, mapping_rig=False)
+model, binding, surfaces, walls = course.build_world(
+    plant, robot, scene_flights, mapping_rig=False,
+    lane_width=lane_width, landing_depth=landing_depth)
+shaft = course.shaft_bounds(scene_flights, lane_width, landing_depth)
+print(f"SCENE levels={levels} flights={scene_flights} flight_width={lane_width} landing_depth={landing_depth} task_floors={floors}", flush=True)
 data = mujoco.MjData(model)
 plant.reset_to_spawn(model, data, binding, pos=course.SPAWN, yaw_deg=7.)
 drive = ConstantCmd(0., 0.)
@@ -166,7 +179,7 @@ if capture_path:
     display.geomgroup[1] = 0
     display.geomgroup[3] = 1
 try:
-    for tick in range(1800):
+    for tick in range(max(1800, flights * 900)):
         mujoco.mj_camlight(model,data)
         camid = runtime.b.depth_camera_id
         T = np.eye(4)
@@ -207,7 +220,7 @@ try:
             for contact in data.contact[:data.ncon]:
                 assert not wall_ids.intersection((contact.geom1, contact.geom2)), ("wall contact",runtime.base_pos())
             q = data.qpos[binding.root_qpos_adr:binding.root_qpos_adr+7]
-            clearance = course.shaft_clearance(q[0],q[1],course.yaw_of(q[3:]), course.MULTI_SHAFT if flights > 2 else course.SHAFT)
+            clearance = course.shaft_clearance(q[0],q[1],course.yaw_of(q[3:]), shaft)
             min_clearance=min(min_clearance,clearance)
             assert clearance>0, ("shaft",q[:3])
         if stair.arrived:
@@ -232,13 +245,23 @@ try:
                                     qpos=capture_poses, bev=capture_maps, target=capture_targets,
                                     path=capture_paths, cmd=capture_commands, status=capture_status,
                                     landings=capture_landings, clearance=capture_clearance,
-                                    stop=stop, hold=hold, landing_events=landing_events, floors=floors)
+                                    stop=stop, hold=hold, landing_events=landing_events, floors=floors,
+                                    levels=levels, flight_width=np.nan if lane_width is None else lane_width,
+                                    landing_depth=landing_depth, shaft=shaft, arrived=True,
+                                    min_clearance=min_clearance)
             break
     else:
         raise RuntimeError(("did not arrive",runtime.base_pos(),stair.gen.landings))
 finally:
     if capture_path and frames and not stair.arrived:
-        np.savez_compressed(capture_path, detail=frames, time=capture_times, qpos=capture_poses, bev=capture_maps, target=capture_targets, path=capture_paths, cmd=capture_commands, status=capture_status, landings=capture_landings, clearance=capture_clearance)
+        capture_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(capture_path, detail=frames, time=capture_times,
+                            qpos=capture_poses, bev=capture_maps, target=capture_targets,
+                            path=capture_paths, cmd=capture_commands, status=capture_status,
+                            landings=capture_landings, clearance=capture_clearance,
+                            floors=floors, levels=levels, landing_depth=landing_depth,
+                            flight_width=np.nan if lane_width is None else lane_width,
+                            shaft=shaft, arrived=False, min_clearance=min_clearance)
     for n in (stair, planner,control):
         n.destroy_node()
     rclpy.shutdown()

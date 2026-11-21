@@ -109,3 +109,7 @@ For the independent finite-floor stair branch, see the complete
 [Ubuntu x64 deployment and GPT handoff](stair_floors_ubuntu_x64_deployment.md).
 It covers App installation, external depth/VIO inputs, robot-interface configuration,
 isolated simulation, validation, logs and rollback.
+
+
+For the ten-level building with 1.2 m wide flights, see
+[scene parameters and the initial failing regression](stair_ten_level_narrow_trial.md).
