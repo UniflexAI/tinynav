@@ -1,5 +1,10 @@
 # Stair-floors development and simulation
 
+For this App/stairs-mode update, including the existing-device upgrade steps,
+see [App upgrade and use (Chinese)](stair_app_upgrade_zh.md). Updating Python
+sources and restarting backend/navigation processes is required in addition to
+rebuilding the ordinary Flutter frontend.
+
 Updated: 2026-11-21. Branch: `xiaole/stair-floors`.
 
 ## Scope and tested environment
@@ -54,7 +59,7 @@ These are installed host helpers, not repository scripts. Portable commands in
 a prepared isolated container, with ROS sourced and simulation deps on PYTHONPATH:
 
 ```bash
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests/test_stair_mode.py tests/test_stair_sim_course.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests/test_stair_mode.py tests/test_stair_sim_course.py tests/test_stair_odom_noise.py tests/test_stair_sim_control.py
 python -u tool/stair_mode_sim.py --sim-root /simrepo --direction down \
   --levels 10 --floors 9 --flight-width 1.2 --landing-depth 1.2 \
   --capture /simwork/output/compact-down-nine.npz
@@ -71,6 +76,18 @@ correct final pose, zero output and hold, positive shaft clearance, no contact/f
 An NPZ or video alone is not proof of pass. Failed runs save diagnostic data with
 `arrived=False`, including when the node reported arrival but final assertions failed.
 Full results and failure analysis: [trial report](stair_ten_level_narrow_trial.md).
+
+## Integrated TinyNav App
+
+Open **http://192.168.11.116:18083/** -> **Operate** for the original TinyNav App's
+front camera, local BEV, 3D occupancy and Stairs task buttons. See
+[original App connection](stair_tinynav_app_view.md).
+The observer/control page **http://192.168.11.116:18080/** provides environment
+reset/pause, noise/speed settings and third-person views with BEV/depth. The same
+world is available separately at `:18082`.
+This isolated App simulation profile reuses the tested deterministic navigation
+harness; it does not start physical sensors or hardware processes. Setup, control
+semantics and execution limits: [App + MuJoCo guide](stair_mujoco_app.md).
 
 ## Interactive viewer and live BEV
 
@@ -106,3 +123,17 @@ Interactive contact/fall/shaft assertion failure latches a pause and requires re
 This independent world check is not a deployed sensor safety supervisor. The
 headless harness additionally verifies count heights, final position and stop hold;
 use it for regression qualification rather than relying on a viewer screenshot.
+
+## Odom perturbation experiments
+
+See [the odometry noise experiment](stair_odom_noise_trial.md) for deterministic
+position/yaw/pitch injection, CLI parameters, failure traces and validation scope.
+Default simulation inputs remain unperturbed.
+
+The final-support noise fix passes 52 focused tests, the reproduced position-only
+DOWN 1 case, combined-noise UP/DOWN 9 and noiseless UP/DOWN 9. See the noise trial
+report for exact settings, margins and single-seed limitations.
+
+The live pause/resume parity repair and independent arrival/hold validation are
+documented in [live/offline parity](stair_live_offline_parity.md). The four focused
+suites pass 57 tests.

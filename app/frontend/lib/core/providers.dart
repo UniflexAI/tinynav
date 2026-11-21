@@ -14,9 +14,19 @@ final sharedPreferencesProvider = Provider<SharedPreferences>(
 
 final deviceIpProvider = StateProvider<String?>((ref) => null);
 
+String deviceBaseUrl(String address) {
+  final uri = Uri.parse(address.contains('://') ? address : 'http://$address');
+  return uri.replace(port: uri.hasPort ? uri.port : 8000, path: '', query: null, fragment: null).toString().replaceAll(RegExp(r'/$'), '');
+}
+
+String deviceWsUrl(String address, String path) {
+  final uri = Uri.parse(deviceBaseUrl(address));
+  return uri.replace(scheme: uri.scheme == 'https' ? 'wss' : 'ws', path: path).toString();
+}
+
 final baseUrlProvider = Provider<String?>((ref) {
   final ip = ref.watch(deviceIpProvider);
-  return ip != null ? 'http://$ip:8000' : null;
+  return ip != null ? deviceBaseUrl(ip) : null;
 });
 
 final dioProvider = Provider<Dio>((ref) {
@@ -33,7 +43,7 @@ final deviceStatusProvider = StreamProvider<DeviceStatus>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/status'));
+  final channel = WebSocketChannel.connect(Uri.parse(deviceWsUrl(ip, '/ws/status')));
   ref.onDispose(() => channel.sink.close());
 
   return channel.stream.map(
@@ -46,7 +56,7 @@ final navProgressStreamProvider = StreamProvider<NavProgress>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/nav-progress'));
+  final channel = WebSocketChannel.connect(Uri.parse(deviceWsUrl(ip, '/ws/nav-progress')));
   ref.onDispose(() => channel.sink.close());
 
   return channel.stream.map(
@@ -59,7 +69,7 @@ final poseStreamProvider = StreamProvider<Pose>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/pose'));
+  final channel = WebSocketChannel.connect(Uri.parse(deviceWsUrl(ip, '/ws/pose')));
   ref.onDispose(() => channel.sink.close());
 
   return channel.stream.map(
@@ -140,10 +150,7 @@ final previewStreamProvider =
     final ip = ref.watch(deviceIpProvider);
     if (ip == null) return const Stream.empty();
 
-    final uri = Uri(
-      scheme: 'ws',
-      host: ip,
-      port: 8000,
+    final uri = Uri.parse(deviceWsUrl(ip, '/ws/preview')).replace(
       path: '/ws/preview',
       queryParameters: {
         'topic': request.topic,
@@ -166,7 +173,7 @@ final planningStreamProvider = StreamProvider<PlanningState>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/planning'));
+  final channel = WebSocketChannel.connect(Uri.parse(deviceWsUrl(ip, '/ws/planning')));
   ref.onDispose(() => channel.sink.close());
 
   return channel.stream.map(
@@ -231,4 +238,10 @@ final poisProvider = FutureProvider.autoDispose<List<Poi>>((ref) async {
     if (e.response?.statusCode == 503) return [];
     rethrow;
   }
+});
+
+/// Capability discovery keeps the existing App UI for real devices unchanged.
+final simulationConnectionProvider = FutureProvider<bool>((ref) async {
+  final response = await ref.watch(dioProvider).get('/device/info');
+  return (response.data['capabilities'] as List? ?? []).contains('simulation');
 });

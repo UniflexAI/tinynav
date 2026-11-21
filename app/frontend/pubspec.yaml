@@ -40,3 +40,7 @@ flutter:
           weight: 500
         - asset: assets/fonts/Roboto/Roboto-Bold.ttf
           weight: 700
+
+    - family: NotoSansSC
+      fonts:
+        - asset: assets/fonts/NotoSansSC/TinyNavUI.ttf

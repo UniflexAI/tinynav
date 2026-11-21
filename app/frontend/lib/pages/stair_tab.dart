@@ -65,22 +65,23 @@ class _StairTabState extends ConsumerState<StairTab> {
     ));
   }
 
-  Future<void> _save() async {
+  Future<bool> _save() async {
     final hText = _cameraHeight.text.trim();
     final h = hText.isEmpty ? null : double.tryParse(hText);
     final floors = int.tryParse(_floors.text.trim());
     final perFloor = int.tryParse(_landingsPerFloor.text.trim());
     if (hText.isNotEmpty && (h == null || h < 0.2 || h > 1.2)) {
       _snack('Camera height: 0.20 - 1.20 m, or empty for the robot default', error: true);
-      return;
+      return false;
     }
-    if (floors == null || floors < 0 || floors > 50) {
-      _snack('Floors: 0 - 50 (0: no limit)', error: true);
-      return;
+    final simulated=ref.read(simulationConnectionProvider).valueOrNull ?? false;
+    if (floors == null || floors < (simulated ? 1 : 0) || floors > (simulated ? 9 : 50)) {
+      _snack(simulated ? 'Floors: 1 - 9' : 'Floors: 0 - 50 (0: no limit)', error: true);
+      return false;
     }
     if (perFloor == null || perFloor < 1 || perFloor > 4) {
       _snack('Landings per floor: 1 - 4', error: true);
-      return;
+      return false;
     }
     setState(() => _saving = true);
     try {
@@ -90,9 +91,28 @@ class _StairTabState extends ConsumerState<StairTab> {
         'landings_per_floor': perFloor,
       });
       _fill(Map<String, dynamic>.from(r.data as Map));
-      if (mounted) _snack('Saved, used the next time stair mode starts');
+      if (mounted) _snack('Settings saved');
+      return true;
     } on DioException catch (e) {
       if (mounted) _snack(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error', error: true);
+      return false;
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _start(String direction) async {
+    if (!await _save() || !mounted) return;
+    setState(() => _saving = true);
+    try {
+      await ref.read(dioProvider).post('/nav/stair/start', data: {
+        'direction': direction, 'turn': 'auto',
+        'floors': int.parse(_floors.text),
+        'landings_per_floor': int.parse(_landingsPerFloor.text),
+      }, options: Options(receiveTimeout: const Duration(seconds: 90)));
+      if (mounted) _snack('Started $direction stairs');
+    } on DioException catch(e) {
+      if (mounted) _snack(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error',error: true);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -100,6 +120,7 @@ class _StairTabState extends ConsumerState<StairTab> {
 
   @override
   Widget build(BuildContext context) {
+    final simulated=ref.watch(simulationConnectionProvider).valueOrNull ?? false;
     final status = ref.watch(deviceStatusProvider).valueOrNull;
     // stairStatus is "<direction> <status> well_side=.. cam_h=.. pitch=.. landings=2/4"
     final parts = (status?.stairStatus ?? '').split(' ');
@@ -127,13 +148,14 @@ class _StairTabState extends ConsumerState<StairTab> {
                     label: 'Camera height (m)',
                     hint: 'empty: robot default (go2 0.45)',
                     decimal: true,
+                    readOnly: simulated,
                   ),
-                  const _Help('Camera above the ground. Refined on flat ground within ±25% of this value.'),
+                  _Help(simulated ? 'Fixed MuJoCo camera calibration: 0.4669 m.' : 'Camera above the ground. Refined on flat ground within ±25% of this value.'),
                   const SizedBox(height: 12),
-                  _NumberField(controller: _floors, label: 'Floors', hint: '0: no limit'),
+                  _NumberField(controller: _floors, label: 'Floors', hint: simulated ? '1 - 9' : '0: no limit'),
                   const _Help('Floors to go, then stop on that landing ("arrived") and leave stair mode.'),
                   const SizedBox(height: 12),
-                  _NumberField(controller: _landingsPerFloor, label: 'Landings per floor', hint: '2'),
+                  _NumberField(controller: _landingsPerFloor, label: 'Landings per floor', hint: '2', readOnly: simulated),
                   const _Help('2 in a U-shaped stairwell. Stops on landing number floors × this.'),
                   const SizedBox(height: 16),
                   Row(
@@ -155,6 +177,12 @@ class _StairTabState extends ConsumerState<StairTab> {
                       OutlinedButton(onPressed: _saving ? null : _load, child: const Text('Reload')),
                     ],
                   ),
+                  const SizedBox(height: 12),
+                  Row(children: [
+                    Expanded(child: FilledButton.icon(onPressed: _saving ? null : () => _start('up'), icon: const Icon(Icons.north), label: const Text('Start upstairs'))),
+                    const SizedBox(width: 8),
+                    Expanded(child: FilledButton.icon(onPressed: _saving ? null : () => _start('down'), icon: const Icon(Icons.south), label: const Text('Start downstairs'))),
+                  ]),
                   if (active)
                     const Padding(
                       padding: EdgeInsets.only(top: 8),
@@ -223,12 +251,14 @@ class _NumberField extends StatelessWidget {
   final String label;
   final String hint;
   final bool decimal;
-  const _NumberField({required this.controller, required this.label, required this.hint, this.decimal = false});
+  final bool readOnly;
+  const _NumberField({required this.controller, required this.label, required this.hint, this.decimal = false, this.readOnly = false});
 
   @override
   Widget build(BuildContext context) {
     return TextField(
       controller: controller,
+      readOnly: readOnly,
       keyboardType: TextInputType.numberWithOptions(decimal: decimal),
       style: const TextStyle(color: Color(0xFFE6EEF7)),
       decoration: InputDecoration(

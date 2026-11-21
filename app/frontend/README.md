@@ -2,6 +2,11 @@
 
 Flutter Web / Android / iOS app for controlling the TinyNav visual navigation module.
 
+For the current stairs-mode workflow, simulator results, and physical-device
+upgrade steps, see [App/stairs upgrade and usage](../../docs/stair_app_upgrade_zh.md).
+A physical device needs the updated Python sources and backend restart as well
+as a frontend rebuild; use the ordinary App build without `TINYNAV_SIMULATION=true`.
+
 ## Quick start
 
 ```bash

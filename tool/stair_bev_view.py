@@ -7,10 +7,15 @@ BG = (20, 27, 37)
 
 
 def render_bev(world):
-    q = world.data.qpos[world.binding.root_qpos_adr:world.binding.root_qpos_adr + 7]
+    q = world.data.qpos[world.binding.root_qpos_adr:world.binding.root_qpos_adr + 7].copy()
     # MuJoCo free joint quaternion is wxyz.
     qw, qx, qy, qz = q[3:]
     yaw = np.arctan2(2*(qw*qz+qx*qy), 1-2*(qy*qy+qz*qz))
+    if hasattr(world,'sensors') and world.sensors.estimated is not None:
+        T=world.sensors.estimated
+        yaw=np.arctan2(T[1,2],T[0,2])
+        q[0]=T[0,3]-.2*np.cos(yaw)
+        q[1]=T[1,3]-.2*np.sin(yaw)
     c, s = np.cos(yaw), np.sin(yaw)
     offset = (CELLS/2-.5-np.arange(CELLS))*RES
     forward, left = np.meshgrid(offset, offset, indexing='ij')

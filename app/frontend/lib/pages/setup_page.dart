@@ -32,7 +32,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     });
     try {
       final dio = Dio(BaseOptions(
-        baseUrl: 'http://$ip:8000',
+        baseUrl: deviceBaseUrl(ip),
         connectTimeout: const Duration(seconds: 5),
       ));
       final resp = await dio.get('/device/info');
@@ -76,14 +76,14 @@ class _SetupPageState extends ConsumerState<SetupPage> {
                 const Text('TinyNav',
                     style: TextStyle(fontSize: 30, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 6),
-                const Text('Enter the device IP address',
+                const Text('Enter the device IP address or IP:port',
                     style: TextStyle(color: Colors.grey)),
                 const SizedBox(height: 32),
                 TextField(
                   controller: _ipController,
                   decoration: const InputDecoration(
                     labelText: 'Device IP',
-                    hintText: '192.168.1.100',
+                    hintText: '192.168.1.100:8000',
                     prefixIcon: Icon(Icons.router_outlined),
                     border: OutlineInputBorder(),
                   ),

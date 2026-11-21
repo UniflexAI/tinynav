@@ -1,5 +1,10 @@
 # Physical stair trial and recording handoff
 
+For this App/stairs-mode update, including the existing-device upgrade steps,
+see [App upgrade and use (Chinese)](stair_app_upgrade_zh.md). Updating Python
+sources and restarting backend/navigation processes is required in addition to
+rebuilding the ordinary Flutter frontend.
+
 Updated: 2026-11-21. Read alongside
 [the complete x64 deployment guide](stair_floors_ubuntu_x64_deployment.md).
 
@@ -21,7 +26,7 @@ robot/controller's actual loss-of-command stop and physical stop before stairs.
 
 1. Use a separate clean `xiaole/stair-floors` checkout. Record full commit and
    amd64 image digest. Follow deployment sections 3-6 for Docker/GPU, ROS overlays,
-   native dependencies, model assets, frontend build and the 41 focused tests.
+   native dependencies, model assets, frontend build and the focused tests in the linked upgrade guide.
 2. Initially set `ROBOT_TYPE=go2`, `TINYNAV_UNITREE_ENABLED=0`. Use the actual
    sensor ROS domain/network, not the simulation's localhost-only domain 79.
    Source ROS/driver overlays in every launch shell. No simulation process should

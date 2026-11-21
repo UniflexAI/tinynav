@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -16,6 +17,9 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from std_msgs.msg import Bool
+
+from tool.stair_odom_noise import OdomNoise, OdomNoiseConfig
+from tool.stair_sim_control import apply_drive_command
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--sim-root", type=Path, required=True)
@@ -27,8 +31,27 @@ parser.add_argument("--levels", type=int, choices=range(2, 52),
                     help="Number of full-floor platforms; default: task floors + 1")
 parser.add_argument("--flight-width", type=float, help="Clear stair flight width in meters")
 parser.add_argument("--landing-depth", type=float, default=1.75)
+parser.add_argument('--odom-noise', choices=('none', 'position', 'yaw', 'pitch', 'combined'), default='none')
+parser.add_argument('--noise-seed', type=int, default=7)
+parser.add_argument('--noise-scale', type=float, default=1.)
+parser.add_argument('--noise-position-std', type=float, default=.01, help='Per-world-axis position standard deviation, meters')
+parser.add_argument('--noise-yaw-std', type=float, default=.5, help='World-Z yaw standard deviation, degrees')
+parser.add_argument('--noise-pitch-std', type=float, default=.5, help='Optical-X pitch standard deviation, degrees')
+parser.add_argument('--noise-pitch-amplitude', type=float, default=1., help='Periodic optical-X pitch peak amplitude, degrees')
+parser.add_argument('--noise-pitch-hz', type=float, default=1.7)
+parser.add_argument('--noise-correlation', type=float, default=.2, help='OU correlation time, seconds')
+parser.add_argument('--max-sim-seconds', type=float, help='Optional stricter simulation time budget; does not extend the existing budget')
+parser.add_argument('--result-json', type=Path, help='Write outcome and odom/target/command traces even on assertion failure')
 args = parser.parse_args()
+if args.max_sim_seconds is not None and (not np.isfinite(args.max_sim_seconds) or args.max_sim_seconds <= 0):
+    parser.error('--max-sim-seconds must be finite and positive')
+max_sim_seconds = args.max_sim_seconds
 capture_path = args.capture
+result_path = args.result_json
+noise_config = OdomNoiseConfig(mode=args.odom_noise, seed=args.noise_seed, scale=args.noise_scale,
+    position_std_m=args.noise_position_std, yaw_std_deg=args.noise_yaw_std,
+    pitch_std_deg=args.noise_pitch_std, pitch_amplitude_deg=args.noise_pitch_amplitude,
+    pitch_hz=args.noise_pitch_hz, correlation_s=args.noise_correlation)
 floors = args.floors
 direction = args.direction
 rise_sign = 1 if direction == 'up' else -1
@@ -37,6 +60,12 @@ levels = args.levels or floors + 1
 if levels <= floors:
     parser.error("--levels must be greater than the relative --floors task")
 scene_flights = 2 * (levels - 1)
+max_ticks = max(1800, flights * 900)
+if max_sim_seconds is not None:
+    max_ticks = min(max_ticks, int(np.ceil(max_sim_seconds / .1)))
+noise = OdomNoise(noise_config, max_ticks * .1 + 5.)
+noise_json = json.dumps(noise.metadata(), sort_keys=True)
+print('ODOM_NOISE', noise_json, flush=True)
 lane_width, landing_depth = args.flight_width, args.landing_depth
 if direction == 'up' and lane_width is None:
     # The legacy two-flight course is descending-only; use the signed stack.
@@ -185,14 +214,28 @@ if capture_path:
     display.geomgroup[1] = 0
     display.geomgroup[3] = 1
 validated = False
+failure = None
+trace_time, true_poses, estimated_poses, noise_errors = [], [], [], []
+trace_target, trace_cmd, trace_status, trace_counts = [], [], [], []
+stop = hold = None
 try:
-    for tick in range(max(1800, flights * 900)):
+    for tick in range(max_ticks):
         mujoco.mj_camlight(model,data)
         camid = runtime.b.depth_camera_id
         T = np.eye(4)
         T[:3,:3] = data.cam_xmat[camid].reshape(3,3) @ np.diag((1.,-1.,-1.))
         T[:3,3] = data.cam_xpos[camid]
-        pose = np2msg(T, stair.get_clock().now().to_msg(), "world", "camera")
+        elapsed = float(data.time) - start_time
+        estimated = noise.apply(T, elapsed)
+        trace_time.append(elapsed)
+        true_poses.append(T.copy())
+        estimated_poses.append(estimated.copy())
+        noise_errors.append(noise.error(elapsed))
+        trace_target.append(np.full(2, np.nan) if planner.target_pose is None else planner.target_pose[:2].copy())
+        trace_cmd.append((drive.vx, drive.wz))
+        trace_status.append(status.last or '')
+        trace_counts.append(stair.gen.landings)
+        pose = np2msg(estimated, stair.get_clock().now().to_msg(), "world", "camera")
         pose.header.stamp.sec = int(data.time)
         pose.header.stamp.nanosec = int((data.time % 1)*1e9)
         depth = bridge.cv2_to_imgmsg(nav_camera.capture(data), encoding="32FC1")
@@ -217,11 +260,16 @@ try:
         command = outputs[-1] if outputs else None
         drive.vx = command.linear.x if command else 0.
         drive.wz = command.angular.z if command else 0.
+        trace_target[-1] = np.full(2, np.nan) if planner.target_pose is None else planner.target_pose[:2].copy()
+        trace_cmd[-1] = (drive.vx, drive.wz)
+        trace_status[-1] = status.last or ''
+        trace_counts[-1] = stair.gen.landings
         if tick%30 == 0:
             print("pose",round(data.time,2),runtime.base_pos().round(3),round(drive.vx,3),round(drive.wz,3),flush=True)
         if renderer:
             record_frame()
         for _ in range(5):
+            apply_drive_command(drive, outputs[-1] if outputs else None)
             runtime.tick()
             assert not runtime.is_fallen(), ("fallen",runtime.base_pos())
             for contact in data.contact[:data.ncon]:
@@ -256,11 +304,29 @@ try:
                                     stop=stop, hold=hold, landing_events=landing_events, floors=floors,
                                     levels=levels, flight_width=np.nan if lane_width is None else lane_width,
                                     landing_depth=landing_depth, shaft=shaft, arrived=True,
-                                    min_clearance=min_clearance, direction=direction)
+                                    min_clearance=min_clearance, direction=direction, odom_noise=noise_json)
             break
     else:
         raise RuntimeError(("did not arrive",runtime.base_pos(),stair.gen.landings))
+except (Exception, KeyboardInterrupt) as exc:
+    failure = f'{type(exc).__name__}: {exc}'
+    raise
 finally:
+    if result_path:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path = result_path.with_suffix('.trace.npz')
+        np.savez_compressed(trace_path, time=trace_time, true_pose=true_poses,
+                            estimated_pose=estimated_poses, error=noise_errors,
+                            target=trace_target, cmd=trace_cmd, status=trace_status,
+                            landings=trace_counts, noise=noise_json)
+        result_path.write_text(json.dumps(dict(passed=validated, failure=failure,
+            direction=direction, floors=floors, levels=levels, flight_width=lane_width,
+            time_budget_s=max_ticks * .1,
+            landing_depth=landing_depth, noise=noise.metadata(),
+            simulated_s=float(data.time) - start_time, landings=int(stair.gen.landings),
+            node_arrived=bool(stair.arrived), min_shaft_clearance_m=float(min_clearance),
+            stop=None if stop is None else stop.tolist(), hold=None if hold is None else hold.tolist(),
+            landing_events=landing_events, trace_file=trace_path.name), indent=2))
     if capture_path and frames and not validated:
         capture_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(capture_path, detail=frames, time=capture_times,
@@ -270,7 +336,7 @@ finally:
                             floors=floors, levels=levels, landing_depth=landing_depth,
                             flight_width=np.nan if lane_width is None else lane_width,
                             shaft=shaft, arrived=False, node_arrived=stair.arrived,
-                            min_clearance=min_clearance, direction=direction)
+                            min_clearance=min_clearance, direction=direction, odom_noise=noise_json)
     for n in (stair, planner,control):
         n.destroy_node()
     rclpy.shutdown()

@@ -435,7 +435,7 @@ class StairTargetGenerator:
         seeds = free & (r_robot < cfg.seed_radius) & (np.abs(np.nan_to_num(height, nan=1e9) - foot_z) < cfg.max_step)
         if not np.any(seeds):
             side = self.turn_side or np.sign(self.well_side)
-            if side != 0 and (self.flight_dir is not None or self.recovering) and not self.on_flight:
+            if not finish_landing and side != 0 and (self.flight_dir is not None or self.recovering) and not self.on_flight:
                 # level on a landing, facing a wall close up: nothing but the wall is in view and the floor we came
                 # over has left the memory. Stopping would keep it that way; turn in place the U-turn way to look
                 fwd = T_cam_to_world[:2, :3] @ np.array([0.0, 0.0, 1.0])
@@ -469,8 +469,8 @@ class StairTargetGenerator:
             if progress >= cfg.arrival_step_in and abs(self.pitch) < cfg.level_pitch and np.any(flat & (r_robot < cfg.seed_radius)):
                 out.update(status='finished', finished=True)
                 return out
-            lateral = travel[0] * rel_xy[..., 1] - travel[1] * rel_xy[..., 0]
-            cand = flat & (clearance >= cfg.uturn_step_clearance) & (np.abs(lateral) < cfg.search_clearance) & (rel_xy @ travel > 0.1) \
+            # Permit a lateral correction onto observed final-landing support.
+            cand = flat & (clearance >= cfg.uturn_step_clearance) & (rel_xy @ travel > 0.1) \
                 & (rel_xy @ heading > np.cos(np.radians(cfg.max_target_bearing)) * r_robot)
             if not np.any(cand):
                 out['status'] = 'no_seed'

@@ -1,6 +1,17 @@
 # Stair-floors deployment handoff for Ubuntu x64
 
+For this App/stairs-mode update, including the existing-device upgrade steps,
+see [App upgrade and use (Chinese)](stair_app_upgrade_zh.md). Updating Python
+sources and restarting backend/navigation processes is required in addition to
+rebuilding the ordinary Flutter frontend.
+
 Updated: 2026-11-21. Intended reader: the GPT/Codex agent running on the destination computer.
+
+For the 3090 **App-controlled MuJoCo development environment**, use
+[the original App guide](stair_tinynav_app_view.md): TinyNav App `:18083` -> Operate,
+observer/control `:18080`, API `:18081`, third-person scene `:18082`. Its explicit simulation profile avoids starting the
+robot backend lifecycle. The hardware deployment instructions below remain a
+separate workflow.
 
 ## 1. Read this first
 
@@ -27,7 +38,8 @@ Validated on Spark, using Go2 MuJoCo, measured single-front depth, simulated odo
 
 Latest x64 result (2026-11-21): full UP 9 and DOWN 9 pass in the ten-level,
 1.2 m flight-width scene, with both 1.75 m and 1.2 m platform depths. The focused
-stair/geometry suite passes 41 tests. These results supersede the earlier
+stair/geometry/noise/control suite now passes 57 tests; the final-support noise follow-up is
+documented in [the odom trial](stair_odom_noise_trial.md). These results supersede the earlier
 first-flight failure; see [the regression report](stair_ten_level_narrow_trial.md).
 Physical multi-floor operation remains unvalidated. The older stair-mode's
 physical DOWN experience is not validation of these changes. Random moving doors,
@@ -321,14 +333,14 @@ docker exec tinynav-stair-floors bash -lc '
   set -e
   source /opt/ros/humble/setup.bash
   cd /tinynav
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests/test_stair_mode.py tests/test_stair_sim_course.py
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests/test_stair_mode.py tests/test_stair_sim_course.py tests/test_stair_odom_noise.py tests/test_stair_sim_control.py
 '
 ```
 
 If pytest is not installed in the selected venv, install it there explicitly.
 The autoload flag avoids the known mixing of system pytest with a newer anyio
 plugin (`ModuleNotFoundError: _pytest.scope`). Do not alter runtime packages just
-to enable unrelated pytest plugins. Run both tests/test_stair_mode.py and tests/test_stair_sim_course.py; expect 41 tests in this revision.
+to enable unrelated pytest plugins. Run the four focused stair/geometry/noise/control suites; expect 57 tests in this revision.
 The older backend suite also has four pre-existing failures on the base commit;
 see `docs/stair_floor_trial.md` for their scope. Do not claim all tests pass.
 
@@ -816,5 +828,5 @@ Explain results to me in Chinese.
 The 1.2 m flight-width scene now passes full UP 9 and DOWN 9, at platform depths
 1.75 m and 1.2 m. [The trial report](stair_ten_level_narrow_trial.md) records the
 initial shaft failure, entry-alignment fix, final-platform fix and retained
-assertions. Run both focused suites (41 tests). [The simulation guide](stair_floors_development_simulation.md)
+assertions. Run all four focused stair/geometry/noise/control suites (57 tests). [The simulation guide](stair_floors_development_simulation.md)
 has exact commands, runtime pin and interactive BEV instructions.

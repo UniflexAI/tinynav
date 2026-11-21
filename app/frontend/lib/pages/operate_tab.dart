@@ -35,6 +35,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   double _linearX = 0, _linearY = 0, _angularZ = 0;
   DateTime _lastTeleopSend = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _teleopTimer;
+  Timer? _teleopHeartbeat;
 
   bool _showObstacle = true;
   bool _showEsdf = true;
@@ -50,6 +51,9 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _connectTeleop());
+    _teleopHeartbeat=Timer.periodic(_teleopSendInterval, (_) {
+      if (_linearX!=0 || _linearY!=0 || _angularZ!=0) _sendVelocity(force: true);
+    });
   }
 
   void _connectTeleop() {
@@ -57,7 +61,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     if (ip == null) return;
     try {
       _teleopChannel = WebSocketChannel.connect(
-        Uri.parse('ws://$ip:8000/ws/teleop'),
+        Uri.parse(deviceWsUrl(ip, '/ws/teleop')),
       );
     } catch (_) {}
   }
@@ -105,12 +109,16 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   @override
   void dispose() {
     _teleopTimer?.cancel();
+    _teleopHeartbeat?.cancel();
+    _linearX=_linearY=_angularZ=0.0;
+    _sendVelocity(force: true);
     _teleopChannel?.sink.close();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final simulated = ref.watch(simulationConnectionProvider).valueOrNull ?? false;
     final poisAsync = ref.watch(poisProvider);
     final planningAsync = ref.watch(planningStreamProvider);
     final planning = planningAsync.valueOrNull;
@@ -120,6 +128,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     final baseUrl = ref.watch(baseUrlProvider);
 
     ref.listen<AsyncValue<DeviceStatus>>(deviceStatusProvider, (prev, next) {
+      if (prev?.valueOrNull?.mapStatus != next.valueOrNull?.mapStatus) ref.invalidate(mapInfoProvider);
       final prevState = prev?.valueOrNull?.rawState;
       final nextState = next.valueOrNull?.rawState;
       if (prevState == 'navigation' && nextState != 'navigation') {
@@ -137,6 +146,8 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
     return Column(
       children: [
+        if (simulated)
+          Padding(padding: const EdgeInsets.all(4), child: Text('MuJoCo SIM · front camera + local perception · Stairs starts a fresh task', style: const TextStyle(fontSize: 11, color: Colors.cyanAccent))),
         // ── Camera (1/4) ──────────────────────────────────────────────
         const Expanded(flex: 2, child: _CameraPanel()),
         const Divider(height: 1, thickness: 1, color: Color(0xFFE0E0E0)),
@@ -171,8 +182,8 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      _LocalizationChip(localized: localized),
-                      if (localized) ...[
+                      _LocalizationChip(localized: localized, localOnly: simulated),
+                      if (localized && mapInfo != null) ...[
                         const SizedBox(width: 6),
                         _MapToggleButton(
                           showGlobalMap: _showGlobalMap,
@@ -252,8 +263,10 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    _DebugRecordButton(statusAsync: ref.watch(deviceStatusProvider)),
-                    const SizedBox(height: 8),
+                    if (!simulated) ...[
+                      _DebugRecordButton(statusAsync: ref.watch(deviceStatusProvider)),
+                      const SizedBox(height: 8),
+                    ],
                     _StairButton(statusAsync: ref.watch(deviceStatusProvider)),
                     const SizedBox(height: 8),
                     _NavNodesButton(statusAsync: ref.watch(deviceStatusProvider)),
@@ -1031,11 +1044,12 @@ class _MapToggleButton extends StatelessWidget {
 
 class _LocalizationChip extends StatelessWidget {
   final bool localized;
-  const _LocalizationChip({required this.localized});
+  final bool localOnly;
+  const _LocalizationChip({required this.localized, this.localOnly = false});
 
   @override
   Widget build(BuildContext context) {
-    final dotColor = localized ? const Color(0xFF69F0AE) : Colors.redAccent;
+    final dotColor = localOnly ? Colors.cyanAccent : localized ? const Color(0xFF69F0AE) : Colors.redAccent;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
@@ -1051,7 +1065,7 @@ class _LocalizationChip extends StatelessWidget {
           ),
           const SizedBox(width: 6),
           Text(
-            localized ? 'Localized' : 'Not Localized',
+            localOnly ? 'Local perception · SIM' : localized ? 'Localized' : 'Not Localized',
             style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
           ),
         ],
@@ -1085,7 +1099,7 @@ class _PoiButtonState extends ConsumerState<_PoiButton> {
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          content: Text(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
         ));
       }
@@ -1170,7 +1184,7 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          content: Text(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
         ));
       }
@@ -1190,7 +1204,7 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          content: Text(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
         ));
       }
@@ -1386,7 +1400,7 @@ class _NavNodesButtonState extends ConsumerState<_NavNodesButton> {
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          content: Text(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
         ));
       }
@@ -1446,7 +1460,7 @@ class _DebugRecordButtonState extends ConsumerState<_DebugRecordButton> {
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          content: Text(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
         ));
       }
@@ -1510,11 +1524,11 @@ class _StairButtonState extends ConsumerState<_StairButton> {
   Future<void> _post(String path, [Map<String, dynamic>? data]) async {
     setState(() => _loading = true);
     try {
-      await ref.read(dioProvider).post(path, data: data);
+      await ref.read(dioProvider).post(path, data: data, options: Options(receiveTimeout: const Duration(seconds: 90)));
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          content: Text(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
         ));
       }
@@ -1545,6 +1559,8 @@ class _StairButtonState extends ConsumerState<_StairButton> {
       if (mounted) setState(() => _loading = false);
     }
     if (!mounted) return;
+    final simulated = ref.read(simulationConnectionProvider).valueOrNull ?? false;
+    final floorOptions = simulated ? List.generate(9, (n) => n + 1) : List.generate(51, (n) => n);
     final direction = await showDialog<String>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -1555,19 +1571,18 @@ class _StairButtonState extends ConsumerState<_StairButton> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                    'Stops map navigation and follows the stairs. The robot starts moving right away.'),
+                Text(
+                    simulated ? 'MuJoCo simulation: resets to the task start, then follows measured stairs.' : 'Stops map navigation and follows the stairs. The robot starts moving right away.'),
                 const SizedBox(height: 16),
                 DropdownButtonFormField<int>(
                   value: _floors,
                   decoration:
                       const InputDecoration(labelText: 'Floors to travel'),
-                  items: List.generate(
-                      51,
+                  items: floorOptions.map(
                       (n) => DropdownMenuItem(
                             value: n,
                             child: Text(n == 0 ? 'No limit' : '$n'),
-                          )),
+                          )).toList(),
                   onChanged: (n) => setDialogState(() => _floors = n),
                 ),
                 const SizedBox(height: 8),
@@ -1579,10 +1594,10 @@ class _StairButtonState extends ConsumerState<_StairButton> {
                 const Text('Turn at landings'),
                 const SizedBox(height: 8),
                 SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment(value: 'left', label: Text('Left')),
-                    ButtonSegment(value: 'right', label: Text('Right')),
-                    ButtonSegment(value: 'auto', label: Text('Auto')),
+                  segments: [
+                    ButtonSegment(enabled: !simulated, value: 'left', label: const Text('Left')),
+                    ButtonSegment(enabled: !simulated, value: 'right', label: const Text('Right')),
+                    const ButtonSegment(value: 'auto', label: Text('Auto')),
                   ],
                   selected: {_turn},
                   onSelectionChanged: (v) =>
@@ -1693,7 +1708,7 @@ class _PauseButtonState extends ConsumerState<_PauseButton> {
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          content: Text(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
         ));
       }
@@ -1706,7 +1721,8 @@ class _PauseButtonState extends ConsumerState<_PauseButton> {
   Widget build(BuildContext context) {
     final status = widget.statusAsync.valueOrNull;
     final running = status?.navNodesRunning ?? false;
-    if (!running) return const SizedBox.shrink();
+    final simulated = ref.watch(simulationConnectionProvider).valueOrNull ?? false;
+    if (!running || (simulated && status?.stairMode == null)) return const SizedBox.shrink();
 
     final paused = status?.navPaused ?? false;
     return FilledButton.icon(
@@ -2044,7 +2060,7 @@ class _JoystickPanel extends ConsumerWidget {
     } on DioException catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          content: Text(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
         ));
       }
@@ -2062,7 +2078,7 @@ class _JoystickPanel extends ConsumerWidget {
           Expanded(
             child: Column(
               children: [
-                const Text('Move', style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600)),
+                Text('Move', style: const TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 4),
                 Expanded(child: _JoystickPad(onChange: onLeft)),
               ],
@@ -2073,7 +2089,7 @@ class _JoystickPanel extends ConsumerWidget {
           Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              _ActionButton(
+              if (!(ref.watch(simulationConnectionProvider).valueOrNull ?? false)) _ActionButton(
                 icon: Icons.airline_seat_recline_extra_rounded,
                 label: 'Sit',
                 onTap: () => _sendAction(ref, context, 'sit'),
@@ -2081,7 +2097,7 @@ class _JoystickPanel extends ConsumerWidget {
               const SizedBox(height: 8),
               _EStopButton(onStop: onStop),
               const SizedBox(height: 8),
-              _ActionButton(
+              if (!(ref.watch(simulationConnectionProvider).valueOrNull ?? false)) _ActionButton(
                 icon: Icons.directions_walk_rounded,
                 label: 'Stand',
                 onTap: () => _sendAction(ref, context, 'stand'),

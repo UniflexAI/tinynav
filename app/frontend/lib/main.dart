@@ -6,11 +6,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'core/providers.dart';
 import 'pages/home_page.dart';
 import 'pages/setup_page.dart';
+import 'pages/simulation_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
-  final savedIp = prefs.getString('device_ip');
+  const defaultDevice = String.fromEnvironment('TINYNAV_DEFAULT_DEVICE');
+  final savedIp = defaultDevice.isNotEmpty ? defaultDevice : prefs.getString('device_ip');
 
   runApp(
     ProviderScope(
@@ -40,6 +42,7 @@ class TinyNavApp extends ConsumerWidget {
         ),
         useMaterial3: true,
         fontFamily: 'RobotoLocal',
+        fontFamilyFallback: const ['NotoSansSC'],
         scaffoldBackgroundColor: const Color(0xFF0B1118),
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF0F1822),
@@ -71,7 +74,7 @@ class TinyNavApp extends ConsumerWidget {
         ),
       ),
       builder: (context, child) {
-        if (!kIsWeb || child == null) return child ?? const SizedBox.shrink();
+        if (const bool.fromEnvironment('TINYNAV_SIMULATION') || !kIsWeb || child == null) return child ?? const SizedBox.shrink();
 
         return LayoutBuilder(
           builder: (context, constraints) {
@@ -99,7 +102,8 @@ class TinyNavApp extends ConsumerWidget {
         );
       },
       // Switches automatically when deviceIpProvider changes.
-      home: ip == null ? const SetupPage() : const HomePage(),
+      home: ip == null ? const SetupPage() :
+          (const bool.fromEnvironment('TINYNAV_SIMULATION') ? const SimulationPage() : const HomePage()),
     );
   }
 }

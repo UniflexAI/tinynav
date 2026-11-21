@@ -340,6 +340,38 @@ def test_final_landing_does_not_request_backtracking_when_facing_away(node):
     assert 'no_seed' in node.status_pub.publish.call_args.args[0].data
 
 
+@pytest.mark.parametrize('height', [0., -.4])
+def test_final_landing_uses_offset_measured_support_but_not_a_drop(node, height):
+    node.gen.landings = node.landings_goal
+    node.gen.latest_stamp = 0.
+    node.gen.flight_dir = np.array([1., 0.])
+    node.gen.flight_end = np.array([-.2, 0.])
+    xx, yy = np.meshgrid(np.arange(.1, 1., .025), np.arange(.425, .9, .025))
+    node.gen.frames.append((0., np.column_stack((xx.ravel(), yy.ravel(), np.full(xx.size, height)))))
+    node.timer_callback()
+    assert not node.arrived
+    if height == 0.:
+        target = node.target_pub.publish.call_args.args[0].pose.pose.position
+        assert target.y > node.gen.cfg.search_clearance
+        assert target.x > .1
+        assert 'finishing' in node.status_pub.publish.call_args.args[0].data
+    else:
+        node.target_pub.publish.assert_not_called()
+        assert 'no_seed' in node.status_pub.publish.call_args.args[0].data
+
+
+def test_final_count_without_seeds_does_not_start_another_turn(node):
+    node.gen.landings = node.landings_goal
+    node.gen.latest_stamp = 0.
+    node.gen.flight_dir = np.array([1., 0.])
+    node.gen.flight_end = np.array([-.2, 0.])
+    node.gen.well_side = 6.
+    node.timer_callback()
+    assert not node.arrived
+    node.target_pub.publish.assert_not_called()
+    assert 'no_seed' in node.status_pub.publish.call_args.args[0].data
+
+
 @pytest.mark.parametrize('enabled', ['0', 'false', 'no'])
 def test_deployment_can_disable_unitree_backend(monkeypatch, enabled):
     from app.backend.node_manager import BackendNode
