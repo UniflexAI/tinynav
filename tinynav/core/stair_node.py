@@ -167,12 +167,16 @@ class StairNode(Node):
             self.publish_status('depth_invalid')
             self.stop_robot('depth stream stalled')
             return
-        if self.landings_goal and self.gen.landings >= self.landings_goal:
+        finishing = bool(self.landings_goal and self.gen.landings >= self.landings_goal)
+        if finishing:
+            res = self.gen.compute(self.latest_T, self.direction, finish_landing=True)
+        else:
+            res = self.gen.compute(self.latest_T, self.direction, prior_dir=self.remembered_direction())
+        if finishing and res.get('finished', False):
             self.arrived = True
             self.publish_status('arrived')
             self.stop_robot(f'arrived: {self.gen.landings} landings')
             return
-        res = self.gen.compute(self.latest_T, self.direction, prior_dir=self.remembered_direction())
         self.guided = bool(res.get('guided', False))
         self.publish_status(res['status'])
         if res['status'] in STOP_STATUSES or res['target'] is None:

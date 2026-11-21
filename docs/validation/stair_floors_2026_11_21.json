@@ -1,0 +1,75 @@
+{
+  "date": "2026-11-21",
+  "source_base": "063ead52792acc3c29bcad0241cd459664edbbb2",
+  "runtime_commit": "7d63a42cdf71b4f672cfac3cda1ad6b26c3cfe3a",
+  "focused_tests": {
+    "passed": 41,
+    "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests/test_stair_mode.py tests/test_stair_sim_course.py"
+  },
+  "compact_1p2m": {
+    "down": {
+      "arrived": true,
+      "landings": 18,
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "landing_depth": 1.2,
+      "arrival_time_s": 382.49999999972357,
+      "min_shaft_clearance_m": 0.12938859080262816,
+      "hold_horizontal_drift_m": 0.006083047685529197,
+      "stop": [
+        -0.7274842110362021,
+        0.9856863389951872,
+        -25.60299392869936
+      ],
+      "hold": [
+        -0.7279024462392812,
+        0.9796176860590466,
+        -25.632893547163924
+      ],
+      "zero_commands_after_arrival": true
+    },
+    "up": {
+      "arrived": true,
+      "landings": 18,
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "landing_depth": 1.2,
+      "arrival_time_s": 366.4999999997381,
+      "min_shaft_clearance_m": 0.21572850158676793,
+      "hold_horizontal_drift_m": 0.013687146826338398,
+      "stop": [
+        -0.6088614959749876,
+        1.1324912321294567,
+        26.229179782468496
+      ],
+      "hold": [
+        -0.6224968492185912,
+        1.1313016396917304,
+        26.206222745918783
+      ],
+      "zero_commands_after_arrival": true
+    }
+  },
+  "original_1p75m": {
+    "down": {
+      "passed": true,
+      "flights": 18,
+      "min_shaft_clearance_m": 0.14864255
+    },
+    "up": {
+      "passed": true,
+      "flights": 18,
+      "min_shaft_clearance_m": 0.20583582
+    }
+  },
+  "source_sha256": {
+    "tinynav/core/stair_target.py": "a4bfc7cf144270434e0551ca83d99e3bcbc482f9907db0944f38505d463ed044",
+    "tinynav/core/stair_node.py": "393aa7e36dca5c42909eecee60cf2a6bb2b58fad52a926591a7fa7d5252a6339",
+    "tool/stair_mode_sim.py": "478b2ba96359dcca8aba49e51d65c070bd6112774795a7dfd1af075f447b99eb",
+    "tests/test_stair_mode.py": "bb79cca1f49d1106ff0f67a91c919fc65d968b6d1b6649957c37c384f1d0b03a",
+    "tests/test_stair_sim_course.py": "775421ef75258a0520429593a4f73f04e96d73267f03c455f42d34bd72148729"
+  },
+  "scope": "Fixed-scene single-process callbacks, simulated front depth/odometry, ONNX gait and MuJoCo; no physical gait, real VIO or distributed DDS validation."
+}

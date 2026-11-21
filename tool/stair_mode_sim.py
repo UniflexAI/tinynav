@@ -1,4 +1,4 @@
-"""Exercise finite DOWN floors through stair_node, planning_node, and cmd_vel_control.
+"""Exercise finite UP/DOWN floors through stair_node, planning_node, and cmd_vel_control.
 
 Requires the Go2 MuJoCo runtime and the stair simulation course builder.
 All ROS publishers stay on localhost in the test container.
@@ -21,6 +21,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--sim-root", type=Path, required=True)
 parser.add_argument("--course-script", type=Path, default=Path(__file__).with_name("stair_sim_course.py"))
 parser.add_argument("--capture", type=Path)
+parser.add_argument("--direction", choices=('up', 'down'), default='down')
 parser.add_argument("--floors", type=int, choices=range(1, 51), default=1)
 parser.add_argument("--levels", type=int, choices=range(2, 52),
                     help="Number of full-floor platforms; default: task floors + 1")
@@ -29,12 +30,17 @@ parser.add_argument("--landing-depth", type=float, default=1.75)
 args = parser.parse_args()
 capture_path = args.capture
 floors = args.floors
+direction = args.direction
+rise_sign = 1 if direction == 'up' else -1
 flights = floors * 2
 levels = args.levels or floors + 1
 if levels <= floors:
     parser.error("--levels must be greater than the relative --floors task")
 scene_flights = 2 * (levels - 1)
 lane_width, landing_depth = args.flight_width, args.landing_depth
+if direction == 'up' and lane_width is None:
+    # The legacy two-flight course is descending-only; use the signed stack.
+    lane_width = 1.8
 sys.path.insert(0, str(args.sim_root / "mujoco"))
 from sim import plant
 from sim.keyboard import ConstantCmd
@@ -51,10 +57,10 @@ course = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(course)
 robot = get_robot("go2")
 model, binding, surfaces, walls = course.build_world(
-    plant, robot, scene_flights, mapping_rig=False,
+    plant, robot, scene_flights, direction=rise_sign, mapping_rig=False,
     lane_width=lane_width, landing_depth=landing_depth)
 shaft = course.shaft_bounds(scene_flights, lane_width, landing_depth)
-print(f"SCENE levels={levels} flights={scene_flights} flight_width={lane_width} landing_depth={landing_depth} task_floors={floors}", flush=True)
+print(f"SCENE direction={direction} levels={levels} flights={scene_flights} flight_width={lane_width} landing_depth={landing_depth} task_floors={floors}", flush=True)
 data = mujoco.MjData(model)
 plant.reset_to_spawn(model, data, binding, pos=course.SPAWN, yaw_deg=7.)
 drive = ConstantCmd(0., 0.)
@@ -65,7 +71,7 @@ calibration = course.FrontCameraBEV(runtime, profile="ros-left")
 nav_camera = DepthCamera(model, runtime.b.depth_camera_id, 640, 544)
 K = np.array([[303.10,0.,269.37],[0.,303.10,314.67],[0.,0.,1.]])
 rclpy.init()
-args = SimpleNamespace(camera_height=.4669, direction="down", floors=floors,
+args = SimpleNamespace(camera_height=.4669, direction=direction, floors=floors,
                        landings_per_floor=2, turn="auto", memory=None, rate=2.)
 stair = stair_node.StairNode(args)
 planner = planning_node.PlanningNode()
@@ -178,6 +184,7 @@ if capture_path:
     display = mujoco.MjvOption()
     display.geomgroup[1] = 0
     display.geomgroup[3] = 1
+validated = False
 try:
     for tick in range(max(1800, flights * 900)):
         mujoco.mj_camlight(model,data)
@@ -196,7 +203,7 @@ try:
         if stair.gen.landings != last_landing:
             last_landing = stair.gen.landings
             base = runtime.base_pos().copy()
-            assert abs(base[2] + 1.44 * last_landing - robot.spawn_drop) < .18, ("count height", last_landing, base)
+            assert abs(base[2] - rise_sign * 1.44 * last_landing - robot.spawn_drop) < .18, ("count height", last_landing, base)
             landing_events.append((float(data.time) - start_time, last_landing, *base))
             print("COUNT", landing_events[-1], flush=True)
         control.pose_callback(pose)
@@ -226,7 +233,7 @@ try:
         if stair.arrived:
             assert stair.gen.landings==flights and drive.vx==drive.wz==0
             stop = runtime.base_pos().copy()
-            assert stop[0] < -.5 and abs(stop[2] + 1.44 * flights - robot.spawn_drop) < .12, stop
+            assert stop[0] < -.5 and abs(stop[2] - rise_sign * 1.44 * flights - robot.spawn_drop) < .12, stop
             for i in range(75):
                 stair.timer_callback()
                 control.cmd_timer_callback()
@@ -238,7 +245,8 @@ try:
                     record_frame()
             hold = runtime.base_pos().copy()
             assert np.linalg.norm(hold[:2] - stop[:2]) < .12
-            print(f"PASS DOWN {floors} floors", stop, "hold", hold, "shaft clearance", min_clearance, flush=True)
+            validated = True
+            print(f"PASS {direction.upper()} {floors} floors", stop, "hold", hold, "shaft clearance", min_clearance, flush=True)
             if capture_path:
                 capture_path.parent.mkdir(parents=True, exist_ok=True)
                 np.savez_compressed(capture_path, detail=frames, time=capture_times,
@@ -248,12 +256,12 @@ try:
                                     stop=stop, hold=hold, landing_events=landing_events, floors=floors,
                                     levels=levels, flight_width=np.nan if lane_width is None else lane_width,
                                     landing_depth=landing_depth, shaft=shaft, arrived=True,
-                                    min_clearance=min_clearance)
+                                    min_clearance=min_clearance, direction=direction)
             break
     else:
         raise RuntimeError(("did not arrive",runtime.base_pos(),stair.gen.landings))
 finally:
-    if capture_path and frames and not stair.arrived:
+    if capture_path and frames and not validated:
         capture_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(capture_path, detail=frames, time=capture_times,
                             qpos=capture_poses, bev=capture_maps, target=capture_targets,
@@ -261,7 +269,8 @@ finally:
                             landings=capture_landings, clearance=capture_clearance,
                             floors=floors, levels=levels, landing_depth=landing_depth,
                             flight_width=np.nan if lane_width is None else lane_width,
-                            shaft=shaft, arrived=False, min_clearance=min_clearance)
+                            shaft=shaft, arrived=False, node_arrived=stair.arrived,
+                            min_clearance=min_clearance, direction=direction)
     for n in (stair, planner,control):
         n.destroy_node()
     rclpy.shutdown()

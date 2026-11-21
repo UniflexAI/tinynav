@@ -97,3 +97,12 @@ obstacles, selected target/path, published drive commands and landing events.
 For deployment on a separate Ubuntu x64 computer and optional isolated simulation,
 see [the complete handoff](stair_floors_ubuntu_x64_deployment.md).
 The course is bundled and no longer needs the rl-stairs worktree.
+
+## Current x64 follow-up (2026-11-21)
+
+Full UP 9 and DOWN 9 now pass with 1.2 m flight width and both 1.75 m and
+1.2 m platform depths. The focused stair/geometry suite passes 41 tests.
+See [the narrow regression report](stair_ten_level_narrow_trial.md),
+[development/simulation guide](stair_floors_development_simulation.md), and
+[physical trial and recording guide](stair_floors_physical_trial.md).
+These results do not qualify real VIO, DDS transport or physical stair gait.

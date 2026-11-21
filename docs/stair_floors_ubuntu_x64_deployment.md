@@ -1,6 +1,6 @@
 # Stair-floors deployment handoff for Ubuntu x64
 
-Updated: 2026-11-19. Intended reader: the GPT/Codex agent running on the destination computer.
+Updated: 2026-11-21. Intended reader: the GPT/Codex agent running on the destination computer.
 
 ## 1. Read this first
 
@@ -25,12 +25,17 @@ Validated on Spark, using Go2 MuJoCo, measured single-front depth, simulated odo
 - No fall, wall/railing contact, or shaft footprint overlap in these runs.
 - 25 focused tests pass after adding deployment configuration tests.
 
-This branch's latest changes have NOT been validated on the destination x64 machine
-or on a physical robot. The older stair-mode has physical DOWN experience; that is
-not a validation of these new multi-floor changes. UP and five-floor traversal in
-this branch remain pending. Results from the independent rl-stairs experiments
-must not be attributed to this branch. Random moving doors are not covered by the
-current finite-floor integration test.
+Latest x64 result (2026-11-21): full UP 9 and DOWN 9 pass in the ten-level,
+1.2 m flight-width scene, with both 1.75 m and 1.2 m platform depths. The focused
+stair/geometry suite passes 41 tests. These results supersede the earlier
+first-flight failure; see [the regression report](stair_ten_level_narrow_trial.md).
+Physical multi-floor operation remains unvalidated. The older stair-mode's
+physical DOWN experience is not validation of these changes. Random moving doors,
+real VIO, distributed DDS, and physical gait are outside this simulation result.
+
+For the existing 3090 development server and interactive BEV simulation, see
+[the development guide](stair_floors_development_simulation.md). For a physical
+trial and the recording package to return, see [the field guide](stair_floors_physical_trial.md).
 
 ## 2. Architecture and boundaries
 
@@ -316,14 +321,14 @@ docker exec tinynav-stair-floors bash -lc '
   set -e
   source /opt/ros/humble/setup.bash
   cd /tinynav
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests/test_stair_mode.py
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests/test_stair_mode.py tests/test_stair_sim_course.py
 '
 ```
 
 If pytest is not installed in the selected venv, install it there explicitly.
 The autoload flag avoids the known mixing of system pytest with a newer anyio
 plugin (`ModuleNotFoundError: _pytest.scope`). Do not alter runtime packages just
-to enable unrelated pytest plugins. Expect 25 tests in this handoff revision.
+to enable unrelated pytest plugins. Run both tests/test_stair_mode.py and tests/test_stair_sim_course.py; expect 41 tests in this revision.
 The older backend suite also has four pre-existing failures on the base commit;
 see `docs/stair_floor_trial.md` for their scope. Do not claim all tests pass.
 
@@ -618,7 +623,7 @@ bridges. Do not globally change all DDS configuration to solve one missing topic
 
 ## 11. Optional isolated MuJoCo regression on x64
 
-Physical App deployment does not need MuJoCo. To reproduce the DOWN tests, only
+Physical App deployment does not need MuJoCo. To reproduce the UP/DOWN tests, only
 the clean tinynav-sim runtime checkout is external; the course and calibration
 are now bundled in this branch. No rl-nav or rl-stairs checkout is required.
 
@@ -797,7 +802,7 @@ missing vendor driver commands, transfer ARM binaries, remove safety checks, or
 claim simulation proves field readiness. If an external prerequisite is missing,
 identify its exact name and continue all independent checks. The bundled MuJoCo
 course does not need the rl-nav/rl-stairs branch; optional runtime instructions are
-in section 11. UP/five floors are not validated in this branch.
+in section 11. Full UP 9 and DOWN 9 are validated only in isolated simulation; physical trials remain pending.
 
 Write a local deployment report with commit SHA, image digest, paths, runtime env,
 startup/restart/stop commands, camera/NIC settings, checks and their real outputs,
@@ -806,12 +811,10 @@ Explain results to me in Chinese.
 ```
 
 
-## 15. Later narrow ten-level scene
+## 15. Current narrow ten-level result
 
-The 2026-11-21 scene update adds `--levels`, `--flight-width` and
-`--landing-depth`. See [the ten-level narrow trial](stair_ten_level_narrow_trial.md)
-for the distinction between ten platform levels and relative DOWN 9. This
-1.2 m case currently fails the first-flight shaft footprint assertion and is not
-a successful traversal result. The original validated DOWN 1/2 results above
-remain the baseline. With the additional geometry suite, run both
-`tests/test_stair_mode.py` and `tests/test_stair_sim_course.py` (31 tests).
+The 1.2 m flight-width scene now passes full UP 9 and DOWN 9, at platform depths
+1.75 m and 1.2 m. [The trial report](stair_ten_level_narrow_trial.md) records the
+initial shaft failure, entry-alignment fix, final-platform fix and retained
+assertions. Run both focused suites (41 tests). [The simulation guide](stair_floors_development_simulation.md)
+has exact commands, runtime pin and interactive BEV instructions.

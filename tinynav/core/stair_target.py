@@ -73,6 +73,7 @@ class StairConfig:
     level_pitch: float = 8.0        # back below this for level_min_s after >= flight_min_s on a flight: on the landing
     flight_min_s: float = 1.0
     level_min_s: float = 0.5
+    arrival_step_in: float = 0.4  # final landing: advance beyond the last pitched pose before latching arrival
     landing_search: bool = True     # at the landing: look for the next flight (False: stop there, status 'landing')
     recover_max_turn_deg: float = 360.0  # after an odometry jump, on a landing: look round the U-turn way for the
                                          # next level for at most this long (see recovering)
@@ -385,12 +386,14 @@ class StairTargetGenerator:
                 self.search_recovery_until = self.latest_stamp + cfg.search_recovery_s
         self.search_progress = (self.latest_stamp, cam[:2].copy(), yaw)
 
-    def compute(self, T_cam_to_world, direction: str, prior_dir=None):
+    def compute(self, T_cam_to_world, direction: str, prior_dir=None, finish_landing=False):
         """direction: 'up' or 'down'. Returns dict with status in {'ok', 'no_seed', 'search', 'odom_invalid', 'landing'}.
         'search' still carries a target (frontier or in-place turn); 'no_seed', 'odom_invalid' and 'landing'
         (walked a flight and level again, with landing_search off) mean stop.
         prior_dir: optional world-frame horizontal direction remembered for this place (stair_memory.py); it
-        only picks among reachable, wall-clear cells and is ignored when none lies near it."""
+        only picks among reachable, wall-clear cells and is ignored when none lies near it.
+        finish_landing: after the final count, step onto observed flat support without starting another U-turn;
+        returns 'finishing' while advancing and finished=True once clear of the last pitched pose."""
         cfg = self.cfg
         assert direction in ('up', 'down')
         cam = T_cam_to_world[:3, 3]
@@ -456,6 +459,26 @@ class StairTargetGenerator:
         fwd = T_cam_to_world[:2, :3] @ np.array([0.0, 0.0, 1.0])
         fwd = fwd / (np.linalg.norm(fwd) + 1e-9)
         heading = fwd
+        if finish_landing:
+            if self.flight_dir is None or self.flight_end is None:
+                out['status'] = 'no_seed'
+                return out
+            travel = self.flight_dir
+            progress = (cam[:2] - self.flight_end) @ travel
+            flat = reachable & observed & (np.abs(height - foot_z) < cfg.min_level_gain_exit)
+            if progress >= cfg.arrival_step_in and abs(self.pitch) < cfg.level_pitch and np.any(flat & (r_robot < cfg.seed_radius)):
+                out.update(status='finished', finished=True)
+                return out
+            lateral = travel[0] * rel_xy[..., 1] - travel[1] * rel_xy[..., 0]
+            cand = flat & (clearance >= cfg.uturn_step_clearance) & (np.abs(lateral) < cfg.search_clearance) & (rel_xy @ travel > 0.1) \
+                & (rel_xy @ heading > np.cos(np.radians(cfg.max_target_bearing)) * r_robot)
+            if not np.any(cand):
+                out['status'] = 'no_seed'
+                return out
+            aim = cam[:2] + travel * max(cfg.search_reached, cfg.arrival_step_in - progress + cfg.robot_radius)
+            cell = np.unravel_index(np.argmin(np.where(cand, np.linalg.norm(cell_xy - aim, axis=-1), np.inf)), height.shape)
+            out.update(status='finishing', target=np.array([*cell_xy[cell], height[cell]]))
+            return out
         self._check_search_progress(cam, heading)
         search_recovery = self.latest_stamp < self.search_recovery_until
         out['search_recovery'] = search_recovery
@@ -686,10 +709,13 @@ class StairTargetGenerator:
             if np.any(near):
                 c = np.unravel_index(np.argmax(np.where(near, np.minimum(clearance, cfg.target_open_cap), -np.inf)), near.shape)
                 target = np.array([*cell_xy[c], height[c]])
-        if self.on_flight and travel is not None:
-            # Fit the visible treads, excluding walls and the other flight.
-            along = rel_xy @ travel
-            lateral = travel[0] * rel_xy[..., 1] - travel[1] * rel_xy[..., 0]
+        align_dir = travel if travel is not None else heading
+        if out['status'] == 'ok' or self.on_flight:
+            # Align before pitching onto the flight too: an open-space target can
+            # otherwise steer toward the railing before flight_dir is available.
+            # Fit measured treads, excluding walls and the other flight.
+            along = rel_xy @ align_dir
+            lateral = align_dir[0] * rel_xy[..., 1] - align_dir[1] * rel_xy[..., 0]
             tread = observed & reachable & ~obstacle & (along > 0.1) & (along < 1.6) & (np.abs(lateral) < 0.45)
             if np.sum(tread) >= 20:
                 xy, z = rel_xy[tread], height[tread]
@@ -702,7 +728,7 @@ class StairTargetGenerator:
                     coef = np.linalg.lstsq(design[keep], z[keep], rcond=None)[0]
                 slope = np.linalg.norm(coef[:2])
                 axis = sign * coef[:2] / max(slope, 1e-9)
-                if 0.2 < slope < cfg.max_slope and axis @ travel > 0.85:
+                if 0.2 < slope < cfg.max_slope and axis @ align_dir > 0.85:
                     aim = cam[:2] + axis * min(cfg.lookahead, max(0.5, (target[:2] - cam[:2]) @ axis))
                     candidate = reachable & observed & (np.linalg.norm(cell_xy - aim, axis=-1) < 0.2)
                     if np.any(candidate):

@@ -47,6 +47,7 @@ def test_one_floor_stops_after_two_landings_and_latches(node):
     assert 'floors=0/1' in node.status_pub.publish.call_args.args[0].data
 
     node.gen.landings = 2
+    node.gen.compute.return_value = {'status': 'finished', 'finished': True}
     node.timer_callback()
     assert node.arrived
     assert node.target_pub.publish.call_count == 1
@@ -55,7 +56,7 @@ def test_one_floor_stops_after_two_landings_and_latches(node):
     node.gen.landings = 3
     node.timer_callback()
     assert node.target_pub.publish.call_count == 1
-    assert node.gen.compute.call_count == 1
+    assert node.gen.compute.call_count == 2
 
 
 def test_depth_timeout_stops_even_while_odometry_is_fresh(node):
@@ -249,6 +250,32 @@ def test_stationary_search_replans_on_the_observed_landing():
         assert gen.landings == 0
 
 
+@pytest.mark.parametrize('direction,sign', [('down', -1), ('up', 1)])
+@pytest.mark.parametrize('heading', [-11., 11.])
+def test_measured_treads_align_target_before_entering_flight(direction, sign, heading):
+    cfg = StairConfig(camera_height=.4669, auto_camera_height=False)
+    gen = StairTargetGenerator(cfg)
+    xx, yy = np.meshgrid(np.arange(-1., 2.4, .025), np.arange(-.6, .61, .025))
+    zz = np.where(xx < 0., 0., sign * .16 * (np.floor(xx / .3) + 1))
+    points = np.column_stack((xx.ravel(), yy.ravel(), zz.ravel()))
+    T = camera_pose(cfg.camera_height)
+    T[:3, :3] = Rotation.from_euler('z', heading, degrees=True).as_matrix() @ T[:3, :3]
+    T[0, 3] = -.4
+    gen.latest_stamp = 0.
+    gen.frames.append((0., points))
+
+    result = gen.compute(T, direction)
+
+    assert not gen.on_flight and gen.flight_dir is None
+    assert result['status'] == 'ok'
+    assert result.get('tread_aligned')
+    assert result['target'][0] > .3
+    assert abs(result['target'][1]) < .1
+    cell = np.floor((result['target'][:2] - result['origin']) / cfg.resolution).astype(int)
+    assert result['reachable'][tuple(cell)]
+    assert np.isfinite(result['height'][tuple(cell)])
+
+
 def test_two_floors_continues_through_first_floor_and_stops_at_four(node):
     node.floors, node.landings_goal = 2, 4
     node.gen.compute = Mock(return_value={'target': np.array([1., 0., -1.44]), 'path': None, 'status': 'search'})
@@ -259,12 +286,58 @@ def test_two_floors_continues_through_first_floor_and_stops_at_four(node):
         assert f'floors={landing // 2}/2' in node.status_pub.publish.call_args.args[0].data
     assert node.target_pub.publish.call_count == 4
     node.gen.landings = 4
+    node.gen.compute.return_value = {'status': 'finished', 'finished': True}
     node.timer_callback()
     assert node.arrived
     assert 'landings=4/4 floors=2/2' in node.status_pub.publish.call_args.args[0].data
     for _ in range(5):
         node.timer_callback()
     assert node.target_pub.publish.call_count == 4
+
+
+def test_final_count_still_steps_onto_observed_flat_landing(node):
+    node.gen.landings = node.landings_goal
+    node.gen.latest_stamp = 0.
+    node.gen.flight_dir = np.array([1., 0.])
+    node.gen.flight_end = np.array([-.2, 0.])
+    xx, yy = np.meshgrid(np.arange(-.3, 1., .025), np.arange(-.6, .61, .025))
+    node.gen.frames.append((0., np.column_stack((xx.ravel(), yy.ravel(), np.zeros(xx.size)))))
+
+    node.timer_callback()
+
+    assert not node.arrived
+    target = node.target_pub.publish.call_args.args[0].pose.pose.position
+    assert target.x > .1 and abs(target.y) < .1
+    assert 'finishing' in node.status_pub.publish.call_args.args[0].data
+    node.latest_T[0, 3] = .3
+    node.timer_callback()
+    assert node.arrived
+    assert 'arrived' in node.status_pub.publish.call_args.args[0].data
+
+
+def test_final_count_without_measured_support_stops_without_claiming_arrival(node):
+    node.gen.landings = node.landings_goal
+    node.gen.latest_stamp = 0.
+    node.gen.flight_dir = np.array([1., 0.])
+    node.gen.flight_end = np.array([-.2, 0.])
+    node.timer_callback()
+    assert not node.arrived
+    node.target_pub.publish.assert_not_called()
+    assert 'no_seed' in node.status_pub.publish.call_args.args[0].data
+
+
+def test_final_landing_does_not_request_backtracking_when_facing_away(node):
+    node.gen.landings = node.landings_goal
+    node.gen.latest_stamp = 0.
+    node.gen.flight_dir = np.array([1., 0.])
+    node.gen.flight_end = np.array([-.2, 0.])
+    node.latest_T[:3, :3] = Rotation.from_euler('z', 180., degrees=True).as_matrix() @ node.latest_T[:3, :3]
+    xx, yy = np.meshgrid(np.arange(-.3, 1., .025), np.arange(-.6, .61, .025))
+    node.gen.frames.append((0., np.column_stack((xx.ravel(), yy.ravel(), np.zeros(xx.size)))))
+    node.timer_callback()
+    assert not node.arrived
+    node.target_pub.publish.assert_not_called()
+    assert 'no_seed' in node.status_pub.publish.call_args.args[0].data
 
 
 @pytest.mark.parametrize('enabled', ['0', 'false', 'no'])
