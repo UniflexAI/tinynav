@@ -225,8 +225,9 @@ B2_CONFIG = RobotConfig(
     # The operator's call, 2026-10-13, as go2's: a 15-degree turn row reaches the chassis
     # as 0.1-0.26 rad/s, and b2 yawed 0.06 rad/s on those (122, round r11, 90s stuck).
     min_angular_vel=0.2,
-    # As go2's, unmeasured on b2: the operator's call, 2026-10-16.
-    max_angular_vel=1.0,
+    # The operator's call, 2026-11-23: at 1.0 a planned turn in place flew VIO off by
+    # metres while the pose stream stayed under the VIO guard's speed limit.
+    max_angular_vel=0.5,
     # min_linear_vel stays the 0.1 default. 0.2 was run on 122 on 2026-09-04 and the
     # robot could barely move: cmd_vel_control DROPS a target below this rather than
     # raising it, so [0.1, 0.2) went from creeping to standing still -- every /cmd_vel
