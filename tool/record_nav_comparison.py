@@ -180,7 +180,14 @@ def main():
     parser.add_argument("--image-topic", help="Front camera Image or CompressedImage topic")
     parser.add_argument("--no-video", action="store_true", help="Skip the front camera")
     parser.add_argument("--depth", action="store_true", help="Also record raw /slam/depth for perception replay")
+    parser.add_argument("--semantic-inputs", action="store_true",
+                        help="Record raw Looper Infra1 with synchronized depth and calibration")
     args = parser.parse_args()
+    if args.semantic_inputs:
+        if args.no_video or args.image_topic:
+            parser.error("--semantic-inputs selects raw Infra1 automatically")
+        args.image_topic = "/camera/camera/infra1/image_rect_raw"
+        args.depth = True
     nodes = running_nodes()
     config, repo = capture_config(nodes)
     mode = "ppo" if config["effective"]["mode"] == "rl" and config["effective"]["route_guidance"] else config["effective"]["mode"]
@@ -197,6 +204,16 @@ def main():
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+    calibration_topics = ("/slam/camera_info", "/camera/camera/infra1/camera_info",
+                          "/camera/camera/infra2/camera_info")
+    if args.semantic_inputs:
+        required = (args.image_topic, "/slam/depth", "/slam/odometry_visual")
+        missing = [topic for topic in required if topic not in available]
+        if missing:
+            raise SystemExit("Waiting for Looper inputs. Missing: " + ", ".join(missing))
+        if not any(topic in available for topic in calibration_topics):
+            raise SystemExit("Waiting for Looper camera calibration.")
 
     label = re.sub(r"[^A-Za-z0-9_.-]+", "-", args.label).strip("-.") or "run"
     root = args.output_root.expanduser().resolve()
@@ -221,6 +238,9 @@ def main():
         topics.append(camera)
     if args.depth:
         topics.append("/slam/depth")
+    if args.semantic_inputs:
+        topics.extend(topic for topic in (*calibration_topics, "/map/map_to_odom")
+                      if topic not in topics)
     config.update(started_at=datetime.now(timezone.utc).isoformat(), label=args.label,
                   front_camera=camera, topics=topics, publishers_at_start=publishers,
                   topic_types_at_start=available)
