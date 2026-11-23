@@ -94,7 +94,7 @@ def test_actuator_gate_rejects_nonzero_commands_and_supervisor_loss(monkeypatch)
     assert fake.sport_client.StopMove.call_count>=3
 
 
-def test_real_ros_confirmation_service_and_http_reject_stale_fault(monkeypatch):
+def test_ros_legacy_confirmation_cannot_bypass_automatic_recovery(monkeypatch):
     rclpy.init()
     guard=VioSafetyNode();api_node=Node('vio_api_test')
     clock=[10.];monkeypatch.setattr(vio_safety_node,'time',SimpleNamespace(monotonic=lambda:clock[0]))
@@ -111,10 +111,15 @@ def test_real_ros_confirmation_service_and_http_reject_stale_fault(monkeypatch):
         assert client.wait_for_service(timeout_sec=2.)
         with TestClient(app) as http:
             assert http.post('/nav/vio/confirm',json={'fault_id':g.fault_id}).status_code==409
+            future=client.call_async(SetParametersAtomically.Request(parameters=[Parameter('confirm_fault_id',value=g.fault_id).to_parameter_msg()]))
+            deadline=time.monotonic()+2.
+            while not future.done() and time.monotonic()<deadline:time.sleep(.01)
+            assert future.done() and not future.result().result.successful
             for t in np.arange(10.11,12.62,.1):
-                clock[0]=float(t);g.status('TRACKING',float(t));g.pose(1000.+float(t)-10.,(2,0,0),float(t));g.depth(1000.+float(t)-10.,float(t))
+                clock[0]=float(t);g.status('TRACKING',float(t));g.pose(1000.+float(t)-10.,(2,0,0),float(t));g.depth(1000.+float(t)-10.,float(t));g.snapshot(float(t))
             assert http.post('/nav/vio/confirm',json={'fault_id':g.fault_id+1}).status_code==409
-            assert http.post('/nav/vio/confirm',json={'fault_id':g.fault_id}).status_code==200
+            assert http.get('/nav/vio').json()['blocked'] is False
+            assert http.post('/nav/vio/confirm',json={'fault_id':g.fault_id}).status_code==409
             assert not g.locked
             assert http.post('/nav/vio/confirm',json={'fault_id':True}).status_code==422
     finally:

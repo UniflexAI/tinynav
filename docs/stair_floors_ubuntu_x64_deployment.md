@@ -834,17 +834,13 @@ has exact commands, runtime pin and interactive BEV instructions.
 
 ## VIO safety update (2026-11-23)
 
-See [VIO lock, App recovery, bag and fault regression](stair_vio_safety.md).
-This update requires Python/backend/Unitree processes to restart **and** Flutter
-frontend to rebuild. Operate now displays a VIO recovery banner. A meter-scale
-pose jump, VIO restart or stream timeout stops motion and invalidates both local
-maps. Stable inputs alone do not resume motion: the operator confirms in App.
-The App starts one persistent `vio_safety_node` with the same database directory;
-keep `vio_safety.json` across restarts. Do not launch a second guard in the same
-ROS domain. The standalone stair tmux script starts its own guard and must not
-be mixed with the App launcher. Normal Pause/Continue does not acknowledge faults.
-
-The guard checks source timestamps against the ROS clock; synchronize sensor
-and host clocks before a physical run. Recorded older bags lack `/nav/vio_safety`;
-new Operate recordings request 38 topics including it. Offline regression reads
-bags with actuation disabled, rather than replaying them into a robot domain.
+See [automatic VIO recovery, gait minimum and min_wall verification](stair_vio_safety.md).
+Update/restart Python backend/navigation/Unitree processes and rebuild Flutter.
+Faults stop motion and clear both local maps; fresh stable input automatically
+rebuilds perception and continues the existing task. Operate no longer asks for
+confirmation. Separately paused/cancelled tasks remain paused/cancelled.
+The App starts one guard in the same persistent database directory. Do not mix
+App and standalone guard launchers. Sensor/host clocks must be synchronized.
+The Operate recorder requests 38 topics including `/nav/vio_safety`.
+Stair forward commands now have a 0.25 m/s minimum. Stair min_wall_span_m is
+explicitly 0.3 m, which was also the actual value in the previous revision.

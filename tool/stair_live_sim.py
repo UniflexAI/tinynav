@@ -340,7 +340,7 @@ def apply_api_command(command):
     action, values = command.action, command.payload
     if action in ('start', 'reset'):
         if world is not None and world.vio_state.get('locked'):
-            raise ValueError('Confirm VIO recovery before starting or resetting a task')
+            raise ValueError('VIO recovering automatically; wait before starting or resetting a task')
         scene_choice.value = 'Ten-level narrow'
         floors.options = tuple(str(n) for n in range(1,10))
         direction_choice.value = values['direction']
@@ -360,7 +360,7 @@ def apply_api_command(command):
         request['reset'] = False
     elif action == 'teleop':
         if world.vio_state.get('blocked'):
-            raise ValueError('VIO safety stop; restore inputs and confirm recovery')
+            raise ValueError('VIO recovering automatically; wait for stable inputs')
         if world.error:
             raise ValueError('Safety assertion stopped simulation; reset first')
         moving=any(values[k] for k in ('linear_x','linear_y','angular_z'))

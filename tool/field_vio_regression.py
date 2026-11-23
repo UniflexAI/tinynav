@@ -46,7 +46,10 @@ def run(root):
                 assert planner.target_pose is None and control.path is None
                 events.append(dict(time=now,epoch=s['epoch'],locked=s['locked'],fault_id=s['fault_id'],reason=s['reason'],cache_markers_present=seeded))
                 seeded=False;last_epoch=epoch
-            assert not old_locked or s['locked'] or allow_release, 'Automatic release of a latched fault'
+            if old_locked and not s['locked']:
+                assert not s['blocked'] and s['stable_for'] >= guard.guard.settle_s
+                assert epoch != last_release[0], 'Recovery did not change map epoch'
+                last_release[0] = epoch
             old_locked=s['locked'];last_fault=s['fault_id']
             if not s['blocked']:
                 # Represent cached pre-fault data without pretending to recompute measured depth maps.
@@ -54,6 +57,7 @@ def run(root):
                 planner.target_pose=np.array([1.,0.,0.])
                 stair.gen.frames=deque([(now,np.array([[0.,0.,0.]]))])
                 control.path=object();seeded=True
+        last_release=[None]
         guard.state_pub=SimpleNamespace(publish=state)
         count=0;t0=None
         for db in dbs:
@@ -79,13 +83,10 @@ def run(root):
         result=dict(bag=bag.name,messages=count,events=events,blocked_zero_checks=blocked_checks,
                     latched_checks=lock_checks,final_state=s,passed=True)
         if s['locked']:
-            bad=guard.confirm_parameters([Parameter('confirm_fault_id',value=s['fault_id']+1)])
-            assert not bad.successful
-            result['wrong_id_rejected']=True
-            allow_release=s['ready']
             response=guard.confirm_parameters([Parameter('confirm_fault_id',value=s['fault_id'])])
-            assert response.successful==s['ready']
-            result['manual_confirm_accepted_at_recording_end']=response.successful
+            assert not response.successful, 'Legacy confirmation bypassed automatic settling'
+            result['legacy_confirmation_rejected']=True
+
         results.append(result)
         for node in (guard,stair,planner,control):node.destroy_node()
     rclpy.shutdown()

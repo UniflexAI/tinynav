@@ -50,3 +50,13 @@ def test_raised_band_retains_vertical_wall_and_filters_lower_tread_span():
     assert original[8, 8] and ascent[8, 8]
     assert raised.robot_z_top == base.robot_z_top
     assert raised.min_wall_span_m == base.min_wall_span_m
+
+
+def test_stair_wall_span_is_explicitly_point_three_and_tall_walls_remain():
+    assert STAIR.min_wall_span_m==.3
+    grid=np.zeros((4,4,30));origin=np.array([0.,0.,-.75])
+    grid[1,1,10:16]=.2  # 0.25 m occupied span: ordinary riser remains traversable
+    grid[2,2,8:17]=.2   # 0.40 m span: wall remains an obstacle
+    cfg=ObstacleConfig(min_wall_span_m=STAIR.min_wall_span_m,dilation_cells=0)
+    mask=build_obstacle_map(grid,origin,.05,0.,cfg)
+    assert not mask[1,1] and mask[2,2]

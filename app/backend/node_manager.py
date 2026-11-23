@@ -294,7 +294,7 @@ class BackendNode(Ros2NodeManager):
 
     def _require_vio_ready(self):
         if self.vio_recovery_status().get('blocked', True):
-            raise RuntimeError('VIO safety stop: restore inputs and confirm recovery in Operate')
+            raise RuntimeError('VIO recovering automatically: waiting for stable inputs')
 
     def cmd_vio_confirm(self, fault_id):
         state = self.vio_recovery_status()

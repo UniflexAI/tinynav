@@ -18,12 +18,9 @@ logger = logging.getLogger(__name__)
 
 # stair_node publishes /stair/status every 0.5 s while stair mode is on (same rule as planning_node)
 STAIR_MODE_TIMEOUT_S = 1.5
-# stair mode: any forward command walks at least this fast. Near a target planning slows down, and on the
-# last step of a flight go2 stood still at 0.14 m/s for 30 s (field_2026_10_09_10_53_38, 139-168 s)
+# Stair locomotion must clear the quadruped gait dead zone on both flights and
+# landings. The planner samples the same minimum; stop/rotation remain zero.
 STAIR_MIN_LINEAR_VEL = 0.25
-# ... only for (nearly) straight commands: raising a slow turning arc widens it, and on a wide landing that
-# drove the robot into the wall (field_2026_10_09_13_36_59, 43-49 s: 0.17 m/s at 0.43 rad/s became 0.25 m/s)
-STAIR_MIN_LINEAR_MAX_TURN = 0.2  # rad/s
 # Below 1 mm a path segment has no reliable translation bearing (in-place turns).
 PATH_TRANSLATION_EPS_M = 1e-3
 
@@ -193,22 +190,23 @@ class CmdVelControlNode(Node):
             return
 
         # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
-        if self.stair_mode and not self._stair_finishing and age <= stale_slow_s and target_cmd.linear.x > self.linear_engage_threshold \
-                and abs(target_cmd.angular.z) < STAIR_MIN_LINEAR_MAX_TURN:
+        stair_forward = self.stair_mode and age <= stale_slow_s and target_cmd.linear.x > self.linear_engage_threshold
+        if stair_forward:
             target_cmd.linear.x = max(target_cmd.linear.x, STAIR_MIN_LINEAR_VEL)
         max_dv = self.max_linear_acc * dt
         # If we just left reverse mode, do not let acceleration limiting leak another reverse command.
         prev_linear_x = 0.0 if self.prev_cmd.linear.x < 0.0 else self.prev_cmd.linear.x
-        out.linear.x = self._clamp_step(target_cmd.linear.x, prev_linear_x, max_dv)
+        out.linear.x = 0. if self.stair_mode and target_cmd.linear.x == 0. else self._clamp_step(target_cmd.linear.x, prev_linear_x, max_dv)
         # Do not acceleration-limit yaw. The planner/control layer already decides the turn rate,
         # and forced rotate-in-place should take effect immediately.
         out.angular.z = float(np.clip(target_cmd.angular.z, -self.max_angular_speed, self.max_angular_speed))
 
         # Linear x: robot cannot execute tiny non-zero speeds reliably.
         # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
-        if 0.0 < out.linear.x < self.min_effective_linear_speed:
-            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x + 1e-6 >= self.min_effective_linear_speed else 0.0
-        elif abs(out.linear.x) < self.min_effective_linear_speed:
+        minimum = max(self.min_effective_linear_speed, STAIR_MIN_LINEAR_VEL) if self.stair_mode else self.min_effective_linear_speed
+        if 0.0 < out.linear.x < minimum:
+            out.linear.x = minimum if target_cmd.linear.x + 1e-6 >= minimum else 0.0
+        elif abs(out.linear.x) < minimum:
             out.linear.x = 0.0
 
         # Angular z: same idea; tiny requested turns snap to executable min, decays snap to 0.

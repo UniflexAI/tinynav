@@ -1,4 +1,4 @@
-"""VIO fault latch shared by ROS supervision and deterministic offline tests."""
+"""Stop on VIO faults and automatically rebuild after sustained healthy input."""
 import json
 import math
 import os
@@ -34,6 +34,7 @@ class VioSafety:
         self.quiet_until = -math.inf
         self.stale = set()
         self.had_input = False
+        self.healthy_since = None
         self.needs_settle = self.locked
         self._save()
 
@@ -52,6 +53,7 @@ class VioSafety:
             self.locked = True
         self.reason = reason
         self.quiet_until = now + self.settle_s
+        self.healthy_since = None
         self.pose_rx = self.depth_rx = None
         self.accept_after = stamp if stamp is not None else self.pose_stamp
         self._save()
@@ -126,25 +128,30 @@ class VioSafety:
             and now - self.pose_rx <= self.pose_timeout and now - self.depth_rx <= self.depth_timeout
         vio_ok = not self.vio_required or (self.vio_status in ('TRACKING', 'TRACKING_STATIC')
             and self.status_rx is not None and now - self.status_rx <= self.status_timeout)
-        healthy = bool(fresh and vio_ok and now >= self.quiet_until)
+        inputs_ok = bool(fresh and vio_ok)
+        if not inputs_ok:
+            self.healthy_since = None
+        elif self.healthy_since is None:
+            self.healthy_since = now
+        stable_for = 0. if self.healthy_since is None else max(0., now - self.healthy_since)
+        healthy = inputs_ok and now >= self.quiet_until
+        if self.locked and healthy and stable_for >= self.settle_s:
+            self.locked = False
+            self.reason = ''
+            self.epoch += 1
+            self.accept_after = max(self.pose_stamp, self.depth_stamp)
+            self._save()
         return dict(session=self.session, epoch=self.epoch, fault_id=self.fault_id,
                     locked=self.locked, blocked=self.locked or not healthy,
-                    ready=self.locked and healthy, reason=self.reason, accept_after=self.accept_after,
+                    ready=False, recovery_mode='automatic', stable_for=stable_for,
+                    reason=self.reason, accept_after=self.accept_after,
                     vio_status=self.vio_status, pose_age=None if self.pose_rx is None else now-self.pose_rx,
                     depth_age=None if self.depth_rx is None else now-self.depth_rx)
 
     def confirm(self, fault_id, now):
-        state = self.snapshot(now)
-        if not self.locked or fault_id != self.fault_id:
-            return False, 'Fault changed; refresh the recovery status'
-        if not state['ready']:
-            return False, 'VIO and depth must be fresh and stable for 2 seconds'
-        self.locked = False
-        self.reason = ''
-        self.epoch += 1
-        self.accept_after = self.pose_stamp
-        self._save()
-        return True, 'VIO recovery confirmed'
+        # Legacy callers cannot bypass input freshness or the settling interval.
+        self.snapshot(now)
+        return False, 'VIO recovery is automatic; wait for stable inputs'
 
 
 def safety_blocked(state, received, now):

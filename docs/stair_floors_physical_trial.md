@@ -21,7 +21,7 @@ The simulation's shaft/contact checker knows world geometry and halts the test.
 It is not present as an independent shaft detector on the robot. The VIO guard now gates both cmd_vel and the Unitree bridge, including a 1 s
 guard-heartbeat timeout. It does not measure physical stopping distance or
 replace a general SDK/DDS command-loss watchdog. Verify the actual controller's
-stop behavior. See [VIO stop and manual recovery](stair_vio_safety.md).
+stop behavior. See [VIO stop and automatic recovery](stair_vio_safety.md).
 
 ## Install and connect without starting a stair task
 

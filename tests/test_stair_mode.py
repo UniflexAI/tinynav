@@ -503,55 +503,35 @@ def test_conflicting_wall_evidence_restarts_confirmation_interval():
     assert gen.uturn_side==0
 
 
-def test_final_landing_lattice_can_advance_less_than_coarse_sample():
-    from tinynav.core.planning_node import generate_trajectories, PlanningNode
-    from tinynav.core.robot_specs import ROBOT_CONFIG
+def test_stair_lattice_has_no_dead_zone_forward_samples_and_keeps_rotation():
+    from tinynav.core.planning_node import generate_trajectories
     q=Rotation.from_matrix(camera_pose()[:3,:3]).as_quat()
-    fake=SimpleNamespace(last_param=(0.,0.),in_stair_mode=True)
-    target=np.array([.3,0.,0.])
-    def best(fine):
-        trajectories,params=generate_trajectories(np.zeros(3),q,fine_forward=fine)
-        costs=[PlanningNode.trajectory_cost(fake,t,p,0.,target,False) for t,p in zip(trajectories,params)]
-        return params[np.argmin(costs)]
-    assert best(True)[0]==pytest.approx(1.2*ROBOT_CONFIG.min_linear_vel)
-    assert best(False)[0]!=pytest.approx(ROBOT_CONFIG.min_linear_vel)
+    for duration in (1.,3.):
+        trajectories,params=generate_trajectories(np.zeros(3),q,min_forward_speed=.25,duration=duration,max_forward_angular=.2)
+        assert np.all(params[params[:,0]>0.,0]>=.25-1e-9)
+        assert np.any(np.isclose(params[:,0],.25))
+        assert np.any((params[:,0]==0.) & (params[:,1]!=0.))
+        assert np.any(params[:,0]<0.)
+        assert np.all(np.abs(params[params[:,0]>0.,1])<=.2)
+        assert np.any((params[:,0]==0.) & (np.abs(params[:,1])>.2))
+        assert trajectories.shape[1]==round(duration/.1)+1
 
 
-@pytest.mark.parametrize('phase,expected', [('finishing',.1),('ok',.25)])
-def test_final_landing_does_not_apply_flight_speed_boost(node,monkeypatch,phase,expected):
+@pytest.mark.parametrize('direction', ['up','down'])
+@pytest.mark.parametrize('phase', ['ok','search','finishing'])
+@pytest.mark.parametrize('yaw', [0.,.4])
+def test_stair_positive_output_clears_dead_zone_in_all_phases(node,monkeypatch,direction,phase,yaw):
     from tinynav.platforms import cmd_vel_control
     monkeypatch.setattr(cmd_vel_control,'time',SimpleNamespace(monotonic=lambda:10.))
     control=CmdVelControlNode()
     try:
         control.cmd_pub=Mock();control._nav_active=True
-        control._on_stair_status(String(data=f'up {phase} pitch=0'))
-        control.latest_cmd.linear.x=.1-1e-10;control.prev_cmd.linear.x=.1
-        control.last_path_update_time=10.;control.last_cmd_pub_time=9.
+        control._on_stair_status(String(data=f'{direction} {phase} pitch=0'))
+        control.latest_cmd.linear.x=.1;control.latest_cmd.angular.z=yaw
+        control.last_path_update_time=10.;control.last_cmd_pub_time=9.99
         control.cmd_timer_callback()
-        assert control.cmd_pub.publish.call_args.args[0].linear.x==pytest.approx(expected)
-    finally:control.destroy_node()
-
-
-def test_final_landing_fine_arc_survives_controller_minimum(node,monkeypatch):
-    from tinynav.core.planning_node import generate_trajectories
-    from tinynav.platforms import cmd_vel_control
-    from nav_msgs.msg import Path
-    from geometry_msgs.msg import PoseStamped
-    monkeypatch.setattr(cmd_vel_control,'time',SimpleNamespace(monotonic=lambda:10.))
-    q=Rotation.from_matrix(camera_pose()[:3,:3]).as_quat()
-    trajectories,params=generate_trajectories(np.zeros(3),q,fine_forward=True)
-    index=np.where(np.isclose(params[:,0],.12)&np.isclose(params[:,1],.75))[0][0]
-    path=Path()
-    for xyzq in trajectories[index][::10]:
-        pose=PoseStamped()
-        pose.pose.position.x,pose.pose.position.y,pose.pose.position.z=map(float,xyzq[:3])
-        pose.pose.orientation.x,pose.pose.orientation.y,pose.pose.orientation.z,pose.pose.orientation.w=map(float,xyzq[3:])
-        path.poses.append(pose)
-    control=CmdVelControlNode()
-    try:
-        control.cmd_pub=Mock();control._nav_active=True;control.pose=object()
-        control._on_stair_status(String(data='up finishing pitch=0'))
-        control.path_callback(path);control.last_cmd_pub_time=9.
+        assert control.cmd_pub.publish.call_args.args[0].linear.x==pytest.approx(.25)
+        control.latest_cmd.linear.x=0.;control.prev_cmd.linear.x=.25
         control.cmd_timer_callback()
-        assert .1<=control.cmd_pub.publish.call_args.args[0].linear.x<.15
+        assert control.cmd_pub.publish.call_args.args[0].linear.x==0.
     finally:control.destroy_node()

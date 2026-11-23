@@ -305,25 +305,29 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
-def generate_trajectories(init_p, init_q, fine_forward=False):
+def generate_trajectories(init_p, init_q, min_forward_speed=0., duration=3., max_forward_angular=None):
     trajectories, params = generate_trajectory_library_3d(
-        init_p=init_p, init_q=init_q,
+        init_p=init_p, init_q=init_q, duration=duration,
         max_linear_vel=ROBOT_CONFIG.max_linear_vel,
         max_angular_vel=ROBOT_CONFIG.max_angular_vel,
     )
-    if fine_forward:
-        # Reuse the unchanged JIT lattice; retain its first positive speed only.
-        # Arc chords project below arc speed, so leave hardware-minimum margin.
-        fine_speed = 1.2 * ROBOT_CONFIG.min_linear_vel
-        fine, fine_params = generate_trajectory_library_3d(
-            init_p=init_p, init_q=init_q, max_linear_vel=6 * fine_speed,
+    if min_forward_speed > 0.:
+        keep = (params[:, 0] == 0.) | (params[:, 0] >= min_forward_speed)
+        trajectories, params = trajectories[keep], params[keep]
+        extra, extra_params = generate_trajectory_library_3d(
+            init_p=init_p, init_q=init_q, duration=duration,
+            max_linear_vel=6 * min_forward_speed,
             max_angular_vel=ROBOT_CONFIG.max_angular_vel)
-        selected = np.isclose(fine_params[:, 0], fine_speed)
-        trajectories = np.concatenate([trajectories, fine[selected]], axis=0)
-        params = np.concatenate([params, fine_params[selected]], axis=0)
-    vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
+        selected = np.isclose(extra_params[:, 0], min_forward_speed)
+        trajectories = np.concatenate([trajectories, extra[selected]], axis=0)
+        params = np.concatenate([params, extra_params[selected]], axis=0)
+    vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(
+        init_p=init_p, init_q=init_q, duration=duration)
     trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
     params = np.concatenate([params, vocab_params], axis=0)
+    if max_forward_angular is not None:
+        keep = (params[:, 0] <= 0.) | (np.abs(params[:, 1]) <= max_forward_angular)
+        trajectories, params = trajectories[keep], params[keep]
     return trajectories, params
 
 
@@ -337,6 +341,9 @@ class StairPlanning:
     """Everything planning does differently in stair mode. Landings are ~1.1 m deep and the default margins
     left little room there; blocked ahead the robot turns in place, reversing (toward the steps it came down)
     only when no turn is collision free."""
+    min_linear_vel: float = 0.25
+    moving_turn_limit: float = 0.2  # sharper turns must rotate in place before advancing
+    min_wall_span_m: float = 0.3
     safety_radius: float = 0.1
     dilation_cells: int = 1         # 0 let the robot run into a wall on a wide landing (field_2026_10_09_13_36_59,
                                     # 43-49 s), 2 (normal navigation) leaves little room on narrow ones
@@ -387,7 +394,9 @@ class PlanningNode(Node):
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
         self.obstacle_config = ROBOT_CONFIG.obstacle
-        self.stair_obstacle_config = dataclasses.replace(ROBOT_CONFIG.obstacle, dilation_cells=STAIR.dilation_cells)
+        self.stair_obstacle_config = dataclasses.replace(ROBOT_CONFIG.obstacle,
+            dilation_cells=STAIR.dilation_cells, min_wall_span_m=STAIR.min_wall_span_m)
+        self.get_logger().info(f"Stair obstacles: min_wall_span={STAIR.min_wall_span_m}m")
         self.stair_up_obstacle_config = dataclasses.replace(
             self.stair_obstacle_config, robot_z_bottom=ROBOT_CONFIG.obstacle.robot_z_bottom + STAIR.up_bottom_raise_m)
         self._stair_ascending = False
@@ -410,6 +419,7 @@ class PlanningNode(Node):
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
         self._stair_finishing = False
+        self._stair_searching = False
         self._stair_status_time = -float('inf')
         self.create_subscription(String, '/stair/status', self._on_stair_status, 10)
         self._vio_safety = None
@@ -449,6 +459,7 @@ class PlanningNode(Node):
         self._stair_status_time = time.monotonic()
         parts = msg.data.split()
         self._stair_finishing = len(parts) > 1 and parts[1] == 'finishing'
+        self._stair_searching = len(parts) > 1 and parts[1] == 'search'
         pitch = next((p.split('=', 1)[1] for p in parts if p.startswith('pitch=')), '0')
         try:
             pitch = float(pitch)
@@ -743,7 +754,9 @@ class PlanningNode(Node):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             trajectories, params = generate_trajectories(init_p, init_q,
-                fine_forward=stair and self._stair_finishing)
+                min_forward_speed=STAIR.min_linear_vel if stair else 0.,
+                duration=(1. if self._stair_finishing else 1.5 if self._stair_searching else 3.) if stair else 3.,
+                max_forward_angular=STAIR.moving_turn_limit if stair else None)
             self.last_T = T
             self.last_stamp = stamp
 

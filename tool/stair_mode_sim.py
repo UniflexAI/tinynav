@@ -55,8 +55,8 @@ max_sim_seconds = args.max_sim_seconds
 capture_path = args.capture
 result_path = args.result_json
 fault_test = VioFault(args.vio_fault, args.fault_at)
-fault_record = dict(kind=args.vio_fault, at=args.fault_at, lock_time=None, confirm_time=None,
-                    rejected_early=False, rejected_old_id=False)
+fault_record = dict(kind=args.vio_fault, at=args.fault_at, lock_time=None, recovery_time=None,
+                    rejected_early=False)
 fault_stop = None
 noise_config = OdomNoiseConfig(mode=args.odom_noise, seed=args.noise_seed, scale=args.noise_scale,
     position_std_m=args.noise_position_std, yaw_std_deg=args.noise_yaw_std,
@@ -260,6 +260,7 @@ try:
         trace_cmd.append((drive.vx, drive.wz))
         trace_status.append(status.last or '')
         trace_counts.append(stair.gen.landings)
+        assert drive.vx <= 0. or drive.vx >= .25 - 1e-6, 'Stair command remained in gait dead zone'
         pose = np2msg(estimated, stair.get_clock().now().to_msg(), "world", "camera")
         pose.header.stamp.sec = int(data.time)
         pose.header.stamp.nanosec = int((data.time % 1)*1e9)
@@ -279,14 +280,11 @@ try:
         if vio_state['locked']:
             assert not stair.gen.frames and not np.any(planner.occupancy_grid), 'Old perception survived VIO reset'
             assert np.linalg.norm(runtime.base_pos()[:2] - fault_stop[:2]) < .12, 'VIO stop drift'
-            if elapsed >= fault_test.at + fault_test.duration + 3. and vio_state['ready']:
-                bad = guard.confirm_parameters([Parameter('confirm_fault_id', value=vio_state['fault_id']+1)])
-                assert not bad.successful, 'Old/wrong fault ID accepted'
-                fault_record['rejected_old_id'] = True
-                response = guard.confirm_parameters([Parameter('confirm_fault_id', value=vio_state['fault_id'])])
-                assert response.successful, response.reason
-                fault_record['confirm_time'] = elapsed
-                vio_state = guard.publish_state()
+        elif fault_record['lock_time'] is not None and fault_record.get('recovery_time') is None:
+            fault_record['recovery_time'] = elapsed
+            assert not stair.gen.frames and not np.any(planner.occupancy_grid), 'Recovery reused old perception'
+            assert vio_state['epoch'] > 1 and vio_state['accept_after'] is not None
+
         if deliver:
             stair.odom_callback(pose)
             stair.depth_callback(depth,pose)
@@ -337,7 +335,7 @@ try:
                     assert margin > 0, ('landing opening', flight, q[:3])
         if stair.arrived:
             if fault_test.kind != 'none':
-                assert fault_record['confirm_time'] is not None, 'Task resumed without manual confirmation'
+                assert fault_record.get('recovery_time') is not None, 'Task completed before automatic recovery'
                 assert fault_record['lock_time'] <= fault_test.at + .6, 'Late VIO stop'
             assert stair.gen.landings==flights and drive.vx==drive.wz==0
             stop = runtime.base_pos().copy()
