@@ -1,0 +1,45 @@
+{
+  "date": "2026-11-23",
+  "scope": "Operate fixed field rosbag bar and recorder topic/closure verification",
+  "physical_robot_tested": false,
+  "python_tests": {
+    "passed": 86,
+    "selection": [
+      "test_field_record",
+      "test_stair_mode",
+      "test_stair_sim_course",
+      "test_stair_sim_api",
+      "test_stair_sim_control",
+      "test_stair_app_bridge",
+      "test_stair_odom_noise"
+    ]
+  },
+  "flutter_tests_passed": 7,
+  "flutter_web_build": "passed",
+  "flutter_analyze": {
+    "errors": 0,
+    "warnings": 0,
+    "info": 40
+  },
+  "live_rosbag_test": {
+    "source": "Isolated synthetic ROS publishers, domain 84, localhost-only; no actuator",
+    "ui": "Original App Operate Record bag -> REC -> Stop & save -> Saved, folder path dialog",
+    "verified": true,
+    "message_count": 1106,
+    "missing_topics": [],
+    "topic_message_counts": {
+      "/stair/status": 158,
+      "/slam/odometry_visual": 158,
+      "/slam/odometry": 158,
+      "/planning/height_map": 158,
+      "/slam/depth": 158,
+      "/cmd_vel": 158,
+      "/camera/camera/infra2/camera_info": 158
+    },
+    "host_bag_directory": "/home/dm/tinynav-stair-dev/experiments/operate-record/live/debug/field_2026_11_23_01_28_55_638609",
+    "artifacts": "/home/dm/tinynav-stair-dev/experiments/operate-record/",
+    "test_container": "tinynav-record-preview (stopped after validation)"
+  },
+  "simulation": "Original 18081 simulation remains connected; field recorder disabled with automatic trace notice. No new nine-floor run required or claimed; navigation and safety code unchanged.",
+  "deployment": "3090 static Flutter frontend rebuilt. Physical installations must update and restart backend as well as rebuild frontend."
+}

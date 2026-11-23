@@ -35,7 +35,8 @@ Manual sticks are enabled with a 0.5-second deadman timeout; manual input cancel
 autonomous navigation. Physical sit/stand actions remain unavailable for this gait.
 The Stairs settings page also saves 1–9 floors and offers **Start upstairs** /
 **Start downstairs**. Two flights per floor and camera calibration are fixed for
-this simulated building. Red STOP remains available. Field rosbag recording is hidden; per-run JSON/NPZ traces
+this simulated building. Red STOP remains available. The fixed recording bar above the camera shows a disabled **Bag recording** button
+and explains that simulation traces are saved automatically. Per-run JSON/NPZ traces
 remain at `/home/dm/tinynav-stair-sim/output/app-live/runs/`.
 
 Stairs mode uses live depth and estimated odometry without a prior global map.

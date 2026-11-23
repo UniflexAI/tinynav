@@ -62,20 +62,16 @@ separately configured/tested counting convention, or the normal one-floor task
 nine-floor run. Retain freshness, planner and stop checks; do not lower count
 thresholds or remove checks to accommodate bad sensor data.
 
-Start recording BEFORE task start, including a stationary segment. In a shell
-on the backend host/container (replace the backend address when remote):
+In the App, open **Operate**. The fixed bar above the camera has **Record bag**.
+Start it BEFORE the task and include a short stationary segment. The button turns
+red (**Stop & save**) and displays `REC mm:ss`. Leaving Operate does not stop the
+recorder. Configure the actual camera height and a small task in **Stairs**, then
+start the upward or downward trial. Recording itself does not start motion.
 
-```bash
-curl --fail http://127.0.0.1:8000/field-record/info
-curl --fail -X POST http://127.0.0.1:8000/field-record/start
-curl --fail -X PUT http://127.0.0.1:8000/nav/stair/settings \
-  -H 'Content-Type: application/json' \
-  -d '{"camera_height":0.4669,"floors":1,"landings_per_floor":2}'
-# Only after checking the real height/settings and being ready to move:
-curl --fail -X POST http://127.0.0.1:8000/nav/stair/start \
-  -H 'Content-Type: application/json' \
-  -d '{"direction":"down","turn":"auto","floors":1,"landings_per_floor":2}'
-```
+For shell/API diagnosis, the same recorder is available at
+`POST /field-record/start`, `POST /field-record/stop` and `GET /field-record/info`
+on the backend (normally port 8000). The App needs both this backend revision and
+the rebuilt frontend; rebuilding Flutter alone does not update recorder topics.
 
 Use `direction:"up"` for a separate upward trial. `turn` is relative to the
 incoming flight. Pause: `POST /nav/pause`; resume: `POST /nav/resume`; leave stair
@@ -87,41 +83,35 @@ support; only then does `arrived` latch. Missing support produces `no_seed` and
 zero output, not success. Count completion alone is no longer the arrival signal.
 If VIO/depth is stale, the existing freshness stop still takes precedence.
 
-After stopping the robot, keep a short stationary recording segment, then:
+After stopping the robot, keep a short stationary segment, then press
+**Stop & save**. Wait for **Saved · N messages**. The backend closes rosbag using
+SIGINT and verifies metadata and nonzero messages with `ros2 bag info`; an empty
+or incomplete bag produces an error instead of a success label. **Check inputs**
+means the bag is readable but one or more basic input topics had no messages.
+Use the folder icon to inspect missing topics and **Copy path**.
 
-```bash
-curl --fail -X POST http://127.0.0.1:8000/field-record/stop
-curl --fail http://127.0.0.1:8000/field-record/info
-```
-
-The bag is under `/tinynav_data/debug/field_*` (host data mount), with `info.json`.
-Inspect `ros2 bag info BAG_DIRECTORY`: check duration, message counts and actual
-input/output topics. The API being marked recording does not guarantee a sensor
-was publishing. Keep the entire directory, including metadata.yaml and all db3
-or mcap segments. Do not send only a screen recording or a selected database file.
+Files stay on the robot/backend host, normally `/tinynav_data/debug/field_*`
+(the configured DB mount), rather than downloading to the phone/browser.
+Return the complete folder: `metadata.yaml`, every db3/mcap segment, and
+`info.json`. The latter records source revision/dirty files, start settings,
+latest stair state, requested topics, actual message counts and verification.
+For an independent inspection, use `ros2 bag info BAG_DIRECTORY`.
 
 ## Recording needed for analysis
 
-The App field recorder includes raw left/depth/calibration, synchronized/raw VIO,
-IMU/status when available, tf_static, stair cmd/status/path, target, trajectory,
-obstacle mask, cmd_vel, navigation active/paused and optional leg/EKF topics.
-See `BackendNode.FIELD_RECORD_TOPICS` for the exact versioned list. It does not
-currently include bridge `/slam/*` outputs or `/planning/height_map`.
+The single Operate recorder requests 37 topics: raw left/right/depth/calibration,
+RGB, synchronized/raw VIO, IMU/status, `/tf` and `/tf_static`, stair command/status/path,
+target/trajectory/obstacle mask, `/cmd_vel`, navigation flags, optional leg/EKF,
+and bridge `/slam/depth`, `/slam/odometry_visual`, `/slam/odometry` plus
+`/planning/height_map`. No second derived-data recorder is needed.
+`BackendNode.FIELD_RECORD_TOPICS` is the exact versioned list.
 
-For the first field diagnosis, optionally run this additional recorder in a
-second sourced ROS shell, in the same physical ROS domain, before motion:
-
-```bash
-mkdir -p /tinynav_data/debug
-ros2 bag record --output /tinynav_data/debug/derived_$(date +%Y%m%d_%H%M%S) \
-  /slam/depth /slam/odometry_visual /slam/odometry \
-  /camera/camera/infra2/camera_info /planning/height_map /tf /tf_static
-```
-
-Stop this recorder with Ctrl-C and wait for clean closure. Confirm publishers
-and QoS; do not assume optional topics exist. Check disk space before recording
-raw and derived depth simultaneously. If the extra depth volume is too large,
-the App's raw synchronized inputs are the priority for replay.
+`/sportmodestate` is requested as optional native Unitree feedback; it only appears
+if a compatible ROS publisher/type is actually available. It does not prove the
+SDK subscriber received or executed `/cmd_vel`. Confirm actual publishers and QoS.
+The App warns about absent depth, visual odometry, odometry, infrared2 CameraInfo
+and cmd_vel messages; passing that check does not validate their calibration or
+quality. Check available disk space before recording raw and derived depth.
 
 Return these together:
 

@@ -238,6 +238,11 @@ class BackendNode(Ros2NodeManager):
         self._field_record_proc: subprocess.Popen | None = None
         self._field_record_path: str | None = None
         self._field_record_start: float | None = None
+        self._field_record_stopping = False
+        self._field_record_error = None
+        self._field_record_messages = None
+        self._field_record_verified = False
+        self._field_record_topic_counts = {}
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
@@ -1027,12 +1032,21 @@ class BackendNode(Ros2NodeManager):
         # sensors
         '/camera/camera/infra1/image_rect_raw',
         '/camera/camera/infra1/camera_info',
+        '/camera/camera/infra2/image_rect_raw',
+        '/camera/camera/infra2/camera_info',
+        '/camera/camera/color/image_raw',
+        '/camera/camera/color/image_rect_raw/compressed',
         '/camera/camera/depth/image_rect_raw',
         '/camera/camera/imu',
         '/camera/camera/vio_100hz',
         '/camera/camera/vio_status',
         '/camera/camera/vio_image',
+        '/tf',
         '/tf_static',
+        # derived inputs used by the running stair/planning nodes
+        '/slam/depth',
+        '/slam/odometry_visual',
+        '/slam/odometry',
         # Go2 leg odometry + EKF (scripts/go2_ekf, a separate container; absent when it is not running)
         '/go2/joint_states',
         '/go2/imu',
@@ -1049,47 +1063,116 @@ class BackendNode(Ros2NodeManager):
         '/control/target_pose',
         '/planning/trajectory_path',
         '/planning/obstacle_mask',
+        '/planning/height_map',
         '/cmd_vel',
+        '/sportmodestate',  # optional native Unitree feedback, when exposed to ROS
+        '/robot_status',
+        '/battery',
+        '/service/command',
         '/nav/active',
         '/nav/paused',
+    ]
+
+    FIELD_RECORD_INPUT_TOPICS = [
+        '/slam/depth', '/slam/odometry_visual', '/slam/odometry',
+        '/camera/camera/infra2/camera_info', '/cmd_vel',
     ]
 
     def cmd_field_record_start(self):
         from datetime import datetime
         with self._lock:
+            if self._field_record_stopping:
+                raise RuntimeError('Previous recording is still being saved')
             if self._field_record_proc is not None and self._field_record_proc.poll() is None:
                 return
-            out_dir = os.path.join(self.tinynav_db_path, 'debug')  # its own folder, not rosbags/
+            out_dir = os.path.join(self.tinynav_db_path, 'debug')
             os.makedirs(out_dir, exist_ok=True)
-            path = os.path.join(out_dir, datetime.now().strftime('field_%Y_%m_%d_%H_%M_%S'))
+            path = os.path.join(out_dir, datetime.now().strftime('field_%Y_%m_%d_%H_%M_%S_%f'))
             cmd = ['ros2', 'bag', 'record', '--output', path, '--max-cache-size', '2147483648'] + self.FIELD_RECORD_TOPICS
-            self._field_record_proc = self._launch_proc('field_record', cmd)
+            self._field_record_error = None
+            self._field_record_messages = None
+            self._field_record_verified = False
+            self._field_record_topic_counts = {}
+            self._field_record_proc = proc = self._launch_proc('field_record', cmd)
             self._field_record_path = path
             self._field_record_start = time.time()
+        deadline = time.monotonic() + 5.
+        while proc.poll() is None and not os.path.isdir(path) and time.monotonic() < deadline:
+            time.sleep(.05)
+        if proc.poll() is not None:
+            with self._lock:
+                self._field_record_error = f'Recorder exited with code {proc.returncode}; inspect field_record log'
+                self._field_record_start = None
+            raise RuntimeError(self._field_record_error)
+        if not os.path.isdir(path):
+            self._kill_proc(proc)
+            with self._lock:
+                self._field_record_error = 'Recorder did not create its output directory'
+                self._field_record_start = None
+            raise RuntimeError(self._field_record_error)
+        self._write_field_record_info(path)
         self.get_logger().info(f'Field recording started -> {path}')
 
     def cmd_field_record_stop(self):
         with self._lock:
+            if self._field_record_stopping:
+                raise RuntimeError('Recording is already being saved')
             proc, path = self._field_record_proc, self._field_record_path
-            self._field_record_proc = self._field_record_start = None
-        if proc and proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGINT)  # SIGINT lets ros2 bag close the bag cleanly
-                proc.wait(timeout=10)
-            except Exception:
-                self._kill_proc(proc)
-        if path and os.path.isdir(path):
-            self._write_field_record_info(path)
+            self._field_record_stopping = True
+        error, messages, verified, topic_counts = None, None, False, {}
+        try:
+            if proc and proc.poll() is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self._kill_proc(proc)
+                    error = 'Recorder did not close in time; bag may be incomplete'
+                except ProcessLookupError:
+                    error = 'Recorder exited while saving; inspect the bag'
+            if path and os.path.isfile(os.path.join(path, 'metadata.yaml')):
+                try:
+                    result = subprocess.run(['ros2', 'bag', 'info', path], capture_output=True, text=True, timeout=15)
+                    match = re.search(r'^\s*Messages:\s*(\d+)', result.stdout, re.MULTILINE)
+                    messages = int(match.group(1)) if match else None
+                    topic_counts = {name: int(count) for name, count in re.findall(r'Topic:\s*(\S+)[^\n]*?Count:\s*(\d+)', result.stdout)}
+                    verified = error is None and result.returncode == 0 and messages is not None and messages > 0
+                    if not verified and error is None:
+                        error = 'No messages recorded' if messages == 0 else 'Bag verification failed; inspect field_record log'
+                except (subprocess.TimeoutExpired, OSError) as exc:
+                    error = f'Bag verification failed: {exc}'
+            elif error is None:
+                error = 'Bag metadata is missing; recording was not verified'
+            with self._lock:
+                self._field_record_error = error
+                self._field_record_messages = messages
+                self._field_record_verified = verified
+                self._field_record_topic_counts = topic_counts
+            if path and os.path.isdir(path):
+                self._write_field_record_info(path)
+        finally:
+            with self._lock:
+                self._field_record_proc = self._field_record_start = None
+                self._field_record_stopping = False
         self.get_logger().info(f'Field recording stopped -> {path}')
 
     def _write_field_record_info(self, path):
-        """Code version and robot next to the bag, so a replay can tell which stair/odometry code produced it."""
-        git = lambda *a: subprocess.run(['git', '-c', 'safe.directory=*', '-C', '/tinynav', *a],
-                                        capture_output=True, text=True).stdout.strip()
-        info = {'commit': git('rev-parse', 'HEAD'), 'branch': git('rev-parse', '--abbrev-ref', 'HEAD'),
-                'dirty_files': git('status', '--porcelain').splitlines(), 'robot_type': os.environ.get('ROBOT_TYPE', ''),
-                'hostname': socket.gethostname(), 'stair_mode': self._stair_mode, 'topics': self.FIELD_RECORD_TOPICS}
-        with open(os.path.join(path, 'info.json'), 'w') as f:
+        info_path = os.path.join(path, 'info.json')
+        if os.path.isfile(info_path):
+            with open(info_path) as f:
+                info = json.load(f)
+        else:
+            git = lambda *a: subprocess.run(['git', '-c', 'safe.directory=*', '-C', '/tinynav', *a],
+                                            capture_output=True, text=True).stdout.strip()
+            info = {'commit': git('rev-parse', 'HEAD'), 'branch': git('rev-parse', '--abbrev-ref', 'HEAD'),
+                    'dirty_files': git('status', '--porcelain').splitlines(), 'robot_type': os.environ.get('ROBOT_TYPE', ''),
+                    'hostname': socket.gethostname(), 'started_at_unix': self._field_record_start,
+                    'saved_stair_settings_at_start': self.stair_settings(), 'topics': self.FIELD_RECORD_TOPICS}
+        info.update(stair_mode_at_save=self._stair_mode, stair_status_at_save=self._stair_status,
+                    sensor_mode=self._sensor_mode, verified=self._field_record_verified,
+                    message_count=self._field_record_messages, error=self._field_record_error,
+                    topic_message_counts=self._field_record_topic_counts)
+        with open(info_path, 'w') as f:
             json.dump(info, f, indent=1)
 
     def field_record_state(self):
@@ -1097,6 +1180,19 @@ class BackendNode(Ros2NodeManager):
             proc, path, start = self._field_record_proc, self._field_record_path, self._field_record_start
         recording = proc is not None and proc.poll() is None
         return recording, path, (time.time() - start) if recording and start else None
+
+    def field_record_summary(self):
+        recording, path, seconds = self.field_record_state()
+        with self._lock:
+            error = self._field_record_error
+            proc = self._field_record_proc
+            if error is None and proc is not None and proc.poll() is not None and self._field_record_start is not None and not self._field_record_stopping:
+                error = f'Recorder exited with code {proc.returncode}; inspect field_record log'
+            return dict(recording=recording, path=path, seconds=seconds, topics=self.FIELD_RECORD_TOPICS,
+                        saving=self._field_record_stopping, error=error,
+                        verified=self._field_record_verified, message_count=self._field_record_messages,
+                        topic_message_counts=self._field_record_topic_counts,
+                        missing_topics=[t for t in self.FIELD_RECORD_INPUT_TOPICS if self._field_record_topic_counts.get(t, 0) == 0] if self._field_record_verified else [])
 
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':

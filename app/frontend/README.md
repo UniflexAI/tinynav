@@ -139,3 +139,12 @@ lib/
 2. **Build** the map → Device tab → Build Map (watch the progress bar)
 3. **View** the map and create POIs at target positions → Map tab
 4. **Navigate** the robot to a POI → Navigate tab → Go
+
+## Operate field recording
+
+The fixed bar above the camera provides **Record bag**, red elapsed **REC**,
+**Stop & save**, and a folder button with **Copy path**. The backend verifies
+the closed bag and reports message counts or missing basic inputs. Files remain
+on the backend host. Update both backend and frontend. Simulation connections
+show an automatic-trace notice with field recording disabled. See
+[physical recording handoff](../../docs/stair_floors_physical_trial.md).

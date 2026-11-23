@@ -12,6 +12,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
+import '../widgets/field_record_bar.dart';
 import 'esdf_colormap_layer.dart';
 import 'local_voxel_painter.dart';
 import 'map_painter.dart';
@@ -146,6 +147,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
     return Column(
       children: [
+        FieldRecordBar(simulated: simulated),
         if (simulated)
           Padding(padding: const EdgeInsets.all(4), child: Text('MuJoCo SIM · front camera + local perception · Stairs starts a fresh task', style: const TextStyle(fontSize: 11, color: Colors.cyanAccent))),
         // ── Camera (1/4) ──────────────────────────────────────────────
@@ -263,10 +265,6 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    if (!simulated) ...[
-                      _DebugRecordButton(statusAsync: ref.watch(deviceStatusProvider)),
-                      const SizedBox(height: 8),
-                    ],
                     _StairButton(statusAsync: ref.watch(deviceStatusProvider)),
                     const SizedBox(height: 8),
                     _NavNodesButton(statusAsync: ref.watch(deviceStatusProvider)),
@@ -1434,71 +1432,6 @@ class _NavNodesButtonState extends ConsumerState<_NavNodesButton> {
               size: 16,
             ),
       label: Text(running ? 'Nav ON' : 'Nav'),
-    );
-  }
-}
-
-// ── Debug record button ───────────────────────────────────────────────────────
-// Records the running robot (sensors + stair/planning/control outputs) into tinynav_db/debug/, alongside
-// navigation or stair mode; separate from the Map tab's bag recording.
-
-class _DebugRecordButton extends ConsumerStatefulWidget {
-  final AsyncValue<DeviceStatus> statusAsync;
-  const _DebugRecordButton({required this.statusAsync});
-
-  @override
-  ConsumerState<_DebugRecordButton> createState() => _DebugRecordButtonState();
-}
-
-class _DebugRecordButtonState extends ConsumerState<_DebugRecordButton> {
-  bool _loading = false;
-
-  Future<void> _toggle(bool recording) async {
-    setState(() => _loading = true);
-    try {
-      await ref.read(dioProvider).post(recording ? '/field-record/stop' : '/field-record/start');
-    } on DioException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail']?.toString() ?? e.message ?? 'Error'),
-          backgroundColor: Colors.red,
-        ));
-      }
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final status = widget.statusAsync.valueOrNull;
-    final recording = status?.fieldRecording ?? false;
-    final secs = (status?.fieldRecordSeconds ?? 0).floor();
-    final clock = '${(secs ~/ 60).toString().padLeft(2, '0')}:${(secs % 60).toString().padLeft(2, '0')}';
-
-    return FilledButton.icon(
-      onPressed: _loading ? null : () => _toggle(recording),
-      style: FilledButton.styleFrom(
-        backgroundColor: Colors.black87,
-        foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      ),
-      icon: _loading
-          ? const SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-            )
-          : Container(
-              width: 12,
-              height: 12,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: recording ? Colors.red : Colors.grey,
-                boxShadow: recording ? [BoxShadow(color: Colors.red.withOpacity(0.7), blurRadius: 8, spreadRadius: 1)] : null,
-              ),
-            ),
-      label: Text(recording ? 'Debug REC $clock' : 'Debug REC'),
     );
   }
 }

@@ -73,5 +73,8 @@ MuJoCo 的 ONNX 步态和知道井口真值的独立断言不会部署到真机�
 
 ## 真机录包回传
 
-在原生 App 的 Operate 页先开启现场记录，再发任务，停止运动后保留一小段静止数据再结束记录。保存完整 rosbag 目录和 `info.json`，另带 `ros2 bag info`、Git SHA/本地补丁、实际相机高度/外参、机器人控制模式、任务层数/转向、现场楼梯尺寸及异常时间点。
-[真机录包文档](stair_floors_physical_trial.md#recording-needed-for-analysis)列出了派生 `/slam/*`、`/planning/height_map` 的补充录制命令，便于重放对齐分析；不要只发屏幕录像或单个 db3 文件。
+在原生 App 的 **Operate → 相机上方固定录包栏**，点 **Record bag** 后再发任务，红色 `REC` 显示计时。停止运动后保留一小段静止数据，点 **Stop & save**，等待 `Saved · N messages`。文件夹图标可查看并复制后端保存路径；`Check inputs` 表示缺少关键输入消息，请查看详情。
+
+一键录包已包含原始传感器、派生 `/slam/*`、`/planning/height_map` 和控制/楼梯状态，无需另开终端补录。**必须同时更新后端并重新构建 Flutter**。文件保存在机器人/后端主机，不会自动下载到浏览器。回传完整 rosbag 目录和 `info.json`，另带实际相机高度/外参、控制模式、任务设置、楼梯尺寸及异常时间点；详见[真机录包文档](stair_floors_physical_trial.md#recording-needed-for-analysis)。
+
+仿真连接下该栏显示自动保存轨迹的提示，现场 rosbag 按钮禁用；仿真 JSON/NPZ 与真机 rosbag 是两种记录。
