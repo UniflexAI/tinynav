@@ -844,3 +844,12 @@ App and standalone guard launchers. Sensor/host clocks must be synchronized.
 The Operate recorder requests 38 topics including `/nav/vio_safety`.
 Stair forward commands now have a 0.25 m/s minimum. Stair min_wall_span_m is
 explicitly 0.3 m, which was also the actual value in the previous revision.
+
+
+### Fixed Go2 obstacle band follow-up
+
+Go2/Go2W now use a camera-relative world-Z obstacle band of [-0.2,+0.2] m
+in ordinary navigation and all stair phases. The extra ascent bottom raise is
+zero; min_wall_span_m remains 0.3 m. Restart backend/planning after updating
+Python sources. This band-only follow-up does not require another Flutter build.
+See [current parameters and validation](stair_vio_safety.md).

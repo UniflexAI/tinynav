@@ -350,7 +350,7 @@ class StairPlanning:
     center_only: bool = False       # True: collision check at the body center only, not the footprint corners
     reverse_enter: float = 0.20     # reverse gate: blocked with the nose this close to an (inflated) obstacle ...
     reverse_exit: float = 0.30      # ... until it is this far again
-    up_bottom_raise_m: float = 0.10 # raised treads must not fill the lower obstacle band on ascent
+    up_bottom_raise_m: float = 0.0  # use the requested fixed band on ascent as well
     up_pitch_enter_deg: float = 12.0
     up_pitch_exit_deg: float = 8.0
 
@@ -650,7 +650,10 @@ class PlanningNode(Node):
             new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
             self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
         new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-        self.occupancy_grid *= 0.99
+        # A stair landing wall behind the camera is unobserved, not free.
+        # Keep confirmed occupancy until a free ray, map roll or VIO reset clears it.
+        retain = self.in_stair_mode & (new_occ == 0.) & (self.occupancy_grid > self.obstacle_config.occ_threshold)
+        self.occupancy_grid *= np.where(retain, 1., .99)
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 

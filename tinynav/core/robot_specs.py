@@ -12,8 +12,8 @@ class ObstacleConfig:
     The band is clipped to the local occupancy grid, which spans camera z
     +- grid_half_height_m, so keep the grid at least as tall as the band.
     """
-    robot_z_bottom: float = -0.4
-    robot_z_top: float = 0.4
+    robot_z_bottom: float = -0.2
+    robot_z_top: float = 0.2
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.3
     dilation_cells: int = 2
@@ -71,7 +71,7 @@ GO2_CONFIG = RobotConfig(
     camera_x=0.2, camera_y=0.0, camera_height=0.45,  # measured on two go2 stair runs (0.45 / 0.47 m)
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
-    obstacle=ObstacleConfig(robot_z_bottom=-0.4, robot_z_top=0.4),
+    obstacle=ObstacleConfig(robot_z_bottom=-0.2, robot_z_top=0.2),
 )
 
 GO2W_CONFIG = RobotConfig(
@@ -80,7 +80,7 @@ GO2W_CONFIG = RobotConfig(
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
-    obstacle=ObstacleConfig(robot_z_bottom=-0.4, robot_z_top=0.4),
+    obstacle=ObstacleConfig(robot_z_bottom=-0.2, robot_z_top=0.2),
 )
 
 B2_CONFIG = RobotConfig(
