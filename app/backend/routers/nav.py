@@ -14,6 +14,15 @@ def _require_node():
     return runner.node
 
 
+def _require_motion_node():
+    node = _require_node()
+    try:
+        node._require_vio_ready()
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return node
+
+
 class GoToPoiRequest(BaseModel):
     poi_id: int
 
@@ -41,9 +50,26 @@ class ManualTargetRequest(BaseModel):
     z: float
 
 
+class VioConfirmation(BaseModel):
+    fault_id: int = Field(ge=1, strict=True)
+
+
+@router.get('/vio')
+def vio_status():
+    return _require_node().vio_recovery_status()
+
+
+@router.post('/vio/confirm')
+def vio_confirm(req: VioConfirmation):
+    try:
+        return _require_node().cmd_vio_confirm(req.fault_id)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post('/send-pois')
 def nav_send_pois(req: SendPoisRequest):
-    node = _require_node()
+    node = _require_motion_node()
     if not node._localized:
         raise HTTPException(409, 'Not localized')
     node.cmd_send_pois(req.poi_ids)
@@ -52,7 +78,7 @@ def nav_send_pois(req: SendPoisRequest):
 
 @router.post('/go-to-poi')
 def nav_go_to_poi(req: GoToPoiRequest):
-    node = _require_node()
+    node = _require_motion_node()
     if node.state == 'navigation':
         raise HTTPException(409, 'Already navigating')
     if node.state not in ('idle',):
@@ -63,7 +89,7 @@ def nav_go_to_poi(req: GoToPoiRequest):
 
 @router.post('/manual-target')
 def nav_manual_target(req: ManualTargetRequest):
-    node = _require_node()
+    node = _require_motion_node()
     if node._odom_pose is None:
         raise HTTPException(409, 'Odometry not ready')
     node.cmd_manual_target_pose(req.x, req.y, req.z)
@@ -116,7 +142,10 @@ def nav_pause():
 @router.post('/resume')
 def nav_resume():
     node = _require_node()
-    node.cmd_nav_resume()
+    try:
+        node.cmd_nav_resume()
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return {'ok': True}
 
 
@@ -136,7 +165,10 @@ def nav_stair_start(req: StairRequest):
         raise HTTPException(409, f'Cannot enter stair mode while in state: {node.state}')
     overrides = {key: getattr(req, key) for key in ('floors', 'landings_per_floor')
                  if getattr(req, key) is not None}
-    settings = node.cmd_stair_start(req.direction, req.turn, **overrides)
+    try:
+        settings = node.cmd_stair_start(req.direction, req.turn, **overrides)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return {'ok': True, 'direction': req.direction, 'turn': req.turn, **settings}
 
 

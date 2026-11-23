@@ -11,6 +11,7 @@ cleared through /mapping/poi_change, so planning stops publishing paths and cmd_
 import argparse
 import asyncio
 import time
+import json
 
 import message_filters
 import numpy as np
@@ -28,6 +29,7 @@ from tinynav.core.math_utils import msg2np, np2msg
 from tinynav.core.robot_specs import ROBOT_CONFIG
 from tinynav.core.stair_memory import StairMemory, prior_direction
 from tinynav.core.stair_target import StairConfig, StairTargetGenerator
+from tinynav.core.vio_safety import safety_blocked, accept_safety
 
 STOP_STATUSES = ('no_seed', 'odom_invalid', 'landing')
 TURN_SIDES = {'auto': 0, 'left': 1, 'right': -1}
@@ -59,6 +61,10 @@ class StairNode(Node):
         self.latest_T = None
         self.last_odom_rx = None  # receive time of the last VIO pose (/slam/odometry or a depth frame's pose)
         self.stopped = True  # planning target is currently cleared by us
+        self._vio_safety = None
+        self._vio_safety_rx = 0.
+        self._vio_epoch = None
+        self._rebase_z = None
 
         self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
         self.memory = self.dino = self.latest_image = None
@@ -73,6 +79,7 @@ class StairNode(Node):
         self.create_subscription(String, '/stair/cmd', self.cmd_callback, 10)
         pause_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self.pause_callback, pause_qos)
+        self.create_subscription(String, '/nav/vio_safety', self.vio_safety_callback, pause_qos)
         depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
         self.ts = message_filters.TimeSynchronizer([depth_sub, pose_sub], queue_size=10)
@@ -113,9 +120,18 @@ class StairNode(Node):
             self.publish_status('paused')
 
     def odom_callback(self, msg):
+        if self.vio_blocked:
+            return
+        cutoff = (self._vio_safety or {}).get('accept_after')
+        if cutoff is not None and stamp_sec(msg.header.stamp) < cutoff:
+            return
         was_valid = self.gen.odom_valid
         self.last_odom_rx = time.monotonic()
         p = msg.pose.pose.position
+        if self._rebase_z is not None:
+            if self.gen.landing_ref_z is not None:
+                self.gen.landing_ref_z += p.z - self._rebase_z
+            self._rebase_z = None
         self.gen.add_pose(stamp_sec(msg.header.stamp), (p.x, p.y, p.z))
         if self.direction is not None and was_valid and not self.gen.odom_valid:
             # do not wait for the next timer tick
@@ -124,9 +140,14 @@ class StairNode(Node):
             self.publish_status('odom_invalid')
 
     def depth_callback(self, depth_msg, odom_msg):
+        if self.vio_blocked:
+            return
         if self.K is None:
             return
         stamp = stamp_sec(depth_msg.header.stamp)
+        cutoff = (self._vio_safety or {}).get('accept_after')
+        if cutoff is not None and stamp < cutoff:
+            return
         if self.last_depth_stamp is not None and stamp <= self.last_depth_stamp:
             return
         self.last_depth_stamp = stamp
@@ -136,6 +157,26 @@ class StairNode(Node):
         self.last_odom_rx = time.monotonic()  # bags without vio_100hz have only these poses
         self.gen.add_depth(stamp_sec(odom_msg.header.stamp), depth, self.K, T)
         self.latest_T = T
+
+    @property
+    def vio_blocked(self):
+        return safety_blocked(self._vio_safety, self._vio_safety_rx, time.monotonic())
+
+    def vio_safety_callback(self, msg):
+        state = json.loads(msg.data)
+        if not accept_safety(state, self._vio_safety):
+            return
+        epoch = (state['session'], state['epoch'])
+        if epoch != self._vio_epoch:
+            if self.gen.last_position is not None:
+                self._rebase_z = float(self.gen.last_position[2])
+            self.gen.invalidate_world()
+            self.latest_T = self.last_odom_rx = self.last_depth_rx = self.last_depth_stamp = None
+            self._vio_epoch = epoch
+        self._vio_safety, self._vio_safety_rx = state, time.monotonic()
+        if self.vio_blocked:
+            self.stop_robot('VIO safety stop')
+            self.publish_status('vio_locked' if state['locked'] else 'vio_wait', reason=state.get('reason'))
 
     def image_callback(self, msg):
         self.latest_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
@@ -149,6 +190,11 @@ class StairNode(Node):
 
     def timer_callback(self):
         if self.direction is None:
+            return
+        if self.vio_blocked:
+            self.stop_robot('VIO safety stop')
+            state = self._vio_safety or {}
+            self.publish_status('vio_locked' if state.get('locked') else 'vio_wait', reason=state.get('reason'))
             return
         if self.arrived:
             self.publish_status('arrived')

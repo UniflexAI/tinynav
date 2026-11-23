@@ -30,6 +30,9 @@ from geometry_msgs.msg import Point32, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
+from rcl_interfaces.srv import SetParametersAtomically
+from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
+from tinynav.core.vio_safety import safety_blocked, accept_safety
 
 from tool.ros2_node_manager import Ros2NodeManager
 
@@ -201,6 +204,10 @@ class BackendNode(Ros2NodeManager):
 
         # Publisher for teleop velocity commands
         self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self._vio_safety = {'locked': False, 'blocked': True, 'ready': False, 'reason': 'supervisor_starting', 'fault_id': 0}
+        self._vio_safety_rx = 0.
+        self.create_subscription(String, '/nav/vio_safety', self._on_vio_safety, _latched_qos)
+        self._vio_confirm_client = self.create_client(SetParametersAtomically, '/vio_safety/set_parameters_atomically')
 
         # Sensor mode detection and image subscriptions
         self._sensor_mode: str = 'unknown'  # 'looper' | 'realsense' | 'unknown'
@@ -254,6 +261,9 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
         self._detect_and_init_sensor()
+        self._vio_safety_proc = self._launch_proc('vio_safety',
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/vio_safety_node.py',
+             '--state-file', os.path.join(self.tinynav_db_path, 'vio_safety.json')], env=self._nav_env())
         self._start_unitree_if_configured()
 
     # ------------------------------------------------------------------ #
@@ -263,6 +273,47 @@ class BackendNode(Ros2NodeManager):
     def _on_battery(self, msg: Float32):
         with self._lock:
             self._battery = float(msg.data)
+
+    def _on_vio_safety(self, msg):
+        state = json.loads(msg.data)
+        if not accept_safety(state, self._vio_safety):
+            return
+        with self._lock:
+            self._vio_safety = state
+            self._vio_safety_rx = time.monotonic()
+        if state.get('blocked', True):
+            self._cmd_vel_pub.publish(Twist())
+
+    def vio_recovery_status(self):
+        with self._lock:
+            state = dict(self._vio_safety)
+            received = self._vio_safety_rx
+        if time.monotonic() - received > 1.:
+            state.update(blocked=True, ready=False, reason='supervisor_unavailable')
+        return state
+
+    def _require_vio_ready(self):
+        if self.vio_recovery_status().get('blocked', True):
+            raise RuntimeError('VIO safety stop: restore inputs and confirm recovery in Operate')
+
+    def cmd_vio_confirm(self, fault_id):
+        state = self.vio_recovery_status()
+        if not state.get('ready') or state.get('fault_id') != fault_id:
+            raise RuntimeError('Fault changed or VIO is not ready for confirmation')
+        client = self._vio_confirm_client
+        if not client.wait_for_service(timeout_sec=1.):
+            raise RuntimeError('VIO supervisor unavailable')
+        req = SetParametersAtomically.Request(parameters=[Parameter(name='confirm_fault_id',
+            value=ParameterValue(type=ParameterType.PARAMETER_INTEGER, integer_value=fault_id))])
+        future = client.call_async(req)
+        done = threading.Event()
+        future.add_done_callback(lambda _: done.set())
+        if not done.wait(3.):
+            raise RuntimeError('Confirmation timed out; inspect recovery status before retrying')
+        result = future.result().result
+        if not result.successful:
+            raise RuntimeError(result.reason)
+        return {'ok': True, 'fault_id': fault_id}
 
     def _set_nav_active(self, active: bool):
         with self._lock:
@@ -756,6 +807,7 @@ class BackendNode(Ros2NodeManager):
             'navActive': nav_active,
             'stairMode': stair_mode,
             'stairStatus': stair_status,
+            'vioSafety': self.vio_recovery_status(),
             'fieldRecording': field_recording,
             'fieldRecordPath': field_path,
             'fieldRecordSeconds': field_seconds,
@@ -970,6 +1022,7 @@ class BackendNode(Ros2NodeManager):
     def cmd_stair_start(self, direction: str, turn: str = 'auto', *,
                         floors: int | None = None, landings_per_floor: int | None = None):
         """Swap map_node for stair_node, which then publishes /control/target_pose."""
+        self._require_vio_ready()
         settings = self.stair_settings()
         if floors is not None:
             settings['floors'] = floors
@@ -1071,6 +1124,7 @@ class BackendNode(Ros2NodeManager):
         '/service/command',
         '/nav/active',
         '/nav/paused',
+        '/nav/vio_safety',
     ]
 
     FIELD_RECORD_INPUT_TOPICS = [
@@ -1394,6 +1448,7 @@ class BackendNode(Ros2NodeManager):
         planning_node subscribes to /control/target_pose and only reads the
         position vector, so Odometry is used here to match that existing API.
         """
+        self._require_vio_ready()
         msg = Odometry()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'odom'
@@ -1437,6 +1492,7 @@ class BackendNode(Ros2NodeManager):
             self._start('navigation')
 
     def cmd_nav_start(self, poi_id: str | None = None):
+        self._require_vio_ready()
         if poi_id is not None:
             self._set_nav_active(self._publish_cmd_pois(int(poi_id)))
         else:
@@ -1471,6 +1527,7 @@ class BackendNode(Ros2NodeManager):
         self._pause_pub.publish(Bool(data=True))
 
     def cmd_nav_resume(self):
+        self._require_vio_ready()
         with self._lock:
             self._nav_paused = False
         self._pause_pub.publish(Bool(data=False))
@@ -1479,6 +1536,8 @@ class BackendNode(Ros2NodeManager):
         self._action_pub.publish(String(data=f'play {action}'))
 
     def publish_cmd_vel(self, linear_x: float, linear_y: float, angular_z: float):
+        if self.vio_recovery_status().get('blocked', True):
+            linear_x = linear_y = angular_z = 0.
         msg = Twist()
         msg.linear.x = float(linear_x)
         msg.linear.y = float(linear_y)
@@ -1525,7 +1584,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc, self.node._stair_proc, self.node._field_record_proc):
+            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc, self.node._stair_proc, self.node._field_record_proc, self.node._vio_safety_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)

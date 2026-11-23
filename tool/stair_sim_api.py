@@ -54,13 +54,22 @@ class SimulationControl:
             return dict(self.state)
 
     def submit(self, action, payload, timeout=55):
-        if action not in ('start', 'reset', 'pause', 'resume', 'stop', 'camera', 'teleop'):
+        if action not in ('start', 'reset', 'pause', 'resume', 'stop', 'camera', 'teleop', 'vio_confirm', 'fault'):
             raise ValueError('Unknown action')
         if action in ('start', 'reset'):
             payload = validate_config(payload)
         elif action == 'camera':
             if payload.get('mode') not in ('Free orbit', 'Follow robot', 'Overview'):
                 raise ValueError('Invalid camera mode')
+        elif action == 'vio_confirm':
+            if type(payload.get('fault_id')) is not int or payload['fault_id'] < 1:
+                raise ValueError('Invalid fault ID')
+        elif action == 'fault':
+            if payload.get('kind') not in ('jump', 'dropout', 'restart'):
+                raise ValueError('Invalid VIO fault')
+            duration = payload.get('duration', 2.)
+            if not isinstance(duration, (int, float)) or not math.isfinite(duration) or not .5 <= duration <= 10.:
+                raise ValueError('Invalid fault duration')
         if action == 'teleop':
             for key,limit in (('linear_x',.5),('linear_y',.5),('angular_z',1.)):
                 value=float(payload.get(key,0.))

@@ -215,6 +215,9 @@ class StairTargetGenerator:
         self.stalled_goal = None
         self.finishing = False
         self.landing_waiting_for_turn = False
+        self.tread_axis = self.tread_anchor = None
+        self.measured_turn_side = 0
+        self.wall_side_candidate = None
 
     def add_pose(self, stamp, position):
         """Feed every raw odometry pose (e.g. 100 Hz), not only the ones matched to depth."""
@@ -288,6 +291,8 @@ class StairTargetGenerator:
             if self.flight_done and stamp - self.pitched_since >= cfg.flight_min_s:
                 # on the next flight: arm the landing detection again
                 self.flight_done, self.next_entry = False, None
+                self.measured_turn_side = 0
+                self.wall_side_candidate = None
             self.was_on_flight |= stamp - self.pitched_since >= cfg.flight_min_s
         else:
             self.pitched_since = None
@@ -318,7 +323,28 @@ class StairTargetGenerator:
         """+1 left / -1 right when the U-turn side is known (given, or estimated firmly enough), else 0."""
         if self.turn_side != 0:
             return self.turn_side
-        return float(np.sign(self.well_side)) if abs(self.well_side) >= self.cfg.auto_side_min else 0
+        return self.measured_turn_side or (float(np.sign(self.well_side)) if abs(self.well_side) >= self.cfg.auto_side_min else 0)
+
+    def _observe_side_wall(self, wall_l, wall_r, stamp, measured_treads):
+        """Confirm a turn only after sustained, asymmetric side-wall geometry.
+
+        Visible area can include lower floors. This independent check uses solid
+        walls above the stair plane while pitched onto measured treads. Missing,
+        ambiguous or contradictory observations restart the 1.5 s interval.
+        """
+        side = int(np.sign(wall_r - wall_l))
+        strong = self.on_flight and measured_treads and max(wall_l, wall_r) >= 10 \
+            and max(wall_l, wall_r) > 3 * min(wall_l, wall_r)
+        if not strong:
+            self.wall_side_candidate = None
+            return
+        previous = self.wall_side_candidate
+        if previous is None or previous[0] != side or stamp - previous[2] > .75:
+            self.wall_side_candidate = (side, stamp, stamp)
+            return
+        self.wall_side_candidate = (side, previous[1], stamp)
+        if stamp - previous[1] >= 1.5:
+            self.measured_turn_side = side
 
     @property
     def on_flight(self):
@@ -363,6 +389,9 @@ class StairTargetGenerator:
         self.stalled_goal = None
         self.finishing = False
         self.landing_waiting_for_turn = False
+        self.tread_axis = self.tread_anchor = None
+        self.measured_turn_side = 0
+        self.wall_side_candidate = None
 
     def reset(self):
         self.frames.clear()
@@ -372,6 +401,23 @@ class StairTargetGenerator:
         self.last_position = None
         self.last_jump_stamp = -np.inf
         self.latest_stamp = -np.inf
+
+    def invalidate_world(self):
+        """Keep task progress, but discard everything expressed in the old VIO frame."""
+        count, reference = self.landings, self.landing_ref_z
+        on_flight, done = self.was_on_flight, self.flight_done
+        waiting = self.landing_waiting_for_turn
+        side, measured_side = self.well_side, self.measured_turn_side
+        self.reset()
+        self.landings, self.landing_ref_z = count, reference
+        self.was_on_flight, self.flight_done = on_flight, done
+        self.landing_waiting_for_turn = waiting
+        self.well_side = side
+        # Left/right topology is independent of the invalid world frame, as is
+        # an explicit turn request. Never carry unfinished evidence across gaps.
+        self.measured_turn_side = measured_side
+        self.pitch = 0.
+        self.last_pose_stamp = None
 
     def _check_search_progress(self, cam, heading):
         cfg = self.cfg
@@ -404,6 +450,8 @@ class StairTargetGenerator:
         assert direction in ('up', 'down')
         self.finishing = finish_landing
         cam = T_cam_to_world[:3, 3]
+        if self.flight_done and not self.on_flight:
+            self.tread_axis = self.tread_anchor = None
         points = np.concatenate([p for _, p in self.frames]) if self.frames else np.zeros((0, 3))
         height, obstacle, observed, origin = build_height_map(points, cam[:2], cam[2], cfg)
         if not self.odom_valid:
@@ -572,6 +620,7 @@ class StairTargetGenerator:
             solid = obstacle & (np.abs(along) < 1.5) & (height > foot_z + along * np.tan(np.radians(self.pitch)) + 0.45)
             wall_l = np.sum(solid & (lateral > 0.2) & (lateral < cfg.side_view_max))
             wall_r = np.sum(solid & (lateral < -0.2) & (lateral > -cfg.side_view_max))
+            self._observe_side_wall(wall_l, wall_r, self.latest_stamp, self.tread_axis is not None)
             if max(wall_l, wall_r) > 10 and max(wall_l, wall_r) > 2 * min(wall_l, wall_r):
                 seen_l, seen_r = wall_r, wall_l
             if seen_l + seen_r > 0:
@@ -733,6 +782,7 @@ class StairTargetGenerator:
             along = rel_xy @ align_dir
             lateral = align_dir[0] * rel_xy[..., 1] - align_dir[1] * rel_xy[..., 0]
             tread = observed & reachable & ~obstacle & (along > 0.1) & (along < 1.6) & (np.abs(lateral) < 0.45)
+            axis = None
             if np.sum(tread) >= 20:
                 xy, z = rel_xy[tread], height[tread]
                 design = np.column_stack((xy, np.ones(len(xy))))
@@ -744,13 +794,28 @@ class StairTargetGenerator:
                     coef = np.linalg.lstsq(design[keep], z[keep], rcond=None)[0]
                 slope = np.linalg.norm(coef[:2])
                 axis = sign * coef[:2] / max(slope, 1e-9)
-                if 0.2 < slope < cfg.max_slope and axis @ align_dir > 0.85:
-                    aim = cam[:2] + axis * min(cfg.lookahead, max(0.5, (target[:2] - cam[:2]) @ axis))
-                    candidate = reachable & observed & (np.linalg.norm(cell_xy - aim, axis=-1) < 0.2)
-                    if np.any(candidate):
-                        c = np.unravel_index(np.argmin(np.where(candidate, np.linalg.norm(cell_xy - aim, axis=-1), np.inf)), height.shape)
-                        target = np.array([*cell_xy[c], height[c]])
-                        out['tread_aligned'] = True
+                if not (0.2 < slope < cfg.max_slope and axis @ align_dir > 0.85):
+                    axis = None
+            if axis is not None:
+                if self.tread_axis is None or axis @ self.tread_axis < .85:
+                    self.tread_axis, self.tread_anchor = axis, cam[:2].copy()
+                else:
+                    blended = .8 * self.tread_axis + .2 * axis
+                    self.tread_axis = blended / np.linalg.norm(blended)
+            # Do not shift the measured flight line sideways with every camera sway.
+            # Its final treads can leave view before the body has reached the landing.
+            if self.tread_axis is not None and (axis is not None or self.on_flight):
+                axis = self.tread_axis
+                normal = np.array([-axis[1], axis[0]])
+                if kept:
+                    self.tread_anchor += normal * ((target[:2] - self.tread_anchor) @ normal)
+                aim = self.tread_anchor + axis * ((cam[:2] - self.tread_anchor) @ axis
+                    + min(cfg.lookahead, max(.5, (target[:2] - cam[:2]) @ axis)))
+                candidate = reachable & observed & (np.linalg.norm(cell_xy - aim, axis=-1) < .2)
+                if np.any(candidate):
+                    c = np.unravel_index(np.argmin(np.where(candidate, np.linalg.norm(cell_xy - aim, axis=-1), np.inf)), height.shape)
+                    target = np.array([*cell_xy[c], height[c]])
+                    out['tread_aligned'] = True
         target = self._keep_in_front(target, cam, heading, reachable, observed, clearance, cell_xy, height, rel_xy, r_robot, out)
         out.update(goal=path_xyz[-1], target=target, path=path_xyz)
         return out

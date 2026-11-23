@@ -16,10 +16,12 @@ import mujoco
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
+from rclpy.parameter import Parameter
 
 from tool.stair_odom_noise import OdomNoise, OdomNoiseConfig
 from tool.stair_sim_control import apply_drive_command
+from tool.stair_vio_fault import VioFault
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--sim-root", type=Path, required=True)
@@ -44,12 +46,18 @@ parser.add_argument('--noise-pitch-hz', type=float, default=1.7)
 parser.add_argument('--noise-correlation', type=float, default=.2, help='OU correlation time, seconds')
 parser.add_argument('--max-sim-seconds', type=float, help='Optional stricter simulation time budget; does not extend the existing budget')
 parser.add_argument('--result-json', type=Path, help='Write outcome and odom/target/command traces even on assertion failure')
+parser.add_argument('--vio-fault', choices=('none', 'jump', 'dropout', 'restart'), default='none')
+parser.add_argument('--fault-at', type=float, default=3.)
 args = parser.parse_args()
 if args.max_sim_seconds is not None and (not np.isfinite(args.max_sim_seconds) or args.max_sim_seconds <= 0):
     parser.error('--max-sim-seconds must be finite and positive')
 max_sim_seconds = args.max_sim_seconds
 capture_path = args.capture
 result_path = args.result_json
+fault_test = VioFault(args.vio_fault, args.fault_at)
+fault_record = dict(kind=args.vio_fault, at=args.fault_at, lock_time=None, confirm_time=None,
+                    rejected_early=False, rejected_old_id=False)
+fault_stop = None
 noise_config = OdomNoiseConfig(mode=args.odom_noise, seed=args.noise_seed, scale=args.noise_scale,
     position_std_m=args.noise_position_std, yaw_std_deg=args.noise_yaw_std,
     pitch_std_deg=args.noise_pitch_std, pitch_amplitude_deg=args.noise_pitch_amplitude,
@@ -85,6 +93,7 @@ from sim.runtime import PieRuntime, DepthCamera
 from tinynav.core import stair_node, planning_node
 from tinynav.core.math_utils import np2msg
 from tinynav.platforms import cmd_vel_control
+from tinynav.core import vio_safety_node
 
 spec = importlib.util.spec_from_file_location("course", str(args.course_script))
 course = importlib.util.module_from_spec(spec)
@@ -110,9 +119,13 @@ args = SimpleNamespace(camera_height=.4669, direction=direction, floors=floors,
 stair = stair_node.StairNode(args)
 planner = planning_node.PlanningNode()
 control = cmd_vel_control.CmdVelControlNode()
+guard = vio_safety_node.VioSafetyNode(source_clock=lambda: float(data.time))
 clock = SimpleNamespace(monotonic=lambda: float(data.time))
-for module in (stair_node, planning_node, cmd_vel_control):
+for module in (stair_node, planning_node, cmd_vel_control, vio_safety_node):
     module.time = clock
+sim_clock = SimpleNamespace(now=lambda: rclpy.time.Time(seconds=float(data.time)))
+for node in (stair, planner, control, guard):
+    node.get_clock = lambda: sim_clock
 stair.K = planner.K = K
 control._on_nav_active(Bool(data=True))
 def status(msg):
@@ -128,6 +141,11 @@ stair.poi_change_pub = SimpleNamespace(publish=planner.poi_change_callback)
 planner.path_pub = SimpleNamespace(publish=control.path_callback)
 outputs = []
 control.cmd_pub = SimpleNamespace(publish=outputs.append)
+def safety(msg):
+    control.vio_safety_callback(msg)
+    planner.vio_safety_callback(msg)
+    stair.vio_safety_callback(msg)
+guard.state_pub = SimpleNamespace(publish=safety)
 bridge = CvBridge()
 min_clearance = np.inf
 last_landing = 0
@@ -233,6 +251,7 @@ try:
         T[:3,3] = data.cam_xpos[camid]
         elapsed = float(data.time) - start_time
         estimated = noise.apply(T, elapsed)
+        estimated, deliver, vio_status = fault_test.sample(estimated, elapsed)
         trace_time.append(elapsed)
         true_poses.append(T.copy())
         estimated_poses.append(estimated.copy())
@@ -246,8 +265,31 @@ try:
         pose.header.stamp.nanosec = int((data.time % 1)*1e9)
         depth = bridge.cv2_to_imgmsg(nav_camera.capture(data), encoding="32FC1")
         depth.header = pose.header
-        stair.odom_callback(pose)
-        stair.depth_callback(depth,pose)
+        guard.status_callback(String(data=vio_status))
+        if deliver:
+            guard.pose_callback(pose)
+            guard.depth_callback(depth)
+        vio_state = guard.publish_state()
+        if vio_state['locked'] and fault_record['lock_time'] is None:
+            fault_record['lock_time'] = elapsed
+            fault_stop = runtime.base_pos().copy()
+            response = guard.confirm_parameters([Parameter('confirm_fault_id', value=vio_state['fault_id'])])
+            assert not response.successful, 'Recovery accepted before inputs stabilized'
+            fault_record['rejected_early'] = True
+        if vio_state['locked']:
+            assert not stair.gen.frames and not np.any(planner.occupancy_grid), 'Old perception survived VIO reset'
+            assert np.linalg.norm(runtime.base_pos()[:2] - fault_stop[:2]) < .12, 'VIO stop drift'
+            if elapsed >= fault_test.at + fault_test.duration + 3. and vio_state['ready']:
+                bad = guard.confirm_parameters([Parameter('confirm_fault_id', value=vio_state['fault_id']+1)])
+                assert not bad.successful, 'Old/wrong fault ID accepted'
+                fault_record['rejected_old_id'] = True
+                response = guard.confirm_parameters([Parameter('confirm_fault_id', value=vio_state['fault_id'])])
+                assert response.successful, response.reason
+                fault_record['confirm_time'] = elapsed
+                vio_state = guard.publish_state()
+        if deliver:
+            stair.odom_callback(pose)
+            stair.depth_callback(depth,pose)
         assert stair.gen.landings in (last_landing, last_landing + 1), (last_landing, stair.gen.landings)
         if stair.gen.landings != last_landing:
             last_landing = stair.gen.landings
@@ -255,17 +297,20 @@ try:
             assert abs(base[2] - rise_sign * 1.44 * last_landing - robot.spawn_drop) < .18, ("count height", last_landing, base)
             landing_events.append((float(data.time) - start_time, last_landing, *base))
             print("COUNT", landing_events[-1], flush=True)
-        control.pose_callback(pose)
+        if deliver: control.pose_callback(pose)
         if tick % 5 == 0:
             stair.timer_callback()
         latest_path.clear()
         latest_mask.clear()
-        with contextlib.redirect_stdout(io.StringIO()):
-            planner.sync_callback(depth,pose)
+        if deliver:
+            with contextlib.redirect_stdout(io.StringIO()):
+                planner.sync_callback(depth,pose)
         control.cmd_timer_callback()
         command = outputs[-1] if outputs else None
         drive.vx = command.linear.x if command else 0.
         drive.wz = command.angular.z if command else 0.
+        if vio_state['blocked']:
+            assert drive.vx == drive.wz == 0., 'Motion while VIO safety blocked'
         trace_target[-1] = np.full(2, np.nan) if planner.target_pose is None else planner.target_pose[:2].copy()
         trace_cmd[-1] = (drive.vx, drive.wz)
         trace_status[-1] = status.last or ''
@@ -291,10 +336,29 @@ try:
                     min_opening_clearance = min(min_opening_clearance, margin)
                     assert margin > 0, ('landing opening', flight, q[:3])
         if stair.arrived:
+            if fault_test.kind != 'none':
+                assert fault_record['confirm_time'] is not None, 'Task resumed without manual confirmation'
+                assert fault_record['lock_time'] <= fault_test.at + .6, 'Late VIO stop'
             assert stair.gen.landings==flights and drive.vx==drive.wz==0
             stop = runtime.base_pos().copy()
             assert stop[0] < -.5 and abs(stop[2] - rise_sign * 1.44 * flights - robot.spawn_drop) < .12, stop
             for i in range(75):
+                if i % 5 == 0:
+                    mujoco.mj_camlight(model, data)
+                    held_T = np.eye(4)
+                    held_T[:3, :3] = data.cam_xmat[camid].reshape(3, 3) @ np.diag((1., -1., -1.))
+                    held_T[:3, 3] = data.cam_xpos[camid]
+                    held_T = noise.apply(held_T, float(data.time) - start_time)
+                    held_T, _, held_status = fault_test.sample(held_T, float(data.time) - start_time)
+                    held_pose = np2msg(held_T, stair.get_clock().now().to_msg(), 'world', 'camera')
+                    held_pose.header.stamp.sec = int(data.time)
+                    held_pose.header.stamp.nanosec = int(data.time % 1 * 1e9)
+                    held_depth = bridge.cv2_to_imgmsg(nav_camera.capture(data), encoding='32FC1')
+                    held_depth.header = held_pose.header
+                    guard.status_callback(String(data=held_status))
+                    guard.pose_callback(held_pose)
+                    guard.depth_callback(held_depth)
+                    guard.publish_state()
                 stair.timer_callback()
                 control.cmd_timer_callback()
                 assert stair.arrived and stair.gen.landings == flights
@@ -335,6 +399,7 @@ finally:
             direction=direction, floors=floors, levels=levels, flight_width=lane_width,
             time_budget_s=max_ticks * .1,
             landing_depth=landing_depth, noise=noise.metadata(),
+            vio_fault=fault_record,
             open_landings=open_landings,
             min_opening_clearance_m=float(min_opening_clearance) if np.isfinite(min_opening_clearance) else None,
             simulated_s=float(data.time) - start_time, landings=int(stair.gen.landings),
@@ -351,7 +416,7 @@ finally:
                             flight_width=np.nan if lane_width is None else lane_width,
                             shaft=shaft, arrived=False, node_arrived=stair.arrived,
                             min_clearance=min_clearance, direction=direction, odom_noise=noise_json)
-    for n in (stair, planner,control):
+    for n in (stair, planner,control,guard):
         n.destroy_node()
     rclpy.shutdown()
     if renderer:

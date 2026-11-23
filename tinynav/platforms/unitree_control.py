@@ -9,6 +9,9 @@ from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from std_msgs.msg import Float32, String
 from enum import Enum
 import time
+import json
+import threading
+from tinynav.core.vio_safety import safety_blocked, accept_safety
 
 # go2/b2 are quadrupeds sharing the same SportClient gait API (Move/StandUp/
 # StandDown/BalanceStand/ClassicWalk). go2w/b2w are the wheeled variants of the
@@ -67,6 +70,12 @@ class Ros2UnitreeManagerNode(Node):
         self.battery = None
         self.last_twist_time = None
         self.logger = self.get_logger()
+        self._motion_lock = threading.Lock()
+        self._vio_safety = {'blocked': True}
+        self._vio_safety_rx = 0.
+        self.create_subscription(String, '/nav/vio_safety', self.VioSafetyHandler,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.create_timer(.1, self._vio_watchdog)
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
@@ -95,12 +104,30 @@ class Ros2UnitreeManagerNode(Node):
             self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
         self.last_twist_time = current_time
 
-        if  (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
-            self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
-            self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
-        else:
-            self.sport_client.StopMove()
+        with self._motion_lock:
+            if safety_blocked(self._vio_safety, self._vio_safety_rx, time.monotonic()):
+                self.sport_client.StopMove()
+            elif msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0:
+                self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
+                self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
+            else:
+                self.sport_client.StopMove()
         time.sleep(0.02)
+
+    def VioSafetyHandler(self, msg):
+        with self._motion_lock:
+            state = json.loads(msg.data)
+            if not accept_safety(state, self._vio_safety):
+                return
+            self._vio_safety = state
+            self._vio_safety_rx = time.monotonic()
+            if self._vio_safety.get('blocked', True):
+                self.sport_client.StopMove()
+
+    def _vio_watchdog(self):
+        with self._motion_lock:
+            if safety_blocked(self._vio_safety, self._vio_safety_rx, time.monotonic()):
+                self.sport_client.StopMove()
 
     def ActionMessageHandler(self, msg: String_):
         self.logger.info(f"ActionMessageHandler received: {msg.data!r}")

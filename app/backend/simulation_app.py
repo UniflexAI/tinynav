@@ -111,7 +111,32 @@ def status():
     return dict(online=s.get('ready', False), rawState='stair' if running else 'idle',
                 navNodesRunning=s.get('ready', False) and not s.get('cancelled', False), navPaused=s.get('paused', True),
                 stairMode=s.get('direction') if running else None, stairStatus=s.get('status', ''),
+                vioSafety=s.get('vio_safety', {}),
                 mapStatus='idle')
+
+
+class VioConfirmation(BaseModel):
+    fault_id: int = Field(ge=1, strict=True)
+
+
+class VioFaultRequest(BaseModel):
+    kind: Literal['jump', 'dropout', 'restart']
+    duration: float = Field(2., ge=.5, le=10.)
+
+
+@app.get('/nav/vio')
+def vio_status():
+    return state().get('vio_safety', {})
+
+
+@app.post('/nav/vio/confirm')
+def vio_confirm(req: VioConfirmation):
+    return call('/vio_confirm', req.model_dump())
+
+
+@app.post('/simulation/vio-fault')
+def vio_fault(req: VioFaultRequest):
+    return call('/fault', req.model_dump())
 
 
 @app.get('/device/status')

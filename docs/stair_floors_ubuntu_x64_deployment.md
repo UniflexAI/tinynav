@@ -830,3 +830,21 @@ The 1.2 m flight-width scene now passes full UP 9 and DOWN 9, at platform depths
 initial shaft failure, entry-alignment fix, final-platform fix and retained
 assertions. Run all four focused stair/geometry/noise/control suites (57 tests). [The simulation guide](stair_floors_development_simulation.md)
 has exact commands, runtime pin and interactive BEV instructions.
+
+
+## VIO safety update (2026-11-23)
+
+See [VIO lock, App recovery, bag and fault regression](stair_vio_safety.md).
+This update requires Python/backend/Unitree processes to restart **and** Flutter
+frontend to rebuild. Operate now displays a VIO recovery banner. A meter-scale
+pose jump, VIO restart or stream timeout stops motion and invalidates both local
+maps. Stable inputs alone do not resume motion: the operator confirms in App.
+The App starts one persistent `vio_safety_node` with the same database directory;
+keep `vio_safety.json` across restarts. Do not launch a second guard in the same
+ROS domain. The standalone stair tmux script starts its own guard and must not
+be mixed with the App launcher. Normal Pause/Continue does not acknowledge faults.
+
+The guard checks source timestamps against the ROS clock; synchronize sensor
+and host clocks before a physical run. Recorded older bags lack `/nav/vio_safety`;
+new Operate recordings request 38 topics including it. Offline regression reads
+bags with actuation disabled, rather than replaying them into a robot domain.

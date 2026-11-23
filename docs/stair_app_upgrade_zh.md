@@ -82,3 +82,13 @@ MuJoCo 的 ONNX 步态和知道井口真值的独立断言不会部署到真机�
 一键录包已包含原始传感器、派生 `/slam/*`、`/planning/height_map` 和控制/楼梯状态，无需另开终端补录。**必须同时更新后端并重新构建 Flutter**。文件保存在机器人/后端主机，不会自动下载到浏览器。回传完整 rosbag 目录和 `info.json`，另带实际相机高度/外参、控制模式、任务设置、楼梯尺寸及异常时间点；详见[真机录包文档](stair_floors_physical_trial.md#recording-needed-for-analysis)。
 
 仿真连接下该栏显示自动保存轨迹的提示，现场 rosbag 按钮禁用；仿真 JSON/NPZ 与真机 rosbag 是两种记录。
+
+
+## 2026-11-23：VIO 锁定停车与人工确认
+
+本次需更新 Python 后端、楼梯/规划/控制和 Unitree 进程，并重新构建 Flutter。
+Operate 顶部新增恢复栏；米级跳变、VIO 重启或输入断流后会锁定停车，同时清除
+楼梯图、规划图及旧目标。恢复稳定后仍保持停车，点击 **Confirm VIO recovery**，
+核对现场后再点 **Confirm recovery**。若此前单独暂停了任务，确认后还需正常继续。
+不要通过删状态文件、重启或重发任务绕过锁定。完整规则和验证范围见
+[VIO 安全恢复说明](stair_vio_safety.md)。

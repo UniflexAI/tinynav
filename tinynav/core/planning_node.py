@@ -1,5 +1,6 @@
 import dataclasses
 import time
+import json
 
 import rclpy
 from rclpy.node import Node
@@ -20,6 +21,8 @@ from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
+from tinynav.core.vio_safety import safety_blocked, accept_safety
+from rclpy.qos import DurabilityPolicy, QoSProfile
 
 # === Helper functions ===
 @njit(cache=True)
@@ -302,12 +305,22 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
-def generate_trajectories(init_p, init_q):
+def generate_trajectories(init_p, init_q, fine_forward=False):
     trajectories, params = generate_trajectory_library_3d(
         init_p=init_p, init_q=init_q,
         max_linear_vel=ROBOT_CONFIG.max_linear_vel,
         max_angular_vel=ROBOT_CONFIG.max_angular_vel,
     )
+    if fine_forward:
+        # Reuse the unchanged JIT lattice; retain its first positive speed only.
+        # Arc chords project below arc speed, so leave hardware-minimum margin.
+        fine_speed = 1.2 * ROBOT_CONFIG.min_linear_vel
+        fine, fine_params = generate_trajectory_library_3d(
+            init_p=init_p, init_q=init_q, max_linear_vel=6 * fine_speed,
+            max_angular_vel=ROBOT_CONFIG.max_angular_vel)
+        selected = np.isclose(fine_params[:, 0], fine_speed)
+        trajectories = np.concatenate([trajectories, fine[selected]], axis=0)
+        params = np.concatenate([params, fine_params[selected]], axis=0)
     vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
     trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
     params = np.concatenate([params, vocab_params], axis=0)
@@ -396,12 +409,46 @@ class PlanningNode(Node):
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
+        self._stair_finishing = False
         self._stair_status_time = -float('inf')
         self.create_subscription(String, '/stair/status', self._on_stair_status, 10)
+        self._vio_safety = None
+        self._vio_safety_rx = 0.
+        self._vio_epoch = None
+        self._perception_frames = 0
+        self.create_subscription(String, '/nav/vio_safety', self.vio_safety_callback,
+                                 QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+
+    @property
+    def vio_blocked(self):
+        return safety_blocked(self._vio_safety, self._vio_safety_rx, time.monotonic())
+
+    def vio_safety_callback(self, msg):
+        state = json.loads(msg.data)
+        if not accept_safety(state, self._vio_safety):
+            return
+        epoch = (state['session'], state['epoch'])
+        if epoch != self._vio_epoch:
+            self.occupancy_grid.fill(0.)
+            self.last_T = self.stamp = self.current_pose = self.target_pose = None
+            self.last_stamp = 0.
+            self.smoothed_velocity = 0.
+            self.last_param = (0., 0.)
+            self.reverse_engaged = False
+            self._perception_frames = 0
+            self._vio_epoch = epoch
+            empty = Path()
+            empty.header.stamp = self.get_clock().now().to_msg()
+            empty.header.frame_id = 'world'
+            self.path_pub.publish(empty)
+            self.publish_obstacle_mask(np.zeros(self.grid_shape[:2], dtype=bool), empty.header.stamp)
+            self.publish_height_map(self.origin, np.zeros(self.grid_shape[:2]), empty.header)
+        self._vio_safety, self._vio_safety_rx = state, time.monotonic()
 
     def _on_stair_status(self, msg):
         self._stair_status_time = time.monotonic()
         parts = msg.data.split()
+        self._stair_finishing = len(parts) > 1 and parts[1] == 'finishing'
         pitch = next((p.split('=', 1)[1] for p in parts if p.startswith('pitch=')), '0')
         try:
             pitch = float(pitch)
@@ -423,6 +470,11 @@ class PlanningNode(Node):
         self.target_pose = None
 
     def target_pose_callback(self, msg):
+        if self.vio_blocked:
+            return
+        cutoff = (self._vio_safety or {}).get('accept_after')
+        if cutoff is not None and msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 < cutoff:
+            return
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
 
     def info_callback(self, msg):
@@ -646,6 +698,11 @@ class PlanningNode(Node):
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
+        if self.vio_blocked:
+            return
+        cutoff = (self._vio_safety or {}).get('accept_after')
+        if cutoff is not None and depth_msg.header.stamp.sec + depth_msg.header.stamp.nanosec * 1e-9 < cutoff:
+            return
         if self.K is None:
             return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -659,6 +716,7 @@ class PlanningNode(Node):
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
+            self._perception_frames += 1
 
             # voxel clouds are for RViz only and cost a full pass over the 3D grid every frame
             # self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
@@ -677,10 +735,15 @@ class PlanningNode(Node):
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
             self.publish_footprint(T, depth_msg.header.stamp)
 
+        # One observation cannot exceed the voxel occupancy threshold. Rebuild
+        # from two fresh frames after reset before treating space as navigable.
+        if self._vio_safety is not None and self._perception_frames < 2:
+            return
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_trajectories(init_p, init_q)
+            trajectories, params = generate_trajectories(init_p, init_q,
+                fine_forward=stair and self._stair_finishing)
             self.last_T = T
             self.last_stamp = stamp
 

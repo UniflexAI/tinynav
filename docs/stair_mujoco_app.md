@@ -24,7 +24,8 @@ recording. Open **http://192.168.11.116:18080/** on the server's LAN. The backen
 3. **暂停仿真 / 继续仿真** freeze/resume simulated time. **停止任务** cancels the task;
    continuing a cancelled, failed or validated run is rejected. Start or reset again.
 4. **重置环境（暂停）** applies the selected configuration to a fresh paused world.
-   The reset keeps the current up/down direction. A task can be reset while running.
+   The reset keeps the current up/down direction. A task can be reset while running,
+   except during a latched VIO fault: confirm recovery in Operate first.
 5. **自由视角** permits mouse orbit, wheel zoom and right-drag pan. **跟随机器狗**
    moves the third-person camera with the robot. **全景** positions the camera farther
    away at the robot's current level. These controls do not change physics.
@@ -140,3 +141,31 @@ zero errors/warnings and 37 existing informational lints. All eleven original
 headless safety assertions remain AST-identical to `efc25a2`; live assertions
 remain active. Machine-readable run evidence and deployed fingerprints:
 [validation JSON](validation/stair_mujoco_app_2026_11_21.json).
+
+
+## Injecting VIO faults and recovering in Operate
+
+The simulation now runs the same VIO guard class and ROS callback logic as the
+physical backend. Original App Operate displays its lock/ready state and sends
+an explicit fault-ID confirmation. A normal simulation Resume only unfreezes
+physics; it cannot acknowledge the VIO latch. Locking clears both local maps and
+old targets. Reset/Start and manual drive cannot bypass a lock. A fresh simulation
+world has an in-memory guard; physical deployment uses a persistent state file.
+
+For a controlled simulation-only injection, start an ordinary noisy stair task,
+then call the simulation backend (never a physical deployment):
+
+```bash
+curl -X POST http://192.168.11.116:18081/simulation/vio-fault \
+  -H 'Content-Type: application/json' -d '{"kind":"restart","duration":2}'
+# kind also accepts jump (+2 m estimated X) and dropout (odom/depth silence).
+curl http://192.168.11.116:18081/nav/vio
+```
+
+Wait for the Operate recovery banner to enable **Confirm VIO recovery**, inspect
+the environment, then explicitly confirm. Nothing automatically clicks it in the
+web application. Independent shaft/contact/count/stop assertions stay enabled;
+a failed assertion still stops the simulation and its evidence is retained.
+See [fault regression and physical deployment](stair_vio_safety.md) for exact
+thresholds, test scope and the distinction between software stopping and physical
+SDK/robot stopping distance.

@@ -22,7 +22,7 @@ import numpy as np
 import rclpy
 import viser
 from cv_bridge import CvBridge
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from sim import plant
 from sim.keyboard import ConstantCmd
 from sim.policy import PieOnnxPolicy
@@ -30,6 +30,7 @@ from sim.robots import get_robot
 from sim.runtime import PieRuntime, DepthCamera
 from webviewer import ViserMujocoScene
 from tinynav.core import stair_node, planning_node
+from tinynav.core import vio_safety_node
 from tinynav.core.math_utils import np2msg
 from tinynav.platforms import cmd_vel_control
 from stair_bev_view import render_bev
@@ -37,6 +38,7 @@ from tool.stair_odom_noise import OdomNoise, OdomNoiseConfig
 from tool.stair_sim_control import apply_drive_command
 from tool.stair_app_bridge import StairAppBridge
 from tool.stair_sim_api import SimulationControl
+from tool.stair_vio_fault import VioFault
 
 spec = importlib.util.spec_from_file_location('course', str(ROOT / 'tool/stair_sim_course.py'))
 course = importlib.util.module_from_spec(spec)
@@ -154,7 +156,7 @@ def create_world(n):
     if world:
         if not world.trace_written:
             save_live_trace(world)
-        for node in (world.stair, world.planner, world.control):
+        for node in (world.stair, world.planner, world.control, world.guard):
             node.destroy_node()
         world.camera.close()
         world.rgb_renderer.close()
@@ -186,12 +188,18 @@ def create_world(n):
     stair=stair_node.StairNode(SimpleNamespace(camera_height=.4669,direction=direction,floors=n,landings_per_floor=2,turn='auto',memory=None,rate=2.))
     planner=planning_node.PlanningNode()
     control=cmd_vel_control.CmdVelControlNode()
+    guard=vio_safety_node.VioSafetyNode(source_clock=lambda: float(data.time))
     clock=SimpleNamespace(monotonic=lambda:float(data.time))
-    for module in (stair_node,planning_node,cmd_vel_control): module.time=clock
+    for module in (stair_node,planning_node,cmd_vel_control,vio_safety_node): module.time=clock
+    sim_clock=SimpleNamespace(now=lambda:rclpy.time.Time(seconds=float(data.time)))
+    for node in (stair,planner,control,guard): node.get_clock=lambda:sim_clock
     stair.K=planner.K=np.array([[303.10,0.,269.37],[0.,303.10,314.67],[0.,0.,1.]])
     control._on_nav_active(Bool(data=True))
     w=SimpleNamespace(model=model,data=data,binding=binding,drive=drive,runtime=runtime,camera=camera,stair=stair,planner=planner,control=control,tick=0,status='Ready',outputs=[],min_clearance=float('inf'),floors=n,bev_result={},bev_planner=None,bev_planner_origin=None,bev_mask=None,bev_path=[],bev_cam_z=0.,bev_frames=0)
     w.rgb_renderer, w.rgb_options = rgb_renderer, rgb_options
+    w.guard = guard
+    w.fault = VioFault()
+    w.vio_state = guard.guard.snapshot(float(data.time))
     w.app_bridge = StairAppBridge()
     w.levels,w.scene_flights,w.lane_width,w.landing_depth,w.shaft=levels,scene_flights,lane_width,landing_depth,shaft
     w.direction=direction
@@ -259,6 +267,12 @@ def create_world(n):
         w.app_bridge._on_footprint(msg)
     planner.footprint_pub=SimpleNamespace(publish=capture_footprint)
     control.cmd_pub=SimpleNamespace(publish=lambda msg:w.outputs.__setitem__(slice(None),[msg]))
+    def vio_safety(msg):
+        w.vio_state = json.loads(msg.data)
+        control.vio_safety_callback(msg)
+        planner.vio_safety_callback(msg)
+        stair.vio_safety_callback(msg)
+    guard.state_pub=SimpleNamespace(publish=vio_safety)
     view_model=copy.copy(model)
     if recording_view.value or EMBEDDED:
         original_rgba = model.geom_rgba.copy()
@@ -325,6 +339,8 @@ def apply_api_command(command):
     global world
     action, values = command.action, command.payload
     if action in ('start', 'reset'):
+        if world is not None and world.vio_state.get('locked'):
+            raise ValueError('Confirm VIO recovery before starting or resetting a task')
         scene_choice.value = 'Ten-level narrow'
         floors.options = tuple(str(n) for n in range(1,10))
         direction_choice.value = values['direction']
@@ -343,6 +359,8 @@ def apply_api_command(command):
         pause.value = action == 'reset'
         request['reset'] = False
     elif action == 'teleop':
+        if world.vio_state.get('blocked'):
+            raise ValueError('VIO safety stop; restore inputs and confirm recovery')
         if world.error:
             raise ValueError('Safety assertion stopped simulation; reset first')
         moving=any(values[k] for k in ('linear_x','linear_y','angular_z'))
@@ -360,6 +378,14 @@ def apply_api_command(command):
             world.teleop_until=time.monotonic()+.5
             if moving: pause.value=False
             world.status='manual drive'
+    elif action == 'vio_confirm':
+        ok, reason = world.guard.guard.confirm(values['fault_id'], float(world.data.time))
+        world.guard.publish_state()
+        if not ok:
+            raise ValueError(reason)
+    elif action == 'fault':
+        world.fault = VioFault(values['kind'], float(world.data.time)-world.noise_start, values.get('duration',2.))
+        pause.value = False
     elif action == 'camera':
         recording_view.value = False
         camera_mode.value = values['mode']
@@ -390,16 +416,17 @@ while True:
         try:
             apply_api_command(api_command)
         except Exception as exc:
-            pause.value = True
+            if not world.vio_state.get('locked'): pause.value = True
             api_command.error = str(exc)
             api_command.done.set()
             api_command = None
     if request['reset']:
         request['reset']=False
-        world=create_world(int(floors.value))
-        manual.value=False
-        vx.value=wz.value=0.
-        pause.value=not request['run']
+        if world is None or not world.vio_state.get('locked'):
+            world=create_world(int(floors.value))
+            manual.value=False
+            vx.value=wz.value=0.
+            pause.value=not request['run']
     w=world
     if w.error:
         pause.value=True
@@ -413,6 +440,7 @@ while True:
                 T[:3,3]=w.data.cam_xpos[camid]
                 elapsed = float(w.data.time) - w.noise_start
                 estimated = w.noise.apply(T, elapsed)
+                estimated, deliver, vio_status = w.fault.sample(estimated, elapsed)
                 w.noise_error = w.noise.error(elapsed)
                 w.estimated_position = estimated[:3,3].copy()
                 w.noise_history.append(w.noise_error.copy())
@@ -423,7 +451,12 @@ while True:
                 w.app_bridge._on_slam_odom(pose)
                 raw=w.camera.capture(w.data)
                 depth=bridge.cv2_to_imgmsg(raw,encoding='32FC1'); depth.header=pose.header
-                if not manual.value:
+                w.guard.status_callback(String(data=vio_status))
+                if deliver:
+                    w.guard.pose_callback(pose)
+                    w.guard.depth_callback(depth)
+                w.guard.publish_state()
+                if not manual.value and deliver:
                     w.stair.odom_callback(pose); w.stair.depth_callback(depth,pose)
                 if w.stair.gen.landings != w.last_landing:
                     assert w.stair.gen.landings == w.last_landing + 1, 'Skipped landing count'
@@ -432,9 +465,10 @@ while True:
                     sign = 1 if w.direction == 'up' else -1
                     assert abs(base[2] - sign*1.44*w.last_landing - w.robot.spawn_drop) < .18, ('count height',w.last_landing,base)
                     w.landing_events.append((float(w.data.time)-w.noise_start,w.last_landing,*base))
-                w.control.pose_callback(pose)
+                if deliver: w.control.pose_callback(pose)
                 if w.tick%25==0 and not manual.value: w.stair.timer_callback()
-                with contextlib.redirect_stdout(io.StringIO()): w.planner.sync_callback(depth,pose)
+                if deliver:
+                    with contextlib.redirect_stdout(io.StringIO()): w.planner.sync_callback(depth,pose)
                 if w.tick%10==0:
                     e = w.noise_error
                     noise_text.content = (f'Applied: **{w.noise.config.mode}**, scale={w.noise.config.scale:g}, seed={w.noise.config.seed}\n\n'
@@ -494,6 +528,8 @@ while True:
             w.drive.vy=w.manual_vy if manual.value else 0.
             command = w.outputs[-1] if w.outputs else None
             apply_drive_command(w.drive, command, (vx.value,wz.value) if manual.value else None)
+            if w.vio_state.get('blocked'):
+                w.drive.vx=w.drive.vy=w.drive.wz=0.
             if w.was_paused:
                 w.resume_events.append((w.tick,float(w.data.time),w.drive.vx,w.drive.wz))
             w.was_paused = False
@@ -539,6 +575,7 @@ while True:
                 f'Flight / landing: {w.lane_width:g} / {w.landing_depth:g} m | Odom: {w.noise.config.mode}, {w.noise.config.scale:g}×, seed {w.noise.config.seed}')
         if recording_view.value or EMBEDDED:
             state_text.content = f"t={state['time']:.1f}s | flights **{w.stair.gen.landings}/{w.floors*2}** | v={w.drive.vx:.2f} | yaw={w.drive.wz:.2f}\n\n" + ('**' + w.error + '**' if w.error else ('**ARRIVED · HOLD PASSED**' if w.validated else ('HOLD CHECK' if w.stair.arrived else w.status.split()[1].upper() if len(w.status.split())>1 else w.status)))
+        state['vio_safety'] = w.vio_state
         api.publish(state)
         Path(OUTPUT / 'live-state.json').write_text(json.dumps(state))
         if (w.validated or w.error) and not w.trace_written:

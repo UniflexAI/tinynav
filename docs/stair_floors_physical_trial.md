@@ -5,7 +5,7 @@ see [App upgrade and use (Chinese)](stair_app_upgrade_zh.md). Updating Python
 sources and restarting backend/navigation processes is required in addition to
 rebuilding the ordinary Flutter frontend.
 
-Updated: 2026-11-21. Read alongside
+Updated: 2026-11-23. Read alongside
 [the complete x64 deployment guide](stair_floors_ubuntu_x64_deployment.md).
 
 ## What is and is not deployed
@@ -18,9 +18,10 @@ MuJoCo does not establish this. Real depth/VIO, DDS transport, different frictio
 foot placement and camera mount remain field variables.
 
 The simulation's shaft/contact checker knows world geometry and halts the test.
-It is not present as an independent shaft detector on the robot. This branch's
-Unitree bridge also has no independent command-loss timer watchdog. Verify the
-robot/controller's actual loss-of-command stop and physical stop before stairs.
+It is not present as an independent shaft detector on the robot. The VIO guard now gates both cmd_vel and the Unitree bridge, including a 1 s
+guard-heartbeat timeout. It does not measure physical stopping distance or
+replace a general SDK/DDS command-loss watchdog. Verify the actual controller's
+stop behavior. See [VIO stop and manual recovery](stair_vio_safety.md).
 
 ## Install and connect without starting a stair task
 
@@ -42,7 +43,7 @@ robot/controller's actual loss-of-command stop and physical stop before stairs.
    override that variable; planner camera offsets/body dimensions are separate
    in `robot_specs.py`. Compare stationary floor height, wall direction and VIO
    movement on flat ground before approaching stairs.
-5. Start App with section 8, inspect child logs and `/slam/depth`,
+5. Start App with section 8 (it starts the persistent VIO guard automatically), inspect child logs and `/slam/depth`,
    `/slam/odometry_visual`, `/slam/odometry`, camera_info and targets/paths.
    Keep Unitree disabled while checking outputs. Settings use relative floors:
    one floor normally means two flights, starting on a full-floor platform.
@@ -99,11 +100,11 @@ For an independent inspection, use `ros2 bag info BAG_DIRECTORY`.
 
 ## Recording needed for analysis
 
-The single Operate recorder requests 37 topics: raw left/right/depth/calibration,
+The single Operate recorder requests 38 topics: raw left/right/depth/calibration,
 RGB, synchronized/raw VIO, IMU/status, `/tf` and `/tf_static`, stair command/status/path,
 target/trajectory/obstacle mask, `/cmd_vel`, navigation flags, optional leg/EKF,
 and bridge `/slam/depth`, `/slam/odometry_visual`, `/slam/odometry` plus
-`/planning/height_map`. No second derived-data recorder is needed.
+`/planning/height_map` and `/nav/vio_safety`. No second derived-data recorder is needed.
 `BackendNode.FIELD_RECORD_TOPICS` is the exact versioned list.
 
 `/sportmodestate` is requested as optional native Unitree feedback; it only appears

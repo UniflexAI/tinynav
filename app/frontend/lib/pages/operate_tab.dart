@@ -13,6 +13,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
 import '../widgets/field_record_bar.dart';
+import '../widgets/vio_recovery_bar.dart';
 import 'esdf_colormap_layer.dart';
 import 'local_voxel_painter.dart';
 import 'map_painter.dart';
@@ -147,6 +148,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
     return Column(
       children: [
+        VioRecoveryBar(safety: status?.vioSafety ?? const {}),
         FieldRecordBar(simulated: simulated),
         if (simulated)
           Padding(padding: const EdgeInsets.all(4), child: Text('MuJoCo SIM · front camera + local perception · Stairs starts a fresh task', style: const TextStyle(fontSize: 11, color: Colors.cyanAccent))),

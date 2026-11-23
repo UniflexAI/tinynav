@@ -38,6 +38,7 @@ class DeviceStatus {
   final bool navPaused;
   final String? stairMode; // 'up' | 'down' | null
   final String stairStatus;
+  final Map<String, dynamic> vioSafety;
   final bool fieldRecording;
   final String? fieldRecordPath;
   final double? fieldRecordSeconds;
@@ -55,6 +56,7 @@ class DeviceStatus {
     required this.navPaused,
     this.stairMode,
     this.stairStatus = '',
+    this.vioSafety = const {},
     this.fieldRecording = false,
     this.fieldRecordPath,
     this.fieldRecordSeconds,
@@ -73,6 +75,7 @@ class DeviceStatus {
         navPaused: json['navPaused'] as bool? ?? false,
         stairMode: json['stairMode'] as String?,
         stairStatus: json['stairStatus'] as String? ?? '',
+        vioSafety: Map<String, dynamic>.from(json['vioSafety'] as Map? ?? {}),
         fieldRecording: json['fieldRecording'] as bool? ?? false,
         fieldRecordPath: json['fieldRecordPath'] as String?,
         fieldRecordSeconds: (json['fieldRecordSeconds'] as num?)?.toDouble(),

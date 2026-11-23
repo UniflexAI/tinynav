@@ -1,6 +1,7 @@
 #!/bin/bash
 # Stair mode with the Looper camera: stair_node replaces map_node as the target source.
 # Last pane has the stair command typed but not sent; edit up/down and press Enter.
+# Standalone launch only: do not run alongside the App-managed supervisor.
 # cmd_vel_control only moves while /nav/active is true (normally set by the app).
 
 tmux new-session \; \
@@ -9,6 +10,8 @@ tmux new-session \; \
   select-pane -t 0 \; split-window -v \; \
   select-pane -t 3 \; split-window -v \; \
   select-pane -t 4 \; split-window -v \; \
+  select-pane -t 5 \; split-window -v \; \
+  select-pane -t 6 \; send-keys "uv run python /tinynav/tinynav/core/vio_safety_node.py" C-m \; \
   select-pane -t 0 \; send-keys "uv run python /tinynav/tool/looper_bridge_node.py" C-m \; \
   select-pane -t 1 \; send-keys 'uv run python /tinynav/tinynav/core/planning_node.py' C-m \; \
   select-pane -t 2 \; send-keys "uv run python /tinynav/tinynav/core/stair_node.py" C-m \; \

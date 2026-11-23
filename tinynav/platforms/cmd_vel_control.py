@@ -9,7 +9,9 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 import time
+import json
 from tinynav.core.robot_specs import ROBOT_CONFIG
+from tinynav.core.vio_safety import safety_blocked, accept_safety
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
@@ -79,9 +81,14 @@ class CmdVelControlNode(Node):
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
+        self._stair_finishing = False
         self._stair_status_time = -float('inf')
         self._stair_blocked = False
         self.create_subscription(String, '/stair/status', self._on_stair_status, 10)
+        self._vio_safety = None
+        self._vio_safety_rx = 0.
+        self._vio_epoch = None
+        self.create_subscription(String, '/nav/vio_safety', self.vio_safety_callback, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
     def _on_paused(self, msg: Bool):
@@ -104,13 +111,32 @@ class CmdVelControlNode(Node):
     def _on_stair_status(self, msg):
         self._stair_status_time = time.monotonic()
         parts = msg.data.split()
+        self._stair_finishing = len(parts) > 1 and parts[1] == 'finishing'
         self._stair_blocked = len(parts) > 1 and parts[1] in (
-            'no_seed', 'odom_invalid', 'depth_invalid', 'paused', 'arrived', 'landing', 'stopped')
+            'no_seed', 'odom_invalid', 'depth_invalid', 'paused', 'arrived', 'landing', 'stopped', 'vio_locked', 'vio_wait')
         if self._stair_blocked and self._nav_active:
             self.latest_cmd = Twist()
             self.prev_cmd = Twist()
             self.last_path_update_time = None
             self.cmd_pub.publish(Twist())
+
+    @property
+    def vio_blocked(self):
+        return safety_blocked(getattr(self, '_vio_safety', None), getattr(self, '_vio_safety_rx', 0.), time.monotonic())
+
+    def vio_safety_callback(self, msg):
+        state = json.loads(msg.data)
+        if not accept_safety(state, self._vio_safety):
+            return
+        epoch = (state['session'], state['epoch'])
+        if epoch != self._vio_epoch or state['blocked']:
+            self.latest_cmd = Twist()
+            self.prev_cmd = Twist()
+            self.path = None
+            self.last_path_update_time = None
+            self.cmd_pub.publish(Twist())
+        self._vio_epoch = epoch
+        self._vio_safety, self._vio_safety_rx = state, time.monotonic()
 
     @property
     def stair_mode(self):
@@ -126,6 +152,11 @@ class CmdVelControlNode(Node):
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
+
+        if self.vio_blocked:
+            self.latest_cmd = self.prev_cmd = Twist()
+            self.cmd_pub.publish(Twist())
+            return
 
         if not self._nav_active:
             return
@@ -162,7 +193,7 @@ class CmdVelControlNode(Node):
             return
 
         # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
-        if self.stair_mode and age <= stale_slow_s and target_cmd.linear.x > self.linear_engage_threshold \
+        if self.stair_mode and not self._stair_finishing and age <= stale_slow_s and target_cmd.linear.x > self.linear_engage_threshold \
                 and abs(target_cmd.angular.z) < STAIR_MIN_LINEAR_MAX_TURN:
             target_cmd.linear.x = max(target_cmd.linear.x, STAIR_MIN_LINEAR_VEL)
         max_dv = self.max_linear_acc * dt
@@ -176,7 +207,7 @@ class CmdVelControlNode(Node):
         # Linear x: robot cannot execute tiny non-zero speeds reliably.
         # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
         if 0.0 < out.linear.x < self.min_effective_linear_speed:
-            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed else 0.0
+            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x + 1e-6 >= self.min_effective_linear_speed else 0.0
         elif abs(out.linear.x) < self.min_effective_linear_speed:
             out.linear.x = 0.0
 
@@ -191,6 +222,11 @@ class CmdVelControlNode(Node):
         self.prev_cmd = out
         
     def path_callback(self, msg):
+        if CmdVelControlNode.vio_blocked.fget(self):
+            return
+        cutoff = (getattr(self, '_vio_safety', None) or {}).get('accept_after')
+        if cutoff is not None and msg is not None and msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 < cutoff:
+            return
         if not self._nav_active or (self.stair_mode and self._stair_blocked):
             return
         if msg is None or self.pose is None:

@@ -2,6 +2,9 @@
 
 日期：2026-11-23。分支：`xiaole/stair-floors`。
 
+后续同日增加了 [VIO 锁定与 App 人工恢复](stair_vio_safety.md)，需同时更新后端
+并重新构建 Flutter；本文记录的是较早的控制转换修复及其独立验证。
+
 ## 控制转换修复
 
 五段真机录包暴露了 `cmd_vel_control.path_callback` 的数值问题：

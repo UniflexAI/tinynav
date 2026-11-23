@@ -455,3 +455,103 @@ def test_uncertain_turn_is_visible_and_control_stops(node):
     assert 'turn=auto' in node.status_pub.publish.call_args.args[0].data
     node.target_pub.publish.assert_not_called()
     node.poi_change_pub.publish.assert_called_once()
+
+
+@pytest.mark.parametrize('direction,sign', [('up',1),('down',-1)])
+def test_measured_tread_line_does_not_follow_camera_lateral_sway(direction,sign):
+    cfg=StairConfig(camera_height=.4669,auto_camera_height=False)
+    gen=StairTargetGenerator(cfg);gen.pitch=sign*20.;gen.flight_dir=np.array([1.,0.]);gen.well_side=5.
+    xx,yy=np.meshgrid(np.arange(-1.,3.,.025),np.arange(-.6,.61,.025))
+    zz=np.where(xx<0.,0.,sign*.16*(np.floor(xx/.3)+1))
+    gen.frames.append((0.,np.column_stack((xx.ravel(),yy.ravel(),zz.ravel()))));gen.latest_stamp=0.
+    T=camera_pose(.4669,sign*20);T[0,3]=-.4;T[1,3]=.1
+    first=gen.compute(T,direction)
+    assert first.get('tread_aligned')
+    T[0,3]=.5;T[1,3]=.3;T[2,3]=.4669+sign*.32
+    gen.latest_stamp=.5
+    second=gen.compute(T,direction)
+    assert second.get('tread_aligned') and second['target'][1]<.2
+    gen.frames.clear()
+    assert gen.compute(T,direction)['target'] is None
+    gen.invalidate_world()
+    assert gen.tread_anchor is gen.tread_axis is None
+
+
+def test_sustained_measured_side_wall_confirms_auto_without_lowering_ema_threshold():
+    gen=StairTargetGenerator();gen.pitch=25.;gen.well_side=2.7
+    for t in (0.,.5,1.,1.5):
+        gen._observe_side_wall(1,20,t,True)
+    assert gen.uturn_side==1 and gen.cfg.auto_side_min==3.
+    gen.invalidate_world()
+    assert gen.measured_turn_side==1 and gen.uturn_side==1
+    assert gen.wall_side_candidate is None and gen.tread_axis is None
+    gen.new_run()
+    assert gen.uturn_side==0
+
+
+@pytest.mark.parametrize('pitch,treads,left,right', [(0.,True,1,20),(25.,False,1,20),(25.,True,10,20),(25.,True,0,8)])
+def test_ambiguous_or_unverified_walls_do_not_confirm(pitch,treads,left,right):
+    gen=StairTargetGenerator();gen.pitch=pitch
+    for t in (0.,.5,1.,1.5,2.):gen._observe_side_wall(left,right,t,treads)
+    assert gen.uturn_side==0
+
+
+def test_conflicting_wall_evidence_restarts_confirmation_interval():
+    gen=StairTargetGenerator();gen.pitch=25.
+    for t,l,r in ((0.,1,20),(.5,1,20),(1.,20,1),(1.5,1,20),(2.,1,20)):
+        gen._observe_side_wall(l,r,t,True)
+    assert gen.uturn_side==0
+
+
+def test_final_landing_lattice_can_advance_less_than_coarse_sample():
+    from tinynav.core.planning_node import generate_trajectories, PlanningNode
+    from tinynav.core.robot_specs import ROBOT_CONFIG
+    q=Rotation.from_matrix(camera_pose()[:3,:3]).as_quat()
+    fake=SimpleNamespace(last_param=(0.,0.),in_stair_mode=True)
+    target=np.array([.3,0.,0.])
+    def best(fine):
+        trajectories,params=generate_trajectories(np.zeros(3),q,fine_forward=fine)
+        costs=[PlanningNode.trajectory_cost(fake,t,p,0.,target,False) for t,p in zip(trajectories,params)]
+        return params[np.argmin(costs)]
+    assert best(True)[0]==pytest.approx(1.2*ROBOT_CONFIG.min_linear_vel)
+    assert best(False)[0]!=pytest.approx(ROBOT_CONFIG.min_linear_vel)
+
+
+@pytest.mark.parametrize('phase,expected', [('finishing',.1),('ok',.25)])
+def test_final_landing_does_not_apply_flight_speed_boost(node,monkeypatch,phase,expected):
+    from tinynav.platforms import cmd_vel_control
+    monkeypatch.setattr(cmd_vel_control,'time',SimpleNamespace(monotonic=lambda:10.))
+    control=CmdVelControlNode()
+    try:
+        control.cmd_pub=Mock();control._nav_active=True
+        control._on_stair_status(String(data=f'up {phase} pitch=0'))
+        control.latest_cmd.linear.x=.1-1e-10;control.prev_cmd.linear.x=.1
+        control.last_path_update_time=10.;control.last_cmd_pub_time=9.
+        control.cmd_timer_callback()
+        assert control.cmd_pub.publish.call_args.args[0].linear.x==pytest.approx(expected)
+    finally:control.destroy_node()
+
+
+def test_final_landing_fine_arc_survives_controller_minimum(node,monkeypatch):
+    from tinynav.core.planning_node import generate_trajectories
+    from tinynav.platforms import cmd_vel_control
+    from nav_msgs.msg import Path
+    from geometry_msgs.msg import PoseStamped
+    monkeypatch.setattr(cmd_vel_control,'time',SimpleNamespace(monotonic=lambda:10.))
+    q=Rotation.from_matrix(camera_pose()[:3,:3]).as_quat()
+    trajectories,params=generate_trajectories(np.zeros(3),q,fine_forward=True)
+    index=np.where(np.isclose(params[:,0],.12)&np.isclose(params[:,1],.75))[0][0]
+    path=Path()
+    for xyzq in trajectories[index][::10]:
+        pose=PoseStamped()
+        pose.pose.position.x,pose.pose.position.y,pose.pose.position.z=map(float,xyzq[:3])
+        pose.pose.orientation.x,pose.pose.orientation.y,pose.pose.orientation.z,pose.pose.orientation.w=map(float,xyzq[3:])
+        path.poses.append(pose)
+    control=CmdVelControlNode()
+    try:
+        control.cmd_pub=Mock();control._nav_active=True;control.pose=object()
+        control._on_stair_status(String(data='up finishing pitch=0'))
+        control.path_callback(path);control.last_cmd_pub_time=9.
+        control.cmd_timer_callback()
+        assert .1<=control.cmd_pub.publish.call_args.args[0].linear.x<.15
+    finally:control.destroy_node()

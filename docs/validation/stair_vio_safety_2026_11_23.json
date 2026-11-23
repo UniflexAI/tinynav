@@ -1,0 +1,2307 @@
+{
+  "date": "2026-11-23",
+  "branch": "xiaole/stair-floors",
+  "baseline_commit": "e4daa36005c75d148d8d17da6b127405818c3f28",
+  "passed": true,
+  "source_snapshot": "/home/dm/tinynav-stair-dev/experiments/vio-lock-20261123/release-source-v16",
+  "runtime_source_sha256": {
+    "app/backend/node_manager.py": "77c154ae0ec1cc14cd23d8b6b041056f118ff411f4d85831528b3686aefe55f3",
+    "app/backend/routers/nav.py": "89c700005fbfc2f081bee3f0fc1586e631966639416631ce2c80d61231d1dcd8",
+    "app/backend/simulation_app.py": "b95d0fc59150bfe8ad4a162435ed0e0728c9032773ae5105959bf52e740c794f",
+    "app/frontend/lib/core/models.dart": "fd4900c7e6d90da8313c60bcdc22df5f41d0a3314424826afc2886ead6a08e81",
+    "app/frontend/lib/pages/operate_tab.dart": "1b859aebbaa6c66ecb23eb1127e78f0015cc3c3a218432bb5b0d40945155c425",
+    "tests/test_stair_mode.py": "184e680d14207dcb65f4b9b0ec6bc66887aac37712e062ba5a461169b532db6d",
+    "tinynav/core/planning_node.py": "91217f9d4d67de86c448bbc27f54d127b166cb4b71e07bcf433ba2a70fc95d32",
+    "tinynav/core/stair_node.py": "f5ebed2f12fff7603f6f7c24c660beb8e19fc5e4e29aa6cc84342774046dc784",
+    "tinynav/core/stair_target.py": "e3b825eaa01d731b80bab9f65a8a75447bb797da6b0caf64e509bcbc9327d8ff",
+    "tinynav/platforms/cmd_vel_control.py": "53e98166e02778e3a19586125d2b1050acb6ff369261608189dcb4010dcdc85d",
+    "tinynav/platforms/unitree_control.py": "ed50d8c00f7c89fd69c8c52415875073a9e5b4865f54d6a8551f8c2460b8a485",
+    "tool/stair_live_sim.py": "7b389e24e54cf4e493bddb140c0a0e1d66e7190d565278fa5e69d1f4a6d515aa",
+    "tool/stair_mode_sim.py": "92dc645fa7f1723c1135c6a7815283d1f80719e434fbc9c68c899b3bce2c800c",
+    "tool/stair_sim_api.py": "1e27c58f3a30a1053d22aebcb3b4c7bfba8fb6a01376a39f366ad08e0bf229c0",
+    "app/frontend/lib/widgets/vio_recovery_bar.dart": "e713cfc36fa631004b0f4fb2cdb32ab65d56f82c008f07efb273f6492f032751",
+    "app/frontend/test/vio_recovery_bar_test.dart": "0d276b1bb7605bf7cc0e6619ef900bfa2372b52058eb385d4bf6ed057707a2bd",
+    "tests/test_vio_integration.py": "ef74c2ba67cadfdd2b576719c8f7c9a05fe85218488e43b3bd804a26992e2170",
+    "tests/test_vio_safety.py": "4b4b66bb753662d7870d2c73b61512d4be791a99867178d5daf09fd7f88d150d",
+    "tinynav/core/vio_safety.py": "3def4d4143779c63af3da056e256eb59932453ac8736eee522a044f3d424cccc",
+    "tinynav/core/vio_safety_node.py": "89ddb8c210e3ea1fd467b3c48b7e10e43646f7b406221e17ebc3f761324ce67b",
+    "tool/field_vio_regression.py": "3128cfe71c0ab60fa740b24d4cb7659a8722fcbe47da4ffa2a2c5548c26c4cbf",
+    "tool/stair_vio_fault.py": "d801b9109d20cfd1e4b8af400d7edf2aa06d9ad8292dfc60d935d5ff4ff8b680"
+  },
+  "tests": {
+    "related_python_passed": 177,
+    "unrelated_baseline_failures": [
+      "tests/test_backend.py::test_render_metadata_origin",
+      "tests/test_backend.py::test_odom_yaw_90"
+    ],
+    "baseline_failure_proof": "/home/dm/tinynav-stair-dev/experiments/vio-lock-20261123/release-v9/baseline-backend-tests.log",
+    "full_suite_collection_limit": "Untouched legacy tests import missing uf_find/theta_star; full repository suite was not clean.",
+    "flutter_passed": 10,
+    "flutter_build_passed": true,
+    "flutter_analyze_errors": 0,
+    "flutter_analyze_warnings": 0,
+    "flutter_analyze_infos": 41
+  },
+  "safety_assertions": {
+    "baseline_count": 12,
+    "retained": 12,
+    "current_count": 20,
+    "missing": 0
+  },
+  "bag_scope": "Read-only streaming of original odom/depth/VIO status through supervisor and reset/control callbacks; explicit cache markers test invalidation. Not full perception replanning, actuator replay, or fixed physical trajectories.",
+  "five_bags_vio": {
+    "passed": true,
+    "scope": "Stream real bag timing through the VIO supervisor and map/control reset callbacks.\n\nDoes not replay topics or construct a robot backend/SDK. Cache markers explicitly\nexercise invalidation; this is not full perception replanning or physical replay.\n",
+    "bags": [
+      {
+        "bag": "field_2026_11_23_11_34_58_749972",
+        "messages": 5770,
+        "events": [
+          {
+            "time": 3.552436828613281e-05,
+            "epoch": 1,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "",
+            "cache_markers_present": false
+          },
+          {
+            "time": 16.608148097991943,
+            "epoch": 2,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "pose_jump",
+            "cache_markers_present": true
+          },
+          {
+            "time": 28.842754364013672,
+            "epoch": 3,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "pose_jump",
+            "cache_markers_present": true
+          }
+        ],
+        "blocked_zero_checks": 472,
+        "latched_checks": 0,
+        "final_state": {
+          "session": "9903044b06d54c6289e0b8294eed0868",
+          "epoch": 3,
+          "fault_id": 0,
+          "locked": false,
+          "blocked": false,
+          "ready": false,
+          "reason": "pose_jump",
+          "accept_after": 1795404928.5895867,
+          "vio_status": "TRACKING",
+          "pose_age": 0.0,
+          "depth_age": 0.0676274299621582
+        },
+        "passed": true
+      },
+      {
+        "bag": "field_2026_11_23_11_36_42_835522",
+        "messages": 18227,
+        "events": [
+          {
+            "time": 0.0,
+            "epoch": 1,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "",
+            "cache_markers_present": false
+          },
+          {
+            "time": 4.010587453842163,
+            "epoch": 2,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "pose_jump",
+            "cache_markers_present": true
+          },
+          {
+            "time": 131.67106986045837,
+            "epoch": 3,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "pose_jump",
+            "cache_markers_present": true
+          },
+          {
+            "time": 131.6845908164978,
+            "epoch": 4,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "pose_jump",
+            "cache_markers_present": false
+          },
+          {
+            "time": 137.91165494918823,
+            "epoch": 5,
+            "locked": true,
+            "fault_id": 1,
+            "reason": "meter_jump",
+            "cache_markers_present": true
+          },
+          {
+            "time": 138.48524689674377,
+            "epoch": 6,
+            "locked": true,
+            "fault_id": 1,
+            "reason": "pose_jump",
+            "cache_markers_present": false
+          },
+          {
+            "time": 147.84401488304138,
+            "epoch": 7,
+            "locked": true,
+            "fault_id": 1,
+            "reason": "pose_jump",
+            "cache_markers_present": false
+          },
+          {
+            "time": 147.91982531547546,
+            "epoch": 8,
+            "locked": true,
+            "fault_id": 2,
+            "reason": "meter_jump",
+            "cache_markers_present": false
+          },
+          {
+            "time": 153.3836705684662,
+            "epoch": 9,
+            "locked": true,
+            "fault_id": 2,
+            "reason": "pose_jump",
+            "cache_markers_present": false
+          },
+          {
+            "time": 164.1292085647583,
+            "epoch": 10,
+            "locked": true,
+            "fault_id": 2,
+            "reason": "pose_jump",
+            "cache_markers_present": false
+          },
+          {
+            "time": 166.06946682929993,
+            "epoch": 11,
+            "locked": true,
+            "fault_id": 2,
+            "reason": "pose_jump",
+            "cache_markers_present": false
+          },
+          {
+            "time": 174.41700768470764,
+            "epoch": 12,
+            "locked": true,
+            "fault_id": 3,
+            "reason": "pose_timeout",
+            "cache_markers_present": false
+          },
+          {
+            "time": 174.41700768470764,
+            "epoch": 13,
+            "locked": true,
+            "fault_id": 4,
+            "reason": "vio_restarting",
+            "cache_markers_present": false
+          },
+          {
+            "time": 176.45498609542847,
+            "epoch": 14,
+            "locked": true,
+            "fault_id": 5,
+            "reason": "vio_not_inited",
+            "cache_markers_present": false
+          }
+        ],
+        "blocked_zero_checks": 4329,
+        "latched_checks": 3831,
+        "final_state": {
+          "session": "d848c596ff874b6796261708232de636",
+          "epoch": 14,
+          "fault_id": 5,
+          "locked": true,
+          "blocked": true,
+          "ready": false,
+          "reason": "vio_not_inited",
+          "accept_after": 1795405177.4570868,
+          "vio_status": "NOT_INITED",
+          "pose_age": null,
+          "depth_age": null
+        },
+        "passed": true,
+        "wrong_id_rejected": true,
+        "manual_confirm_accepted_at_recording_end": false
+      },
+      {
+        "bag": "field_2026_11_23_11_41_12_080460",
+        "messages": 12707,
+        "events": [
+          {
+            "time": 0.0,
+            "epoch": 1,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "",
+            "cache_markers_present": false
+          },
+          {
+            "time": 36.531124114990234,
+            "epoch": 2,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "pose_jump",
+            "cache_markers_present": true
+          },
+          {
+            "time": 82.45346069335938,
+            "epoch": 3,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "pose_jump",
+            "cache_markers_present": true
+          },
+          {
+            "time": 84.06519293785095,
+            "epoch": 4,
+            "locked": true,
+            "fault_id": 1,
+            "reason": "meter_jump",
+            "cache_markers_present": false
+          },
+          {
+            "time": 124.73157334327698,
+            "epoch": 5,
+            "locked": false,
+            "fault_id": 1,
+            "reason": "",
+            "cache_markers_present": false
+          }
+        ],
+        "blocked_zero_checks": 4544,
+        "latched_checks": 4146,
+        "final_state": {
+          "session": "987a67810e8d457a91d00d155950e8e1",
+          "epoch": 4,
+          "fault_id": 1,
+          "locked": true,
+          "blocked": true,
+          "ready": true,
+          "reason": "meter_jump",
+          "accept_after": 1795405357.087087,
+          "vio_status": "TRACKING",
+          "pose_age": 0.0,
+          "depth_age": 0.013149499893188477
+        },
+        "passed": true,
+        "wrong_id_rejected": true,
+        "manual_confirm_accepted_at_recording_end": true
+      },
+      {
+        "bag": "field_2026_11_23_11_43_36_358315",
+        "messages": 9313,
+        "events": [
+          {
+            "time": 0.0,
+            "epoch": 1,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "",
+            "cache_markers_present": false
+          }
+        ],
+        "blocked_zero_checks": 6,
+        "latched_checks": 0,
+        "final_state": {
+          "session": "569b00daed024efdb425200fab8e6c35",
+          "epoch": 1,
+          "fault_id": 0,
+          "locked": false,
+          "blocked": false,
+          "ready": false,
+          "reason": "",
+          "accept_after": null,
+          "vio_status": "TRACKING",
+          "pose_age": 0.04714703559875488,
+          "depth_age": 0.0
+        },
+        "passed": true
+      },
+      {
+        "bag": "field_2026_11_23_11_46_11_109325",
+        "messages": 9068,
+        "events": [
+          {
+            "time": 0.0,
+            "epoch": 1,
+            "locked": false,
+            "fault_id": 0,
+            "reason": "",
+            "cache_markers_present": false
+          }
+        ],
+        "blocked_zero_checks": 3,
+        "latched_checks": 0,
+        "final_state": {
+          "session": "869ffe68016647efa0a24240398cd82f",
+          "epoch": 1,
+          "fault_id": 0,
+          "locked": false,
+          "blocked": false,
+          "ready": false,
+          "reason": "",
+          "accept_after": null,
+          "vio_status": "TRACKING",
+          "pose_age": 0.0,
+          "depth_age": 0.031160354614257812
+        },
+        "passed": true
+      }
+    ]
+  },
+  "five_bags_control": {
+    "passed": true,
+    "scope": "Recorded path conversion only; not a closed-loop physical replay",
+    "bags": [
+      {
+        "bag": "field_2026_11_23_11_34_58_749972",
+        "paths": 585,
+        "stationary_paths": 441,
+        "false_reverse_before": 0,
+        "false_reverse_after": 0,
+        "wrong_stationary_yaw_before": 0,
+        "wrong_stationary_yaw_after": 0,
+        "genuine_reverse_paths": 0,
+        "failures": []
+      },
+      {
+        "bag": "field_2026_11_23_11_36_42_835522",
+        "paths": 1389,
+        "stationary_paths": 225,
+        "false_reverse_before": 0,
+        "false_reverse_after": 0,
+        "wrong_stationary_yaw_before": 0,
+        "wrong_stationary_yaw_after": 0,
+        "genuine_reverse_paths": 4,
+        "failures": []
+      },
+      {
+        "bag": "field_2026_11_23_11_41_12_080460",
+        "paths": 1530,
+        "stationary_paths": 154,
+        "false_reverse_before": 0,
+        "false_reverse_after": 0,
+        "wrong_stationary_yaw_before": 0,
+        "wrong_stationary_yaw_after": 0,
+        "genuine_reverse_paths": 0,
+        "failures": []
+      },
+      {
+        "bag": "field_2026_11_23_11_43_36_358315",
+        "paths": 1006,
+        "stationary_paths": 486,
+        "false_reverse_before": 0,
+        "false_reverse_after": 0,
+        "wrong_stationary_yaw_before": 0,
+        "wrong_stationary_yaw_after": 0,
+        "genuine_reverse_paths": 1,
+        "failures": []
+      },
+      {
+        "bag": "field_2026_11_23_11_46_11_109325",
+        "paths": 1142,
+        "stationary_paths": 261,
+        "false_reverse_before": 0,
+        "false_reverse_after": 0,
+        "wrong_stationary_yaw_before": 0,
+        "wrong_stationary_yaw_after": 0,
+        "genuine_reverse_paths": 0,
+        "failures": []
+      }
+    ]
+  },
+  "simulation_full_nine_floors": {
+    "up-none": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 650.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "none",
+        "at": 3.0,
+        "lock_time": null,
+        "confirm_time": null,
+        "rejected_early": false,
+        "rejected_old_id": false
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 366.59999999973803,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.15642919474685482,
+      "stop": [
+        -0.5412401964923123,
+        1.2137715906859206,
+        26.230638728248014
+      ],
+      "hold": [
+        -0.5464016752193454,
+        1.212359504655,
+        26.206109437065567
+      ],
+      "landing_events": [
+        [
+          20.899999999999892,
+          1,
+          2.77264623918247,
+          -0.05202409803650711,
+          1.7468377969430662
+        ],
+        [
+          41.20000000000324,
+          2,
+          -0.36612146307867355,
+          1.241593237259097,
+          3.1945012535221338
+        ],
+        [
+          62.30000000001404,
+          3,
+          2.7757351958821177,
+          0.030731681527348072,
+          4.629442752061558
+        ],
+        [
+          81.69999999999709,
+          4,
+          -0.3640787745783496,
+          1.3172382568950645,
+          6.074254569145731
+        ],
+        [
+          101.29999999997926,
+          5,
+          2.754040070578415,
+          0.0031559599819831422,
+          7.503428924978982
+        ],
+        [
+          121.19999999996116,
+          6,
+          -0.3712917310842607,
+          1.3236967728816704,
+          8.95560955549519
+        ],
+        [
+          141.49999999994273,
+          7,
+          2.730789281928411,
+          0.023695087403343824,
+          10.383215480859656
+        ],
+        [
+          161.39999999992463,
+          8,
+          -0.36441709327388405,
+          1.3421475749736487,
+          11.829307325630413
+        ],
+        [
+          181.39999999990644,
+          9,
+          2.765101633325555,
+          -0.004397548752765398,
+          13.269875553908781
+        ],
+        [
+          200.8999999998887,
+          10,
+          -0.3450740291623389,
+          1.409318928675435,
+          14.700488189504602
+        ],
+        [
+          221.29999999987015,
+          11,
+          2.7391500027148235,
+          0.030956168387265844,
+          16.148637569965125
+        ],
+        [
+          240.4999999998527,
+          12,
+          -0.3346512818296948,
+          1.379744434726744,
+          17.584947199527747
+        ],
+        [
+          262.199999999833,
+          13,
+          2.7629984548087574,
+          0.05337819946035883,
+          19.020527743352396
+        ],
+        [
+          283.1999999998139,
+          14,
+          -0.3345401902913495,
+          1.3457778564192446,
+          20.469637110835052
+        ],
+        [
+          303.3999999997955,
+          15,
+          2.779754339289281,
+          0.14446088165093873,
+          21.90915899909828
+        ],
+        [
+          323.1999999997775,
+          16,
+          -0.3444024961931941,
+          1.2790339678096398,
+          23.35030812217825
+        ],
+        [
+          343.0999999997594,
+          17,
+          2.754589317238707,
+          0.0036518875398820795,
+          24.786220047461654
+        ],
+        [
+          362.8999999997414,
+          18,
+          -0.33582498115441,
+          1.3340980572554704,
+          26.220441050844578
+        ]
+      ],
+      "trace_file": "up-none.trace.npz"
+    },
+    "up-jump": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 650.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "jump",
+        "at": 3.0,
+        "lock_time": 3.099999999999934,
+        "confirm_time": 8.000000000000043,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 375.0999999997303,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.16046077115890323,
+      "stop": [
+        -0.5912579976290318,
+        1.1147687129128685,
+        26.229758072423273
+      ],
+      "hold": [
+        -0.5968771148873576,
+        1.1162237410767437,
+        26.205675524422656
+      ],
+      "landing_events": [
+        [
+          26.299999999998818,
+          1,
+          2.7461560019208577,
+          0.005175399240596536,
+          1.744627106384633
+        ],
+        [
+          47.300000000006364,
+          2,
+          -0.3310978706147122,
+          1.2606969389092357,
+          3.1856652576209394
+        ],
+        [
+          68.00000000000955,
+          3,
+          2.756630324175408,
+          0.03530524186678315,
+          4.628603588731715
+        ],
+        [
+          87.79999999999154,
+          4,
+          -0.34855453761528543,
+          1.244274465831062,
+          6.068379854027608
+        ],
+        [
+          107.79999999997335,
+          5,
+          2.7761250155786787,
+          0.12862878661048366,
+          7.509793941803707
+        ],
+        [
+          127.79999999995518,
+          6,
+          -0.3696843278879063,
+          1.3499351127326977,
+          8.956664877927428
+        ],
+        [
+          147.799999999937,
+          7,
+          2.7706156599732146,
+          0.039298414629992034,
+          10.390383353377548
+        ],
+        [
+          167.39999999991917,
+          8,
+          -0.3674123002203284,
+          1.3577895834205864,
+          11.824177947645998
+        ],
+        [
+          187.19999999990117,
+          9,
+          2.7577821936882723,
+          -0.04174132600253799,
+          13.261210189717294
+        ],
+        [
+          207.5999999998826,
+          10,
+          -0.32061686793469873,
+          1.3698786990151604,
+          14.710200991699029
+        ],
+        [
+          227.99999999986406,
+          11,
+          2.763030138510305,
+          -0.005174478708963907,
+          16.1402423136233
+        ],
+        [
+          248.2999999998456,
+          12,
+          -0.33281373080163595,
+          1.257055094152242,
+          17.584201568346714
+        ],
+        [
+          268.69999999982707,
+          13,
+          2.767685434539423,
+          -0.022067706976539366,
+          19.02260221358901
+        ],
+        [
+          288.599999999809,
+          14,
+          -0.33519417888142944,
+          1.3619513688795086,
+          20.470269844899526
+        ],
+        [
+          309.39999999979005,
+          15,
+          2.7696968380127434,
+          0.03611113900567145,
+          21.911865443226723
+        ],
+        [
+          330.0999999997712,
+          16,
+          -0.3982651417187068,
+          1.2920575820576334,
+          23.358169001841112
+        ],
+        [
+          350.8999999997523,
+          17,
+          2.766752758015902,
+          -0.02504227641659173,
+          24.7892354983815
+        ],
+        [
+          371.39999999973367,
+          18,
+          -0.36168453315924887,
+          1.2732483550060036,
+          26.231086809931426
+        ]
+      ],
+      "trace_file": "up-jump.trace.npz"
+    },
+    "up-dropout": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 650.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "dropout",
+        "at": 3.0,
+        "lock_time": 3.5999999999999233,
+        "confirm_time": 8.000000000000043,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 372.09999999973303,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.18089480084936393,
+      "stop": [
+        -0.544439530254428,
+        1.1670550259101977,
+        26.227411710899023
+      ],
+      "hold": [
+        -0.5483674159136155,
+        1.1700177303383676,
+        26.205549499176765
+      ],
+      "landing_events": [
+        [
+          25.699999999998937,
+          1,
+          2.725808126093547,
+          -0.006245294127605056,
+          1.7362763465438413
+        ],
+        [
+          45.800000000005596,
+          2,
+          -0.3700104916755564,
+          1.3337263162850492,
+          3.1897485663322067
+        ],
+        [
+          65.300000000012,
+          3,
+          2.7454224796849798,
+          -0.010965712943018494,
+          4.629831375244267
+        ],
+        [
+          86.2999999999929,
+          4,
+          -0.36368078492925593,
+          1.282148881589319,
+          6.06384536714575
+        ],
+        [
+          106.1999999999748,
+          5,
+          2.7502418288495334,
+          -0.03453099165671676,
+          7.49466578932862
+        ],
+        [
+          125.9999999999568,
+          6,
+          -0.3329382496912169,
+          1.3353304527550414,
+          8.9561020933496
+        ],
+        [
+          145.6999999999389,
+          7,
+          2.7308656222625567,
+          -0.04764206396608067,
+          10.388737770572057
+        ],
+        [
+          165.19999999992118,
+          8,
+          -0.3516215854349799,
+          1.3344786988788195,
+          11.826890019008776
+        ],
+        [
+          185.79999999990244,
+          9,
+          2.7778742616054624,
+          0.02780891588059117,
+          13.273753767645266
+        ],
+        [
+          205.69999999988434,
+          10,
+          -0.34272496831534005,
+          1.3294126665988066,
+          14.70624003536951
+        ],
+        [
+          227.1999999998648,
+          11,
+          2.778327157188153,
+          0.17465882472558777,
+          16.15639325445861
+        ],
+        [
+          246.49999999984723,
+          12,
+          -0.3340063205290309,
+          1.365142785373693,
+          17.587159747168098
+        ],
+        [
+          267.7999999998279,
+          13,
+          2.743352570032499,
+          0.027065227780769426,
+          19.029764263620816
+        ],
+        [
+          287.39999999981006,
+          14,
+          -0.3381146780854691,
+          1.392912904257259,
+          20.470693213849625
+        ],
+        [
+          307.8999999997914,
+          15,
+          2.7556073477593843,
+          -0.0007991852102660956,
+          21.912039818660347
+        ],
+        [
+          327.2999999997738,
+          16,
+          -0.3316185706266881,
+          1.4369609780378068,
+          23.34306591309981
+        ],
+        [
+          347.99999999975495,
+          17,
+          2.7786475769461507,
+          0.01421788955072128,
+          24.787549888828895
+        ],
+        [
+          368.89999999973594,
+          18,
+          -0.34963047254706664,
+          1.2897731568673434,
+          26.225457853857314
+        ]
+      ],
+      "trace_file": "up-dropout.trace.npz"
+    },
+    "up-restart": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 650.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "restart",
+        "at": 3.0,
+        "lock_time": 3.099999999999934,
+        "confirm_time": 8.000000000000043,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 373.0999999997321,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.16046077115890323,
+      "stop": [
+        -0.6104208166071942,
+        1.2012350156416445,
+        26.230025155442515
+      ],
+      "hold": [
+        -0.6223626370384776,
+        1.2037278948212105,
+        26.207641007913463
+      ],
+      "landing_events": [
+        [
+          26.299999999998818,
+          1,
+          2.7461560019208577,
+          0.005175399240596536,
+          1.744627106384633
+        ],
+        [
+          47.300000000006364,
+          2,
+          -0.3310978706147122,
+          1.2606969389092357,
+          3.1856652576209394
+        ],
+        [
+          68.00000000000955,
+          3,
+          2.756630324175408,
+          0.03530524186678315,
+          4.628603588731715
+        ],
+        [
+          87.79999999999154,
+          4,
+          -0.34855453761528543,
+          1.244274465831062,
+          6.068379854027608
+        ],
+        [
+          107.79999999997335,
+          5,
+          2.7761250155786787,
+          0.12862878661048366,
+          7.509793941803707
+        ],
+        [
+          127.79999999995518,
+          6,
+          -0.3696843278879063,
+          1.3499351127326977,
+          8.956664877927428
+        ],
+        [
+          147.799999999937,
+          7,
+          2.7706156599732146,
+          0.039298414629992034,
+          10.390383353377548
+        ],
+        [
+          167.39999999991917,
+          8,
+          -0.3674123002203284,
+          1.3577895834205864,
+          11.824177947645998
+        ],
+        [
+          187.19999999990117,
+          9,
+          2.7577821936882723,
+          -0.04174132600253799,
+          13.261210189717294
+        ],
+        [
+          207.5999999998826,
+          10,
+          -0.32061686793469873,
+          1.3698786990151604,
+          14.710200991699029
+        ],
+        [
+          227.99999999986406,
+          11,
+          2.7744041135302777,
+          -0.0009743895170978788,
+          16.150749404243694
+        ],
+        [
+          247.69999999984614,
+          12,
+          -0.3573265560454871,
+          1.339765724142719,
+          17.590078878674092
+        ],
+        [
+          266.9999999998286,
+          13,
+          2.775368734722326,
+          0.003436437407723272,
+          19.02174677678468
+        ],
+        [
+          287.19999999981025,
+          14,
+          -0.34490476893445265,
+          1.2607272188076661,
+          20.47310560175232
+        ],
+        [
+          307.3999999997919,
+          15,
+          2.751447188879338,
+          -0.014518217006611484,
+          21.905608200842796
+        ],
+        [
+          326.89999999977414,
+          16,
+          -0.36577497918264795,
+          1.3113495735460585,
+          23.34265460867639
+        ],
+        [
+          347.3999999997555,
+          17,
+          2.7429947750816734,
+          -0.009339123092966908,
+          24.789585448094137
+        ],
+        [
+          368.89999999973594,
+          18,
+          -0.34985548076186895,
+          1.3587795061437333,
+          26.22493996288937
+        ]
+      ],
+      "trace_file": "up-restart.trace.npz"
+    },
+    "down-none": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 650.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "none",
+        "at": 3.0,
+        "lock_time": null,
+        "confirm_time": null,
+        "rejected_early": false,
+        "rejected_old_id": false
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 375.59999999972985,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.1036854017576329,
+      "stop": [
+        -0.7079990782422599,
+        1.0331189582069296,
+        -25.608766174881474
+      ],
+      "hold": [
+        -0.7130138578026033,
+        1.0305448396889814,
+        -25.63265956335407
+      ],
+      "landing_events": [
+        [
+          26.8999999999987,
+          1,
+          2.8483101642573496,
+          0.03730473802725465,
+          -1.1324819891013205
+        ],
+        [
+          46.70000000000606,
+          2,
+          -0.43414193675377505,
+          1.297077798793606,
+          -2.5705212576145495
+        ],
+        [
+          67.20000000001028,
+          3,
+          2.793348093468076,
+          -0.012626619102696269,
+          -4.016933925619613
+        ],
+        [
+          87.59999999999172,
+          4,
+          -0.4399071323513986,
+          1.365314613833873,
+          -5.445602531068304
+        ],
+        [
+          107.89999999997326,
+          5,
+          2.806915542403641,
+          0.019595597978105506,
+          -6.908955082396902
+        ],
+        [
+          128.29999999995474,
+          6,
+          -0.4415338786254831,
+          1.3256822114855178,
+          -8.331343096673958
+        ],
+        [
+          148.69999999993618,
+          7,
+          2.791675970958603,
+          -0.036679135024129665,
+          -9.779093036188966
+        ],
+        [
+          168.59999999991808,
+          8,
+          -0.4349146573601697,
+          1.2863962201004502,
+          -11.204074312206615
+        ],
+        [
+          189.49999999989907,
+          9,
+          2.7712760786518995,
+          -0.031472694067714295,
+          -12.656248649314678
+        ],
+        [
+          209.29999999988107,
+          10,
+          -0.4273072362501462,
+          1.243787407046029,
+          -14.090771670143814
+        ],
+        [
+          229.29999999986288,
+          11,
+          2.8058092770877887,
+          0.012487396535304892,
+          -15.537668552773102
+        ],
+        [
+          248.2999999998456,
+          12,
+          -0.43938740986669844,
+          1.249225860032741,
+          -16.971426215676374
+        ],
+        [
+          268.49999999982725,
+          13,
+          2.768372054329204,
+          -0.03178707198652737,
+          -18.41178377585337
+        ],
+        [
+          288.599999999809,
+          14,
+          -0.42951723923397406,
+          1.3673606616607314,
+          -19.844090366141238
+        ],
+        [
+          310.0999999997894,
+          15,
+          2.795719209672495,
+          -0.01624026585384629,
+          -21.299902843681064
+        ],
+        [
+          329.29999999977196,
+          16,
+          -0.4432155481301602,
+          1.2180014476149261,
+          -22.728554640334377
+        ],
+        [
+          350.29999999975286,
+          17,
+          2.800662925969907,
+          -0.010352641095669945,
+          -24.1864222619529
+        ],
+        [
+          370.6999999997343,
+          18,
+          -0.4362853337854386,
+          1.3353589950014066,
+          -25.611957774456133
+        ]
+      ],
+      "trace_file": "down-none.trace.npz"
+    },
+    "down-jump": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 650.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "jump",
+        "at": 3.0,
+        "lock_time": 3.099999999999934,
+        "confirm_time": 8.000000000000043,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 379.09999999972666,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.08127556552603266,
+      "stop": [
+        -0.6948356022054836,
+        1.0530231728785104,
+        -25.611940991333555
+      ],
+      "hold": [
+        -0.7101094919602993,
+        1.0488106699546318,
+        -25.631620213645633
+      ],
+      "landing_events": [
+        [
+          32.29999999999869,
+          1,
+          2.8281221746508036,
+          0.10463150159721782,
+          -1.1299412362098662
+        ],
+        [
+          52.500000000009024,
+          2,
+          -0.41562589783475107,
+          1.3799715599408036,
+          -2.5641552019314737
+        ],
+        [
+          73.10000000000491,
+          3,
+          2.7911789168147867,
+          -0.02484546900223056,
+          -4.01941993214036
+        ],
+        [
+          92.29999999998745,
+          4,
+          -0.44106803866086425,
+          1.2105643105217792,
+          -5.452257598664594
+        ],
+        [
+          113.99999999996771,
+          5,
+          2.8203697366144533,
+          -0.04307213314158251,
+          -6.909555107853523
+        ],
+        [
+          133.69999999994982,
+          6,
+          -0.43322519351411926,
+          1.1721123419751907,
+          -8.33153729489997
+        ],
+        [
+          154.69999999993072,
+          7,
+          2.787750184474214,
+          -0.002881023000273829,
+          -9.776165450338716
+        ],
+        [
+          174.59999999991263,
+          8,
+          -0.452196995673437,
+          1.3111668026141432,
+          -11.204109244302124
+        ],
+        [
+          195.59999999989353,
+          9,
+          2.7912989135365427,
+          0.021769705856333636,
+          -12.66265332764214
+        ],
+        [
+          215.89999999987506,
+          10,
+          -0.4203797005743268,
+          1.3279090229970196,
+          -14.092749330337632
+        ],
+        [
+          236.2999999998565,
+          11,
+          2.827450305144335,
+          0.09134415951023876,
+          -15.531765019301611
+        ],
+        [
+          255.99999999983862,
+          12,
+          -0.396800838443478,
+          1.3231246664849625,
+          -16.977910924472337
+        ],
+        [
+          275.8999999998205,
+          13,
+          2.8324625531964034,
+          0.15574319313666976,
+          -18.410059034971226
+        ],
+        [
+          295.6999999998025,
+          14,
+          -0.4400313797246266,
+          1.3028465142618688,
+          -19.853654434549362
+        ],
+        [
+          315.6999999997843,
+          15,
+          2.817278346850196,
+          -0.010104733028170457,
+          -21.28640924378937
+        ],
+        [
+          334.69999999976704,
+          16,
+          -0.43107561247982634,
+          1.23988042224266,
+          -22.73145946379327
+        ],
+        [
+          355.2999999997483,
+          17,
+          2.8049249644327907,
+          -0.008941366391140805,
+          -24.1700642850766
+        ],
+        [
+          374.299999999731,
+          18,
+          -0.424888335751502,
+          1.320468281394073,
+          -25.61126199733608
+        ]
+      ],
+      "trace_file": "down-jump.trace.npz"
+    },
+    "down-dropout": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 650.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "dropout",
+        "at": 3.0,
+        "lock_time": 3.5999999999999233,
+        "confirm_time": 8.000000000000043,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 378.0999999997276,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.08566090306444825,
+      "stop": [
+        -0.7171358263507182,
+        0.9730930193195837,
+        -25.607223491087044
+      ],
+      "hold": [
+        -0.7233448118714958,
+        0.9695509630001358,
+        -25.632895726419907
+      ],
+      "landing_events": [
+        [
+          31.699999999998383,
+          1,
+          2.7858705037740568,
+          0.09044486475571216,
+          -1.137894458422125
+        ],
+        [
+          52.10000000000882,
+          2,
+          -0.43378386249007456,
+          1.3098366989247057,
+          -2.572262982535314
+        ],
+        [
+          73.10000000000491,
+          3,
+          2.7924461703487258,
+          -0.047911408008987716,
+          -4.019086794555133
+        ],
+        [
+          91.699999999988,
+          4,
+          -0.43682224596464125,
+          1.172700555219625,
+          -5.448644719180351
+        ],
+        [
+          112.19999999996935,
+          5,
+          2.7946430594508316,
+          -0.04164208585540743,
+          -6.896757934882732
+        ],
+        [
+          131.89999999995146,
+          6,
+          -0.4326181039279421,
+          1.2752658688500051,
+          -8.330984719530804
+        ],
+        [
+          152.89999999993236,
+          7,
+          2.8063813356838967,
+          -0.03498601192311299,
+          -9.789266789081731
+        ],
+        [
+          172.69999999991435,
+          8,
+          -0.44034287322215737,
+          1.2694084331812574,
+          -11.211653516819839
+        ],
+        [
+          192.9999999998959,
+          9,
+          2.7657015596556866,
+          -0.05389871546546069,
+          -12.65462529630342
+        ],
+        [
+          212.29999999987834,
+          10,
+          -0.43979095606374863,
+          1.254354003012997,
+          -14.090813316217847
+        ],
+        [
+          233.29999999985924,
+          11,
+          2.8485182433002305,
+          -0.025156710070211093,
+          -15.5333125138888
+        ],
+        [
+          253.09999999984123,
+          12,
+          -0.4254341265972525,
+          1.288372557964115,
+          -16.97144891828164
+        ],
+        [
+          273.6999999998225,
+          13,
+          2.8139859598684684,
+          -0.012629639686621626,
+          -18.406693651216212
+        ],
+        [
+          292.0999999998058,
+          14,
+          -0.40213083521207815,
+          1.2621876233641083,
+          -19.861365571992362
+        ],
+        [
+          313.0999999997867,
+          15,
+          2.7769251559253316,
+          -0.07469227083522782,
+          -21.296318892005807
+        ],
+        [
+          332.8999999997687,
+          16,
+          -0.44968765588062826,
+          1.2785723919576584,
+          -22.73171950603103
+        ],
+        [
+          353.8999999997496,
+          17,
+          2.8461913014779974,
+          -0.005836795059137116,
+          -24.17268223721217
+        ],
+        [
+          373.0999999997321,
+          18,
+          -0.4291258455102514,
+          1.2835311795721265,
+          -25.610744396777758
+        ]
+      ],
+      "trace_file": "down-dropout.trace.npz"
+    },
+    "down-restart": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 650.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "restart",
+        "at": 3.0,
+        "lock_time": 3.099999999999934,
+        "confirm_time": 8.000000000000043,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 380.5999999997253,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.09110125962115145,
+      "stop": [
+        -0.6881667464127278,
+        1.0339990420126237,
+        -25.614651171857272
+      ],
+      "hold": [
+        -0.691170084334329,
+        1.0286448753209925,
+        -25.63342374039809
+      ],
+      "landing_events": [
+        [
+          32.29999999999869,
+          1,
+          2.8281221746508036,
+          0.10463150159721782,
+          -1.1299412362098662
+        ],
+        [
+          52.500000000009024,
+          2,
+          -0.41562589783475107,
+          1.3799715599408036,
+          -2.5641552019314737
+        ],
+        [
+          73.10000000000491,
+          3,
+          2.7911789168147867,
+          -0.02484546900223056,
+          -4.01941993214036
+        ],
+        [
+          92.8999999999869,
+          4,
+          -0.4463683228131602,
+          1.182228878624398,
+          -5.449976095200143
+        ],
+        [
+          113.29999999996835,
+          5,
+          2.8210255391171897,
+          0.035455130446947807,
+          -6.892453854397566
+        ],
+        [
+          132.49999999995092,
+          6,
+          -0.4457178220204781,
+          1.2776733098011068,
+          -8.330035341438723
+        ],
+        [
+          153.59999999993173,
+          7,
+          2.7564531165698756,
+          -0.03521447406806019,
+          -9.766372423915406
+        ],
+        [
+          173.99999999991317,
+          8,
+          -0.43052176834566885,
+          1.2443108779723766,
+          -11.206993061180695
+        ],
+        [
+          194.39999999989462,
+          9,
+          2.8255180359537353,
+          0.09970644712075744,
+          -12.648083156477467
+        ],
+        [
+          214.0999999998767,
+          10,
+          -0.4326141317084286,
+          1.3049563927606866,
+          -14.090209806342445
+        ],
+        [
+          235.0999999998576,
+          11,
+          2.791834905920339,
+          -0.008517263164684291,
+          -15.540052004624236
+        ],
+        [
+          254.29999999984014,
+          12,
+          -0.43114520303480275,
+          1.2391896314924207,
+          -16.970094833258745
+        ],
+        [
+          275.29999999982107,
+          13,
+          2.8413386967097156,
+          -0.024594608739126146,
+          -18.41203461709863
+        ],
+        [
+          294.4999999998036,
+          14,
+          -0.4301091690797661,
+          1.238796243766078,
+          -19.85035330598542
+        ],
+        [
+          315.89999999978414,
+          15,
+          2.7842412400597754,
+          -0.047178186079871474,
+          -21.298746269628623
+        ],
+        [
+          335.2999999997665,
+          16,
+          -0.4442160709722209,
+          1.2152917407594714,
+          -22.730455556903518
+        ],
+        [
+          356.2999999997474,
+          17,
+          2.8221924930999247,
+          -0.055283957497570056,
+          -24.173358587989814
+        ],
+        [
+          376.0999999997294,
+          18,
+          -0.4261986594095737,
+          1.2924165320634668,
+          -25.611134922254614
+        ]
+      ],
+      "trace_file": "down-restart.trace.npz"
+    }
+  },
+  "simulation_midflight_one_floor": {
+    "midflight-up-jump": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 1,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 120.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "jump",
+        "at": 15.0,
+        "lock_time": 15.000000000001066,
+        "confirm_time": 20.00000000000007,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 50.60000000000805,
+      "landings": 2,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.17269334264082498,
+      "stop": [
+        -0.5735090516568077,
+        1.2431065078180885,
+        3.1879951039994676
+      ],
+      "hold": [
+        -0.5774878135770815,
+        1.2395275853450276,
+        3.1660208819613413
+      ],
+      "landing_events": [
+        [
+          26.399999999998798,
+          1,
+          2.75426945392703,
+          0.0417981127657622,
+          1.7487257679189845
+        ],
+        [
+          46.80000000000611,
+          2,
+          -0.3664481803343318,
+          1.344310390364244,
+          3.195829319537269
+        ]
+      ],
+      "trace_file": "midflight-up-jump.trace.npz"
+    },
+    "midflight-up-dropout": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 1,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 120.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "dropout",
+        "at": 15.0,
+        "lock_time": 15.500000000000966,
+        "confirm_time": 20.00000000000007,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 51.10000000000831,
+      "landings": 2,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.17269334264082498,
+      "stop": [
+        -0.6261013855213987,
+        1.2963892534563277,
+        3.196932964659016
+      ],
+      "hold": [
+        -0.6325584207231737,
+        1.2954860317428176,
+        3.167895090566342
+      ],
+      "landing_events": [
+        [
+          25.699999999998937,
+          1,
+          2.746826442321156,
+          0.10500708285026247,
+          1.7446416570594028
+        ],
+        [
+          46.4000000000059,
+          2,
+          -0.33407724155873575,
+          1.4104568833649953,
+          3.1862535568023462
+        ]
+      ],
+      "trace_file": "midflight-up-dropout.trace.npz"
+    },
+    "midflight-up-restart": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 1,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 120.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "restart",
+        "at": 15.0,
+        "lock_time": 15.000000000001066,
+        "confirm_time": 20.00000000000007,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 50.60000000000805,
+      "landings": 2,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.17269334264082498,
+      "stop": [
+        -0.5735090516568077,
+        1.2431065078180885,
+        3.1879951039994676
+      ],
+      "hold": [
+        -0.5774878135770815,
+        1.2395275853450276,
+        3.1660208819613413
+      ],
+      "landing_events": [
+        [
+          26.399999999998798,
+          1,
+          2.75426945392703,
+          0.0417981127657622,
+          1.7487257679189845
+        ],
+        [
+          46.80000000000611,
+          2,
+          -0.3664481803343318,
+          1.344310390364244,
+          3.195829319537269
+        ]
+      ],
+      "trace_file": "midflight-up-restart.trace.npz"
+    },
+    "midflight-down-jump": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 1,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 120.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "jump",
+        "at": 15.0,
+        "lock_time": 15.000000000001066,
+        "confirm_time": 20.00000000000007,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 57.10000000001138,
+      "landings": 2,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.1370073961616735,
+      "stop": [
+        -0.7463579471850079,
+        0.9071584749836213,
+        -2.5684170299913234
+      ],
+      "hold": [
+        -0.7538389744760208,
+        0.903631364266134,
+        -2.592744718489361
+      ],
+      "landing_events": [
+        [
+          32.29999999999869,
+          1,
+          2.8289769793332513,
+          -0.0026325604288181363,
+          -1.1308795641729414
+        ],
+        [
+          51.50000000000851,
+          2,
+          -0.4363143881215195,
+          1.2661478317013737,
+          -2.56978265323926
+        ]
+      ],
+      "trace_file": "midflight-down-jump.trace.npz"
+    },
+    "midflight-down-dropout": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 1,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 120.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "dropout",
+        "at": 15.0,
+        "lock_time": 15.500000000000966,
+        "confirm_time": 20.00000000000007,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 56.60000000001112,
+      "landings": 2,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.13620080593711917,
+      "stop": [
+        -0.7164472904109254,
+        1.0107825764576692,
+        -2.5753581934131033
+      ],
+      "hold": [
+        -0.7180881073817791,
+        1.0045725235587817,
+        -2.5926406332577043
+      ],
+      "landing_events": [
+        [
+          31.699999999998383,
+          1,
+          2.7885092206943387,
+          -0.02319181245546674,
+          -1.1377367750021448
+        ],
+        [
+          51.50000000000851,
+          2,
+          -0.4308915796699371,
+          1.2710869539016445,
+          -2.569878891608402
+        ]
+      ],
+      "trace_file": "midflight-down-dropout.trace.npz"
+    },
+    "midflight-down-restart": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 1,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 120.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "restart",
+        "at": 15.0,
+        "lock_time": 15.000000000001066,
+        "confirm_time": 20.00000000000007,
+        "rejected_early": true,
+        "rejected_old_id": true
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 56.100000000010866,
+      "landings": 2,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.1404081661777859,
+      "stop": [
+        -0.6815824964356675,
+        1.0669726596041742,
+        -2.5712005156559283
+      ],
+      "hold": [
+        -0.6961363823466382,
+        1.0649434138834382,
+        -2.5924867181820987
+      ],
+      "landing_events": [
+        [
+          32.29999999999869,
+          1,
+          2.8289769793332513,
+          -0.0026325604288181363,
+          -1.1308795641729414
+        ],
+        [
+          51.50000000000851,
+          2,
+          -0.4275989450126787,
+          1.2871906174002687,
+          -2.5706679987441805
+        ]
+      ],
+      "trace_file": "midflight-down-restart.trace.npz"
+    }
+  },
+  "simulation_scope": "combined scale .5 seed 7, 1.2 m flight and platform; full matrix injects at 3 s, extra one-floor tasks inject at 15 s while pitched. Human acknowledgement explicitly simulated by harness. No truth pose jumps, no removed safety assertions.",
+  "app_acceptance": {
+    "original_app_port": 18083,
+    "isolated_backend_port": 18086,
+    "locked_while_recovered": true,
+    "keep_stopped_preserved_lock": true,
+    "explicit_confirmation_rebuilt_maps_and_resumed": true,
+    "preview_stopped_after_trace_save": true,
+    "proof_artifacts": "/home/dm/tinynav-stair-dev/experiments/vio-lock-20261123/release"
+  },
+  "prior_failed_evidence": [
+    "release/up-none.json",
+    "release/up-jump.json",
+    "release/up-dropout.json",
+    "release/up-restart.json",
+    "release-v9/midflight-up-dropout.json",
+    "release-v10/midflight-up-dropout.json",
+    "release-v11/midflight-up-dropout.json",
+    "release-v12/midflight-up-dropout.json",
+    "release-v13/midflight-up-dropout.json",
+    "release-v14/midflight-up-dropout.json"
+  ],
+  "evidence_root": "/home/dm/tinynav-stair-dev/experiments/vio-lock-20261123",
+  "physical_sdk_or_robot_tested": false,
+  "known_limitations": [
+    "Five bags include manual intervention with no exact takeover timestamps.",
+    "Slow drift, pure attitude jumps and all calibration failures are not covered.",
+    "SDK/DDS delay and real braking distance are unmeasured.",
+    "Open-door landing problems from previous validation remain unvalidated/unresolved."
+  ]
+}
