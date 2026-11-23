@@ -22,6 +22,7 @@ class StairConfig:
     resolution: float = 0.05
     half_size: float = 3.0          # local map spans robot +- half_size [m]
     memory_s: float = 3.0           # keep points seen within the last memory_s seconds
+    final_memory_s: float = 6.0     # final step-in: retain measured floor while it passes into the camera blind zone
     camera_height: float = 0.66     # camera optical center above the ground it stands on (initial value) ...
     auto_camera_height: bool = True # ... re-measured on flat ground from the floor in the depth image: a wrong value
                                     # puts the feet on the step below and ends a flight early
@@ -212,6 +213,8 @@ class StairTargetGenerator:
         self.search_progress = None
         self.search_recovery_until = -np.inf
         self.stalled_goal = None
+        self.finishing = False
+        self.landing_waiting_for_turn = False
 
     def add_pose(self, stamp, position):
         """Feed every raw odometry pose (e.g. 100 Hz), not only the ones matched to depth."""
@@ -268,7 +271,8 @@ class StairTargetGenerator:
         self._update_pitch(stamp, T_cam_to_world)
         points = depth_to_world_points(depth_m, K, T_cam_to_world, self.cfg)
         self.frames.append((stamp, points))
-        while self.frames and stamp - self.frames[0][0] > self.cfg.memory_s:
+        memory_s = max(self.cfg.memory_s, self.cfg.final_memory_s) if self.finishing else self.cfg.memory_s
+        while self.frames and stamp - self.frames[0][0] > memory_s:
             self.frames.popleft()
         if self.cfg.auto_camera_height:
             self._measure_camera_height(points, T_cam_to_world[:3, 3])
@@ -357,6 +361,8 @@ class StairTargetGenerator:
         self.search_progress = None
         self.search_recovery_until = -np.inf
         self.stalled_goal = None
+        self.finishing = False
+        self.landing_waiting_for_turn = False
 
     def reset(self):
         self.frames.clear()
@@ -396,6 +402,7 @@ class StairTargetGenerator:
         returns 'finishing' while advancing and finished=True once clear of the last pitched pose."""
         cfg = self.cfg
         assert direction in ('up', 'down')
+        self.finishing = finish_landing
         cam = T_cam_to_world[:3, 3]
         points = np.concatenate([p for _, p in self.frames]) if self.frames else np.zeros((0, 3))
         height, obstacle, observed, origin = build_height_map(points, cam[:2], cam[2], cfg)
@@ -409,6 +416,9 @@ class StairTargetGenerator:
         clearance = distance_transform_edt(~obstacle) * cfg.resolution
         cost = 1.0 + cfg.clearance_weight / np.maximum(clearance, cfg.resolution)
         out = dict(height=height, obstacle=obstacle, free=free, origin=origin, target=None, goal=None, path=None)
+        if self.landing_waiting_for_turn and not finish_landing:
+            out.update(status='landing', reason='turn_uncertain')
+            return out
 
         ground_z = cam[2] - self.camera_height
         n = height.shape[0]
@@ -580,6 +590,12 @@ class StairTargetGenerator:
             # landing: nothing better is visible, explore the frontier on the stairwell side. Sides are taken
             # w.r.t. the last flight, not the camera, which keeps turning on the landing. Targets keep clear of
             # walls, and a chosen one is kept for a while so the target does not jump around.
+            if self.flight_done and not self.on_flight and self.flight_dir is not None and self.uturn_side == 0:
+                # A corridor opening is traversable floor, not evidence of the next flight.
+                self.landing_waiting_for_turn = True
+                self.last_status, self.search_goal, self.ok_goal = 'landing', None, None
+                out.update(status='landing', reason='turn_uncertain')
+                return out
             out['status'] = 'search'
             self.ok_goal = None
             fwd = self.flight_dir if self.flight_dir is not None else fwd

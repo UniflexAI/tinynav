@@ -31,6 +31,8 @@ parser.add_argument("--levels", type=int, choices=range(2, 52),
                     help="Number of full-floor platforms; default: task floors + 1")
 parser.add_argument("--flight-width", type=float, help="Clear stair flight width in meters")
 parser.add_argument("--landing-depth", type=float, default=1.75)
+parser.add_argument('--open-landing', action='append', type=int, default=[], metavar='FLIGHT',
+                    help='Open an outward room doorway on a zero-based landing; repeatable')
 parser.add_argument('--odom-noise', choices=('none', 'position', 'yaw', 'pitch', 'combined'), default='none')
 parser.add_argument('--noise-seed', type=int, default=7)
 parser.add_argument('--noise-scale', type=float, default=1.)
@@ -60,6 +62,9 @@ levels = args.levels or floors + 1
 if levels <= floors:
     parser.error("--levels must be greater than the relative --floors task")
 scene_flights = 2 * (levels - 1)
+if any(i < 0 or i >= scene_flights for i in args.open_landing):
+    parser.error('--open-landing must identify a flight in this scene')
+open_landings = sorted(set(args.open_landing))
 max_ticks = max(1800, flights * 900)
 if max_sim_seconds is not None:
     max_ticks = min(max_ticks, int(np.ceil(max_sim_seconds / .1)))
@@ -87,7 +92,7 @@ spec.loader.exec_module(course)
 robot = get_robot("go2")
 model, binding, surfaces, walls = course.build_world(
     plant, robot, scene_flights, direction=rise_sign, mapping_rig=False,
-    lane_width=lane_width, landing_depth=landing_depth)
+    lane_width=lane_width, landing_depth=landing_depth, doors={i: 'room' for i in open_landings})
 shaft = course.shaft_bounds(scene_flights, lane_width, landing_depth)
 print(f"SCENE direction={direction} levels={levels} flights={scene_flights} flight_width={lane_width} landing_depth={landing_depth} task_floors={floors}", flush=True)
 data = mujoco.MjData(model)
@@ -128,7 +133,8 @@ min_clearance = np.inf
 last_landing = 0
 landing_events = []
 wall_ids = {i for i in range(model.ngeom)
-            if model.geom(i).name.endswith("_wall") or "rail" in model.geom(i).name}
+            if model.geom(i).name.endswith(("_wall", "door_leaf")) or "rail" in model.geom(i).name}
+min_opening_clearance = np.inf
 frames = []
 capture_times, capture_poses, capture_maps = [], [], []
 capture_targets, capture_paths, capture_commands, capture_status = [], [], [], []
@@ -278,6 +284,12 @@ try:
             clearance = course.shaft_clearance(q[0],q[1],course.yaw_of(q[3:]), shaft)
             min_clearance=min(min_clearance,clearance)
             assert clearance>0, ("shaft",q[:3])
+            for flight in open_landings:
+                landing_z = rise_sign * 1.44 * (flight + 1) + robot.spawn_drop
+                if abs(q[2] - landing_z) < .4:
+                    margin = course.landing_opening_clearance(q[0], course.yaw_of(q[3:]), flight, landing_depth)
+                    min_opening_clearance = min(min_opening_clearance, margin)
+                    assert margin > 0, ('landing opening', flight, q[:3])
         if stair.arrived:
             assert stair.gen.landings==flights and drive.vx==drive.wz==0
             stop = runtime.base_pos().copy()
@@ -323,6 +335,8 @@ finally:
             direction=direction, floors=floors, levels=levels, flight_width=lane_width,
             time_budget_s=max_ticks * .1,
             landing_depth=landing_depth, noise=noise.metadata(),
+            open_landings=open_landings,
+            min_opening_clearance_m=float(min_opening_clearance) if np.isfinite(min_opening_clearance) else None,
             simulated_s=float(data.time) - start_time, landings=int(stair.gen.landings),
             node_arrived=bool(stair.arrived), min_shaft_clearance_m=float(min_clearance),
             stop=None if stop is None else stop.tolist(), hold=None if hold is None else hold.tolist(),

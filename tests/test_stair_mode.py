@@ -396,3 +396,62 @@ def test_deployment_rejects_unknown_unitree_enable_value(monkeypatch):
     monkeypatch.setenv('TINYNAV_UNITREE_ENABLED', 'typo')
     with pytest.raises(ValueError):
         BackendNode._start_unitree_if_configured(Mock())
+
+
+def test_final_landing_retains_only_bounded_measured_history(monkeypatch):
+    from tinynav.core import stair_target
+    cfg = StairConfig(auto_camera_height=False)
+    gen = StairTargetGenerator(cfg)
+    old_floor = np.array([[.5, 0., 0.]])
+    gen.frames.append((0., old_floor))
+    monkeypatch.setattr(stair_target, 'depth_to_world_points', lambda *args: np.zeros((0, 3)))
+    gen.finishing = True
+    gen.add_depth(4., np.zeros((1, 1)), np.eye(3), camera_pose())
+    assert gen.frames[0][0] == 0.
+    gen.add_depth(6.1, np.zeros((1, 1)), np.eye(3), camera_pose())
+    assert all(t > 0. for t, _ in gen.frames)
+    gen.new_run()
+    assert not gen.finishing
+
+
+def test_pose_jump_still_discards_final_landing_history():
+    gen = StairTargetGenerator()
+    gen.finishing = True
+    gen.frames.append((0., np.array([[.5, 0., 0.]])))
+    gen.add_pose(0., (0., 0., .45))
+    gen.add_pose(.01, (1., 0., .45))
+    assert not gen.frames and not gen.odom_valid
+
+
+def test_weak_auto_turn_on_landing_stops_instead_of_exploring_corridor():
+    cfg = StairConfig(camera_height=.45, auto_camera_height=False)
+    gen = StairTargetGenerator(cfg)
+    gen.latest_stamp = 0.
+    gen.flight_dir = np.array([1., 0.])
+    gen.flight_done = True
+    gen.landings = 1
+    gen.well_side = 2.1
+    xx, yy = np.meshgrid(np.arange(-1., 3., .025), np.arange(-.6, 1.8, .025))
+    floor = np.column_stack((xx.ravel(), yy.ravel(), np.zeros(xx.size)))
+    gen.frames.append((0., floor))
+    T = camera_pose(.45)
+    result = gen.compute(T, 'up')
+    assert result['status'] == 'landing' and result['reason'] == 'turn_uncertain'
+    assert result['target'] is None and gen.landing_waiting_for_turn
+    # A transient elevated patch must not release the stop into the corridor.
+    gen.frames.append((.5, floor + np.array([0., 0., .3])))
+    result = gen.compute(T, 'up')
+    assert result['status'] == 'landing' and result['target'] is None
+    gen.new_run()
+    gen.turn_side = 1
+    assert not gen.landing_waiting_for_turn
+    assert gen.compute(T, 'up')['status'] != 'landing'
+
+
+def test_uncertain_turn_is_visible_and_control_stops(node):
+    node.gen.compute = Mock(return_value={'status': 'landing', 'reason': 'turn_uncertain', 'target': None})
+    node.timer_callback()
+    assert 'reason=turn_uncertain' in node.status_pub.publish.call_args.args[0].data
+    assert 'turn=auto' in node.status_pub.publish.call_args.args[0].data
+    node.target_pub.publish.assert_not_called()
+    node.poi_change_pub.publish.assert_called_once()

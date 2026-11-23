@@ -1,0 +1,562 @@
+{
+  "date": "2026-11-23",
+  "baseline_commit": "1043059df73db2655b5550d60bb7644be4c458dd",
+  "source_sha256": {
+    "tests/test_stair_mode.py": "00136a0df34378210a38f327263f35feac36c7d8be11b4bb08f331d3f53fcb3d",
+    "tests/test_stair_sim_course.py": "805bfc079e9b4d060eccd3e7912ca729b853482ab9af27a1407ac06dcb85242a",
+    "tinynav/core/planning_node.py": "e763035dcfc937b4c509fc499eb117fd009b9b6a44f8618cc61fa175f9942849",
+    "tinynav/core/stair_node.py": "d523c9a46ec0e6ddf86cb42da1a90e1caac105c883fe4c153257d611a46a8414",
+    "tinynav/core/stair_target.py": "46402dbea5953e03df841f828eab0d4c4c9f7711a39b438c3d5d48342eecb3ca",
+    "tinynav/platforms/cmd_vel_control.py": "58f54c9e4b56fda44eb0fb3a6f12ac419f3af9718330113f8ee1dc07e1992fe1",
+    "tool/stair_mode_sim.py": "1e612079b829d461c7f302c86b6be2523f7f3b81543445f91677ed3a17d213e1",
+    "tool/stair_sim_course.py": "43a2d0ba27ae1fd3a2d5b3bd5ccb96eae4df9b35027404b8a862a9e8899d21cc",
+    "tests/test_cmd_vel_path.py": "84d45bde491d9d540b545974a8fbdbe42927c8de92edb10f9daa5c6db557b170",
+    "tests/test_stair_obstacle_band.py": "58705891203bbfb0b8f58bbaea39a129e533cf9b372b25174bb03464b552a9ab",
+    "tool/field_control_regression.py": "2acc44001eb95f6f11c8edd1244b8733bbd6a749dbad22861419b0a858d84d84"
+  },
+  "physical_robot_executed_after_fix": false,
+  "bag_regression": {
+    "passed": true,
+    "scope": "Recorded path conversion only; not a closed-loop physical replay",
+    "bags": [
+      {
+        "bag": "field_2026_11_23_11_34_58_749972",
+        "paths": 585,
+        "stationary_paths": 441,
+        "false_reverse_before": 122,
+        "false_reverse_after": 0,
+        "wrong_stationary_yaw_before": 276,
+        "wrong_stationary_yaw_after": 0,
+        "genuine_reverse_paths": 0,
+        "failures": []
+      },
+      {
+        "bag": "field_2026_11_23_11_36_42_835522",
+        "paths": 1389,
+        "stationary_paths": 225,
+        "false_reverse_before": 68,
+        "false_reverse_after": 0,
+        "wrong_stationary_yaw_before": 147,
+        "wrong_stationary_yaw_after": 0,
+        "genuine_reverse_paths": 4,
+        "failures": []
+      },
+      {
+        "bag": "field_2026_11_23_11_41_12_080460",
+        "paths": 1530,
+        "stationary_paths": 154,
+        "false_reverse_before": 42,
+        "false_reverse_after": 0,
+        "wrong_stationary_yaw_before": 103,
+        "wrong_stationary_yaw_after": 0,
+        "genuine_reverse_paths": 0,
+        "failures": []
+      },
+      {
+        "bag": "field_2026_11_23_11_43_36_358315",
+        "paths": 1006,
+        "stationary_paths": 486,
+        "false_reverse_before": 138,
+        "false_reverse_after": 0,
+        "wrong_stationary_yaw_before": 295,
+        "wrong_stationary_yaw_after": 0,
+        "genuine_reverse_paths": 1,
+        "failures": []
+      },
+      {
+        "bag": "field_2026_11_23_11_46_11_109325",
+        "paths": 1142,
+        "stationary_paths": 261,
+        "false_reverse_before": 102,
+        "false_reverse_after": 0,
+        "wrong_stationary_yaw_before": 176,
+        "wrong_stationary_yaw_after": 0,
+        "genuine_reverse_paths": 0,
+        "failures": []
+      }
+    ]
+  },
+  "python_tests": {
+    "passed": 119,
+    "exit": 0,
+    "suites": [
+      "test_cmd_vel_path",
+      "test_stair_mode",
+      "test_stair_obstacle_band",
+      "test_stair_app_bridge",
+      "test_stair_sim_control",
+      "test_stair_sim_api",
+      "test_stair_odom_noise",
+      "test_stair_sim_course",
+      "test_field_record"
+    ]
+  },
+  "closed_loop_simulation": {
+    "up": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 600.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 371.09999999973394,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.08902648257419343,
+      "stop": [
+        -0.6112491565336026,
+        1.159505947302611,
+        26.230279747164854
+      ],
+      "hold": [
+        -0.6242530916019221,
+        1.158543687910312,
+        26.206174432039298
+      ],
+      "landing_events": [
+        [
+          23.199999999999434,
+          1,
+          2.780510956031439,
+          0.0022096225919175996,
+          1.753148706660311
+        ],
+        [
+          42.60000000000396,
+          2,
+          -0.353642313231353,
+          1.3414259202642527,
+          3.190847900487631
+        ],
+        [
+          63.000000000014104,
+          3,
+          2.7849031061521528,
+          0.0061232880890076365,
+          4.624572793505348
+        ],
+        [
+          83.39999999999554,
+          4,
+          -0.36946427290325656,
+          1.350155581198726,
+          6.068478264884224
+        ],
+        [
+          103.79999999997699,
+          5,
+          2.725712803477304,
+          0.0018549504287495619,
+          7.5098772561585285
+        ],
+        [
+          122.89999999995962,
+          6,
+          -0.3385599529009793,
+          1.3306417336404557,
+          8.945530457590944
+        ],
+        [
+          143.59999999994082,
+          7,
+          2.7506862785381925,
+          -0.01330480192930167,
+          10.388598202746989
+        ],
+        [
+          162.59999999992354,
+          8,
+          -0.3275353656637536,
+          1.3455558085410586,
+          11.833882677700107
+        ],
+        [
+          184.09999999990399,
+          9,
+          2.747810167604879,
+          -0.027285129095121253,
+          13.266770484609221
+        ],
+        [
+          203.89999999988598,
+          10,
+          -0.33902939356216844,
+          1.3392707319358899,
+          14.695775310201675
+        ],
+        [
+          224.39999999986733,
+          11,
+          2.7580048566994293,
+          0.014696299222600219,
+          16.14840985887831
+        ],
+        [
+          244.39999999984914,
+          12,
+          -0.3527063599493644,
+          1.2630194035120412,
+          17.586969920990676
+        ],
+        [
+          264.2999999998311,
+          13,
+          2.7462269568902973,
+          0.01817423009837376,
+          19.014460437225296
+        ],
+        [
+          284.3999999998128,
+          14,
+          -0.33785251452221016,
+          1.3252135565946201,
+          20.474615531850983
+        ],
+        [
+          305.1999999997939,
+          15,
+          2.801137732932104,
+          0.08425574942435322,
+          21.911965790621437
+        ],
+        [
+          324.4999999997763,
+          16,
+          -0.3372687912822262,
+          1.3284637713089738,
+          23.342597357263116
+        ],
+        [
+          345.59999999975713,
+          17,
+          2.758217241354488,
+          -0.02737213929853026,
+          24.78695521152496
+        ],
+        [
+          367.1999999997375,
+          18,
+          -0.3665649482797642,
+          1.3182827605050715,
+          26.23100437226094
+        ]
+      ],
+      "trace_file": "validated-up.trace.npz"
+    },
+    "down": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 600.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 376.59999999972894,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.12205954109434358,
+      "stop": [
+        -0.6441608980293131,
+        1.0744439052728199,
+        -25.63523810046062
+      ],
+      "hold": [
+        -0.6494160500979665,
+        1.0700921179206142,
+        -25.634361258925356
+      ],
+      "landing_events": [
+        [
+          28.09999999999846,
+          1,
+          2.788045315632175,
+          -0.04059863122323851,
+          -1.1421118456365569
+        ],
+        [
+          48.50000000000698,
+          2,
+          -0.4323006379532428,
+          1.2839095738586985,
+          -2.571311384690423
+        ],
+        [
+          69.6000000000081,
+          3,
+          2.793227331775111,
+          -0.014611225073819973,
+          -4.025353912176014
+        ],
+        [
+          89.29999999999018,
+          4,
+          -0.43560067544587694,
+          1.3300267388325984,
+          -5.451930038107333
+        ],
+        [
+          110.4999999999709,
+          5,
+          2.744898285427582,
+          -0.06697757782257796,
+          -6.890187137949783
+        ],
+        [
+          130.69999999995255,
+          6,
+          -0.4350269312819521,
+          1.2518887416053883,
+          -8.329537494567411
+        ],
+        [
+          150.9999999999341,
+          7,
+          2.842003537209019,
+          0.16002409780597113,
+          -9.776262634472532
+        ],
+        [
+          170.29999999991654,
+          8,
+          -0.4205548969995804,
+          1.3375006766630102,
+          -11.212131084090354
+        ],
+        [
+          191.29999999989744,
+          9,
+          2.8126678404312404,
+          0.004586672357971713,
+          -12.65563604434882
+        ],
+        [
+          209.29999999988107,
+          10,
+          -0.4437268499352801,
+          1.2050123451272023,
+          -14.09213838756648
+        ],
+        [
+          230.09999999986215,
+          11,
+          2.7565050282817363,
+          -0.04671834044170197,
+          -15.533831918828014
+        ],
+        [
+          250.19999999984387,
+          12,
+          -0.3998045511425547,
+          1.3157269921785038,
+          -16.970964171222807
+        ],
+        [
+          270.49999999982543,
+          13,
+          2.8296714467997863,
+          0.13545532986272785,
+          -18.41003811647591
+        ],
+        [
+          289.1999999998084,
+          14,
+          -0.3839404122965459,
+          1.3819572504127196,
+          -19.844367361730587
+        ],
+        [
+          310.7999999997888,
+          15,
+          2.744683108620325,
+          -0.0518385582774967,
+          -21.284454941690417
+        ],
+        [
+          331.1999999997702,
+          16,
+          -0.43162166152847364,
+          1.2362533943037335,
+          -22.726349276157844
+        ],
+        [
+          351.6999999997516,
+          17,
+          2.796952014420598,
+          -0.0788981649144235,
+          -24.180315856348304
+        ],
+        [
+          371.29999999973376,
+          18,
+          -0.4201176550992478,
+          1.2670980254634059,
+          -25.61189015916502
+        ]
+      ],
+      "trace_file": "validated-down.trace.npz"
+    }
+  },
+  "open_door_scene": {
+    "up": {
+      "passed": false,
+      "failure": "AssertionError: ('landing opening', 0, array([3.06881275, 0.75078236, 1.75413804]))",
+      "direction": "up",
+      "floors": 1,
+      "levels": 2,
+      "flight_width": 1.2,
+      "time_budget_s": 180.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "open_landings": [
+        0
+      ],
+      "min_opening_clearance_m": -0.004976209517512986,
+      "simulated_s": 26.43999999999879,
+      "landings": 1,
+      "node_arrived": false,
+      "min_shaft_clearance_m": 0.10549447599305613,
+      "stop": null,
+      "hold": null,
+      "landing_events": [
+        [
+          25.699999999998937,
+          1,
+          2.888757804070331,
+          0.5750530763814621,
+          1.7514314327566527
+        ]
+      ],
+      "trace_file": "validated-opening-up.trace.npz"
+    },
+    "down": {
+      "passed": false,
+      "failure": "RuntimeError: ('did not arrive', array([-0.3945213 ,  1.3661478 , -2.59706863]), 2)",
+      "direction": "down",
+      "floors": 1,
+      "levels": 2,
+      "flight_width": 1.2,
+      "time_budget_s": 180.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "open_landings": [
+        0
+      ],
+      "min_opening_clearance_m": 0.06760235617519195,
+      "simulated_s": 179.99999999990771,
+      "landings": 2,
+      "node_arrived": false,
+      "min_shaft_clearance_m": 0.17835431817803316,
+      "stop": null,
+      "hold": null,
+      "landing_events": [
+        [
+          26.8999999999987,
+          1,
+          2.811629427231281,
+          0.03704365466502333,
+          -1.148828935726056
+        ],
+        [
+          46.4000000000059,
+          2,
+          -0.3601357413386474,
+          1.3806610651921771,
+          -2.5814723494965555
+        ]
+      ],
+      "trace_file": "validated-opening-down.trace.npz"
+    }
+  },
+  "safety": {
+    "all_11_legacy_asserts_unchanged_ast": true,
+    "asserts_now": 12,
+    "new_assert": "Independent 1.0 x 0.5 m body rectangle must not cross the open landing end boundary",
+    "relaxed_asserts": false
+  },
+  "changes": {
+    "control": "Rigid relative position difference, 1 mm displacement tolerance, preserve in-place orientation",
+    "obstacle_band": "Only pitched ascent raises camera-relative bottom by 0.10 m; enter >12 deg, hold >8 deg. Platform/down/default restore original band.",
+    "terminal": "Final step-in retains measured point history for at most 6 seconds; original geometric candidates and stopping predicates retained",
+    "weak_auto_landing": "No next-level evidence and uncertain turn on a completed level flight: latch landing reason=turn_uncertain until new task"
+  },
+  "known_limits": [
+    "Fixed recorded paths are not a closed-loop physical replay",
+    "No SDK execution feedback or new physical validation",
+    "Open-door up case still fails independent boundary assertion",
+    "Open-door down case still ends in no_seed; not counted as success"
+  ],
+  "artifact_directory": "/home/dm/tinynav-stair-dev/experiments/control-fix-20261123/"
+}

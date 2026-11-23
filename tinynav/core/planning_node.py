@@ -330,6 +330,9 @@ class StairPlanning:
     center_only: bool = False       # True: collision check at the body center only, not the footprint corners
     reverse_enter: float = 0.20     # reverse gate: blocked with the nose this close to an (inflated) obstacle ...
     reverse_exit: float = 0.30      # ... until it is this far again
+    up_bottom_raise_m: float = 0.10 # raised treads must not fill the lower obstacle band on ascent
+    up_pitch_enter_deg: float = 12.0
+    up_pitch_exit_deg: float = 8.0
 
 
 STAIR = StairPlanning()
@@ -372,6 +375,9 @@ class PlanningNode(Node):
         self.last_param = (0.0, 0.0) # acc and gyro
         self.obstacle_config = ROBOT_CONFIG.obstacle
         self.stair_obstacle_config = dataclasses.replace(ROBOT_CONFIG.obstacle, dilation_cells=STAIR.dilation_cells)
+        self.stair_up_obstacle_config = dataclasses.replace(
+            self.stair_obstacle_config, robot_z_bottom=ROBOT_CONFIG.obstacle.robot_z_bottom + STAIR.up_bottom_raise_m)
+        self._stair_ascending = False
         self.in_stair_mode = False  # stair_mode sampled once per planning cycle
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
@@ -395,6 +401,19 @@ class PlanningNode(Node):
 
     def _on_stair_status(self, msg):
         self._stair_status_time = time.monotonic()
+        parts = msg.data.split()
+        pitch = next((p.split('=', 1)[1] for p in parts if p.startswith('pitch=')), '0')
+        try:
+            pitch = float(pitch)
+        except ValueError:
+            pitch = 0.0
+        threshold = STAIR.up_pitch_exit_deg if self._stair_ascending else STAIR.up_pitch_enter_deg
+        self._stair_ascending = bool(parts and parts[0] == 'up' and pitch > threshold)
+
+    def active_obstacle_config(self, stair):
+        if not stair:
+            return self.obstacle_config
+        return self.stair_up_obstacle_config if self._stair_ascending else self.stair_obstacle_config
 
     @property
     def stair_mode(self):
@@ -647,7 +666,7 @@ class PlanningNode(Node):
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             obstacle_mask = build_obstacle_map(
                 self.occupancy_grid, self.origin, self.resolution,
-                robot_z=T[2, 3], config=self.stair_obstacle_config if stair else self.obstacle_config,
+                robot_z=T[2, 3], config=self.active_obstacle_config(stair),
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 

@@ -204,6 +204,11 @@ def yaw_of(q):
     w, x, y, z = q
     return math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
 
+def landing_opening_clearance(x, yaw, flight, landing_depth=LANDING_DEPTH):
+    """Independent 1.0 x 0.5 m body rectangle must stay inside the landing."""
+    half_x = .5 * abs(math.cos(yaw)) + .25 * abs(math.sin(yaw))
+    return (x - half_x + landing_depth) if flight % 2 else (FOOT + landing_depth - x - half_x)
+
 class FrontCameraBEV:
     """Apply only the measured ROS-left camera profile; BEV lives in stair_node."""
 

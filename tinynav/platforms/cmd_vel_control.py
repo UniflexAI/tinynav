@@ -22,6 +22,8 @@ STAIR_MIN_LINEAR_VEL = 0.25
 # ... only for (nearly) straight commands: raising a slow turning arc widens it, and on a wide landing that
 # drove the robot into the wall (field_2026_10_09_13_36_59, 43-49 s: 0.17 m/s at 0.43 rad/s became 0.25 m/s)
 STAIR_MIN_LINEAR_MAX_TURN = 0.2  # rad/s
+# Below 1 mm a path segment has no reliable translation bearing (in-place turns).
+PATH_TRANSLATION_EPS_M = 1e-3
 
 class CmdVelControlNode(Node):
     def __init__(self):
@@ -219,34 +221,35 @@ class CmdVelControlNode(Node):
         T2 = msg2np(self.path.poses[step_idx])
         T_robot_1 = T1 @ self.T_robot_to_camera
         T_robot_2 = T2 @ self.T_robot_to_camera
-        T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
-        p = T_robot_2_to_1[:3, 3]
+        rotation_1 = T_robot_1[:3, :3]
+        p = rotation_1.T @ (T_robot_2[:3, 3] - T_robot_1[:3, 3])
+        has_translation = np.linalg.norm(p[:2]) > PATH_TRANSLATION_EPS_M
         heading_err = float(np.arctan2(p[1], p[0]))
         # dt must match actual spacing between published Path poses, not raw trajectory dt.
         dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
         linear_velocity_vec = p / dt
-        r = R.from_matrix(T_robot_2_to_1[:3, :3])
+        r = R.from_matrix(rotation_1.T @ T_robot_2[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
 
         raw_vx = float(linear_velocity_vec[0])
-        if raw_vx < 0.0:
+        is_backward_segment = p[0] < -PATH_TRANSLATION_EPS_M
+        if is_backward_segment:
             vx = -self.fixed_reverse_speed
         else:
-            vx = float(np.clip(raw_vx, 0.0, self.max_forward_speed))
+            vx = float(np.clip(raw_vx, 0.0, self.max_forward_speed)) if p[0] > PATH_TRANSLATION_EPS_M else 0.0
         vy = 0.0
         vyaw = np.clip(angular_velocity_vec[2], -self.max_angular_speed, self.max_angular_speed)
-        is_backward_segment = raw_vx < 0.0
         if is_backward_segment:
             vyaw = 0.0
 
         # Hack: if path first segment points >80 deg away from robot heading,
         # force an in-place turn. Skip explicit backward segments because reverse
         # naturally has heading_err close to +/-pi.
-        if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
+        if has_translation and (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
             vx = 0.0
             vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
         # Minimal rotate-first gate: apply only for forward motion.
-        elif vx > 0.0 and abs(heading_err) > 0.45:
+        elif has_translation and vx > 0.0 and abs(heading_err) > 0.45:
             vx = 0.0
             vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
 

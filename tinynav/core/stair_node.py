@@ -178,7 +178,7 @@ class StairNode(Node):
             self.stop_robot(f'arrived: {self.gen.landings} landings')
             return
         self.guided = bool(res.get('guided', False))
-        self.publish_status(res['status'])
+        self.publish_status(res['status'], reason=res.get('reason'))
         if res['status'] in STOP_STATUSES or res['target'] is None:
             self.stop_robot(res['status'])
             return
@@ -199,11 +199,14 @@ class StairNode(Node):
                 path.poses.append(pose)
             self.path_pub.publish(path)
 
-    def publish_status(self, status):
+    def publish_status(self, status, reason=None):
         text = f'{self.direction} {status} well_side={self.gen.well_side:+.1f} cam_h={self.gen.camera_height:.2f} pitch={self.gen.pitch:+.0f}'
         text += f' landings={self.gen.landings}' + (f'/{self.landings_goal}' if self.landings_goal else '')
         text += f' floors={self.gen.landings // self.landings_per_floor}' + (f'/{self.floors}' if self.floors else '')
         text += f' recovery={int(self.gen.latest_stamp < self.gen.search_recovery_until)}'
+        text += f' turn={"left" if self.gen.turn_side > 0 else "right" if self.gen.turn_side < 0 else "auto"}'
+        if reason:
+            text += f' reason={reason}'
         if self.memory is not None:
             text += f' memory={self.memory_similarity:.2f}{" guided" if self.guided else ""}'
         self.status_pub.publish(String(data=text))

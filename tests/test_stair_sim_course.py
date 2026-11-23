@@ -37,3 +37,11 @@ def test_default_shaft_geometry_is_unchanged():
 def test_invalid_flight_width_is_rejected(width):
     with pytest.raises(ValueError):
         shaft_bounds(18, width)
+
+
+@pytest.mark.parametrize('flight,x', [(0, 3.3), (1, -.9)])
+def test_opening_assertion_checks_full_rectangle_before_center_crosses(flight, x):
+    from tool.stair_sim_course import landing_opening_clearance
+    assert landing_opening_clearance(x, 0., flight, 1.2) < 0
+    inside = x - .5 if flight == 0 else x + .5
+    assert landing_opening_clearance(inside, 0., flight, 1.2) > 0
