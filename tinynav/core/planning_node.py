@@ -1071,7 +1071,7 @@ class PlanningNode(Node):
         # the prior may raise the target above it, up to vx_hard_max (hardware absolute).
         # Depth latency (~100ms) + raycast makes the effective clearance smaller than
         # measured, so the schedule discounts it by v*t_react (see _speed_from_clearance).
-        self.declare_parameter('vx_max', 0.6)        # open-space target when NO capture prior (fallback)
+        self.declare_parameter('vx_max', ROBOT_CONFIG.open_linear_vel)  # open-space target when NO capture prior (fallback), per model
         self.declare_parameter('vx_hard_max', 1.0)   # absolute forward-speed ceiling (hardware)
         self.declare_parameter('vx_min', 0.2)        # creep speed in tight space (m/s)
         self.declare_parameter('clear_c0_m', 0.35)   # net clearance <= this -> only vx_min

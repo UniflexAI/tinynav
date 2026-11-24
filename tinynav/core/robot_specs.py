@@ -82,6 +82,10 @@ class RobotConfig:
     max_linear_vel: float = 1.0
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
+    #: The open-space forward speed planning aims for with no capture-speed prior
+    #: (planning_node's `vx_max`; pilot's nav_node.driver reads it too), m/s. At most
+    #: max_linear_vel.
+    open_linear_vel: float = 0.6
     #: The cap on how fast cmd_vel_control ramps the linear speed (m/s^2), starting
     #: and stopping alike. Per model: a humanoid pitches over on a ramp a quadruped
     #: takes in its stride.
@@ -278,6 +282,9 @@ G1_CONFIG = RobotConfig(
     # Half the default ramp, against falls: a g1 (8038) has run 0.3 since 2026-10-21,
     # when 0.6 was halved there as a fall mitigation.
     max_linear_acc=0.3,
+    # Faster than the default 0.6 m/s and 0.75 rad/s (8038, 2026-11-24). On the 0.3
+    # ramp above, 0.8 m/s brakes to vx_min in ~1.0 m, inside planning's clear_open_m.
+    open_linear_vel=0.8, max_angular_vel=1.0,
     # Backs off from further out than the default 0.10/0.15. At 0.10 a g1 (8038,
     # 2026-11-17) drove on into cells that flicker in and out of the occupancy map at
     # that range; with one in, every row scored inf and it stopped, went, stopped. At
