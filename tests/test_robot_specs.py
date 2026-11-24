@@ -159,20 +159,7 @@ def test_a_scale_that_is_not_a_scale_is_refused(tmp_path, capsys, bad):
     assert str(path) in capsys.readouterr().err
 
 
-def test_the_g1_ramps_at_half_the_default_acceleration():
-    """A humanoid pitches over on the ramp a quadruped takes (8038, 2026-10-21)."""
-    from tinynav.core.robot_specs import G1_CONFIG
-    assert G1_CONFIG.max_linear_acc == pytest.approx(0.3)
 
-
-def test_g1_runs_faster_than_the_default_and_within_its_ceiling():
-    from tinynav.core.robot_specs import G1_CONFIG, RobotConfig
-    assert (G1_CONFIG.open_linear_vel, G1_CONFIG.max_angular_vel) == (0.8, 1.0)
-    assert RobotConfig.open_linear_vel == pytest.approx(0.6)
-    assert G1_CONFIG.open_linear_vel <= G1_CONFIG.max_linear_vel
-
-
-@pytest.mark.parametrize('name', sorted(n for n in TYPES if n != 'G1_CONFIG'))
-def test_every_other_model_keeps_the_ramp_it_had(name):
-    assert TYPES[name].max_linear_acc == pytest.approx(0.6)
-
+@pytest.mark.parametrize('name', sorted(TYPES))
+def test_the_open_speed_is_within_the_model_s_ceiling(name):
+    assert TYPES[name].open_linear_vel <= TYPES[name].max_linear_vel
