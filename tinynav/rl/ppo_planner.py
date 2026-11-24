@@ -322,16 +322,33 @@ class RLPlanner:
         self.last = (stamp, center, yaw)
         self.hist = [center] + self.hist[:TRAIL_LEN - 1]
 
-        trail = trail_channel(np.array(self.hist), np.arange(len(self.hist)), center, yaw)
-        bev = np.concatenate([make_bev(grid, origin, GRID_RES, center, yaw, ref_z=T[2, 3]), trail[None]])
-        vec = np.concatenate([to_robot_frame(goal_xy, center, yaw) / 5.0,
-                              self.vel / np.array([V_MAX, W_MAX], np.float32), self.last_action]).astype(np.float32)
-        a = np.clip(np.asarray(self.policy.infer(bev, vec), np.float32), -1, 1)
-        self.last_action = a
-        v = float(a[0] * V_MAX if a[0] >= 0 else -a[0] * V_MIN)
-        w = float(a[1] * W_MAX)
-        policy_speed = v
-        v, w = route_guided_command(getattr(self, "route_xy", None), center, yaw, v, w)
+        if hasattr(self.policy, "infer_frame"):
+            try:
+                if getattr(self, "semantic_input", None) is None:
+                    raise ValueError("Missing synchronized Infra1")
+                infra, depth, intrinsics = self.semantic_input
+                v, w = self.policy.infer_frame(
+                    infra,depth,intrinsics,T,center,yaw,goal_xy,self.vel,esdf,origin,GRID_RES
+                )
+                bev = self.policy.bev
+                a = self.policy.last_action
+                policy_speed = v
+            except (ValueError, RuntimeError) as exc:
+                self.guided_command = (0., 0.)
+                self.motion_command_sent = False
+                bev = np.zeros((4,24,24),dtype=np.float32)
+                return 0.,0.,rollout(center,yaw,0.,0.),bev,f"semantic input invalid: {exc}"
+        else:
+            trail = trail_channel(np.array(self.hist), np.arange(len(self.hist)), center, yaw)
+            bev = np.concatenate([make_bev(grid, origin, GRID_RES, center, yaw, ref_z=T[2, 3]), trail[None]])
+            vec = np.concatenate([to_robot_frame(goal_xy, center, yaw) / 5.0,
+                                  self.vel / np.array([V_MAX, W_MAX], np.float32), self.last_action]).astype(np.float32)
+            a = np.clip(np.asarray(self.policy.infer(bev, vec), np.float32), -1, 1)
+            self.last_action = a
+            v = float(a[0] * V_MAX if a[0] >= 0 else -a[0] * V_MIN)
+            w = float(a[1] * W_MAX)
+            policy_speed = v
+            v, w = route_guided_command(getattr(self, "route_xy", None), center, yaw, v, w)
         self.guided_command = (v, w)
         turn_age = stamp - self.turn_started
         preferred_turn = self.turn_direction if 0.0 <= turn_age < TURN_PREFERENCE_S else 0.0

@@ -10,7 +10,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
-from cv_bridge import CvBridge
+from cv_bridge import CvBridge, CvBridgeError
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation
 from scipy.spatial.transform import Rotation as R
@@ -381,12 +381,25 @@ class PlanningNode(Node):
             f"latest synced pair only: {self.latest_pair_only}"
         )
 
-        self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
+        self.semantic_bev = os.environ.get("TINYNAV_SEMANTIC_BEV") == "1"
+        if self.semantic_bev and not route_guidance():
+            raise ValueError("TINYNAV_SEMANTIC_BEV=1 requires TINYNAV_PLANNER=ppo")
+        inputs = [self.depth_sub, self.pose_sub]
+        if self.semantic_bev:
+            self.infra_sub = message_filters.Subscriber(
+                self, Image, "/slam/infra1_synced", callback_group=input_group,
+            )
+            inputs.append(self.infra_sub)
+        self.ts = message_filters.TimeSynchronizer(inputs, queue_size=10)
         if self.latest_pair_only:
             self.ts.registerCallback(self.queue_latest_pair)
             # Planning and other state-mutating callbacks stay in the default exclusive group.
             self.latest_pair_timer = self.create_timer(
                 0.005, self.process_latest_pair, clock=Clock(clock_type=ClockType.STEADY_TIME),
+            )
+        elif self.semantic_bev:
+            self.ts.registerCallback(
+                lambda depth, odom, infrared: self.sync_callback(depth, odom, infra_msg=infrared)
             )
         else:
             self.ts.registerCallback(self.sync_callback)
@@ -437,7 +450,14 @@ class PlanningNode(Node):
                     for name in ("front", "rear", "half_width", "control_x", "control_y")
                 })
                 self.get_logger().info(f"PPO guard geometry (m): {geometry}")
-                self.rl = RLPlanner(TRTPolicy(), geometry)
+                if self.semantic_bev:
+                    from tinynav.rl.semantic_bev_policy import LiveSemanticPolicy
+                    policy = LiveSemanticPolicy()
+                    self.semantic_request_pub = self.create_publisher(Twist, "/planning/semantic_raw_cmd", 10)
+                    self.get_logger().info(f"Semantic BEV PPO enabled (R31, device={policy.device})")
+                else:
+                    policy = TRTPolicy()
+                self.rl = RLPlanner(policy, geometry)
             else:
                 self.rl = RLPlanner(TRTPolicy())
             self.rl_cmd_pub = self.create_publisher(Twist, '/planning/rl_cmd', 10)
@@ -669,7 +689,7 @@ class PlanningNode(Node):
                 path.poses.append(pose)
         self.path_pub.publish(path)
 
-    def queue_latest_pair(self, depth_msg, odom_msg):
+    def queue_latest_pair(self, depth_msg, odom_msg, infra_msg=None):
         ready_ns = perf_counter_ns()
         stamp = Time.from_msg(depth_msg.header.stamp).nanoseconds
         with self.input_lock:
@@ -679,7 +699,7 @@ class PlanningNode(Node):
             if self.pending_pair is not None:
                 self.dropped_synced_pairs += 1
             self.latest_pair_stamp = stamp
-            self.pending_pair = (depth_msg, odom_msg, ready_ns)
+            self.pending_pair = (depth_msg, odom_msg, ready_ns, infra_msg)
 
     def process_latest_pair(self):
         with self.input_lock:
@@ -720,7 +740,7 @@ class PlanningNode(Node):
         self.timing_pub.publish(String(data=json.dumps(timing, separators=(",", ":"))))
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def sync_callback(self, depth_msg, odom_msg, pair_ready_ns=None):
+    def sync_callback(self, depth_msg, odom_msg, pair_ready_ns=None, infra_msg=None):
         if self.K is None:
             return
         start_ns = perf_counter_ns()
@@ -780,6 +800,14 @@ class PlanningNode(Node):
         if self.rl is not None:
             self.last_T, self.last_stamp = T, stamp
             with Timer(name='rl policy', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                if self.semantic_bev:
+                    self.rl.semantic_input = None
+                    if infra_msg is not None:
+                        try:
+                            infrared = self.bridge.imgmsg_to_cv2(infra_msg, desired_encoding="mono8")
+                            self.rl.semantic_input = (infrared, depth, self.K)
+                        except CvBridgeError as exc:
+                            self.get_logger().warning(f"Infra1 conversion failed: {exc}")
                 self.rl_plan(T, stamp, ESDF_map, depth_msg.header)
             return
 
@@ -843,6 +871,10 @@ class PlanningNode(Node):
         cmd = Twist()
         cmd.linear.x, cmd.angular.z = v, w
         self.rl_cmd_pub.publish(cmd)
+        if self.semantic_bev:
+            raw = Twist()
+            raw.linear.x, raw.angular.z = self.rl.guided_command
+            self.semantic_request_pub.publish(raw)
 
         # Same pose convention as the library path: control-center position, camera orientation.
         path = Path()
@@ -860,9 +892,14 @@ class PlanningNode(Node):
         self.path_pub.publish(path)
 
         # Debug view of the policy input: elevation colored, never-seen cells black, own trail red.
-        img = cv2.applyColorMap(np.uint8(np.clip((bev[0] + 0.5) / 1.5, 0, 1) * 255), cv2.COLORMAP_VIRIDIS)
-        img[bev[1] == 0] = 0
-        img[bev[2] > 0] = (img[bev[2] > 0] * 0.4 + np.array([0, 0, 255]) * 0.6).astype(np.uint8)
+        if self.semantic_bev:
+            img = cv2.applyColorMap(np.uint8(np.clip((bev[3] + 1) * 127.5, 0, 255)), cv2.COLORMAP_TURBO)
+            img[bev[3] == 0] = (65, 55, 45)
+            img[bev[0] > .5] = (240, 240, 240)
+        else:
+            img = cv2.applyColorMap(np.uint8(np.clip((bev[0] + 0.5) / 1.5, 0, 1) * 255), cv2.COLORMAP_VIRIDIS)
+            img[bev[1] == 0] = 0
+            img[bev[2] > 0] = (img[bev[2] > 0] * 0.4 + np.array([0, 0, 255]) * 0.6).astype(np.uint8)
         img = cv2.resize(img, (256, 256), interpolation=cv2.INTER_NEAREST)
         msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
         msg.header = header

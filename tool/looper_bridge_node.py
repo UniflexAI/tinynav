@@ -1,5 +1,6 @@
 import argparse
 import copy
+import os
 
 import cv2
 import message_filters
@@ -62,6 +63,10 @@ class LooperBridgeNode(Node):
             Odometry, "/slam/odometry_visual", 10
         )
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
+        self.semantic_infra_pub = (
+            self.create_publisher(Image, "/slam/infra1_synced", 10)
+            if os.environ.get("TINYNAV_SEMANTIC_BEV") == "1" else None
+        )
         self.disparity_pub_vis = self.create_publisher(Image, "/slam/disparity_vis", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.camera_info_alias_pub = self.create_publisher(
@@ -218,6 +223,8 @@ class LooperBridgeNode(Node):
         camera_info_out.header.frame_id = "camera"
 
         self.depth_pub.publish(depth_out)
+        if self.semantic_infra_pub is not None:
+            self.semantic_infra_pub.publish(image_out)
         self.disparity_pub_vis.publish(disparity_vis_msg)
         self.slam_camera_info_pub.publish(camera_info_out)
         self.camera_info_alias_pub.publish(camera_info_out)
