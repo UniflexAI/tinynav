@@ -73,7 +73,7 @@ def can_link(to, points, segments, lengths, distance, at, offset, esdf, origin, 
     return False
 
 
-def forward_rejoin(route, center, yaw, goal, current, feedback, velocity, age, esdf, origin, edge):
+def forward_rejoin(route, center, yaw, goal, current, feedback, velocity, age, esdf, origin, edge, *, proposal=None):
     if route is None or len(route) < 3 or feedback is None or not 0 <= age <= MAX_AGE:
         return None
     delta = goal - center
@@ -97,7 +97,12 @@ def forward_rejoin(route, center, yaw, goal, current, feedback, velocity, age, e
 
     possibilities = []
     priors = (np.asarray(feedback), np.asarray(velocity), np.zeros(2))
-    for turn in (0., -.10, .10, -TURN_LIMIT, TURN_LIMIT):
+    turns = (0., -.10, .10, -TURN_LIMIT, TURN_LIMIT)
+    preferred = None
+    if proposal is not None and np.isfinite(proposal).all() and proposal[0] >= FORWARD_SPEED:
+        preferred = float(np.clip(proposal[1], -TURN_LIMIT, TURN_LIMIT))
+        turns = (preferred,) + turns
+    for turn in dict.fromkeys(turns):
         end = arc(pose, FORWARD_SPEED, turn, np.array([1.]))[0]
         after, departure = project(points, segments, lengths, distance, end[:2])
         gain = remaining - np.linalg.norm(goal - end[:2])
@@ -109,6 +114,8 @@ def forward_rejoin(route, center, yaw, goal, current, feedback, velocity, age, e
                   for w in {0.,turn} for delay in (.32,max(.50,age))]
         if not all(has_clearance(path, esdf, origin, edge) for path in sweeps):
             continue
+        if preferred is not None and turn == preferred:
+            return FORWARD_SPEED, turn
         score = gain + .4 * (offset - departure) - .20 * abs(turn)
         possibilities.append((score, turn))
     if not possibilities:

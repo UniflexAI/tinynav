@@ -8,6 +8,7 @@ including turning in place, and falls back to the first safe alternative or a st
 stays put while being commanded to move is declared stuck and stopped until the next goal.
 """
 from dataclasses import dataclass
+import os
 from time import monotonic
 
 import numpy as np
@@ -177,6 +178,7 @@ class RLPlanner:
         self.policy = policy
         self.start_assist = None
         self.semantic_feedback = None
+        self.semantic_route_proposal = os.environ.get("TINYNAV_SEMANTIC_ROUTE_PROPOSAL") == "1"
         self.geometry = geometry if geometry is not None else PPOGeometry()
         self.edge = _edge_points(footprint=RLFootprint(
             self.geometry.front, self.geometry.rear, self.geometry.half_width,
@@ -366,7 +368,8 @@ class RLPlanner:
                 from tinynav.rl.semantic_forward_guide import forward_rejoin
                 age = self.semantic_pose_age + monotonic() - assist_started_at
                 rejoin = forward_rejoin(getattr(self, "route_xy", None), center, yaw, goal_xy,
-                                        (v, w), feedback[1:], self.vel, age, esdf, origin, self.edge)
+                                        (v, w), feedback[1:], self.vel, age, esdf, origin, self.edge,
+                                        proposal=self.semantic_raw_command if self.semantic_route_proposal else None)
                 if rejoin is not None:
                     checked_v, checked_w, reason = safe_command(
                         center, yaw, *rejoin, esdf, origin, GRID_RES, edge=self.edge,
