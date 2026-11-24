@@ -389,6 +389,11 @@ def test_the_g1_walks_over_what_is_under_20_cm():
     assert G1_CONFIG.obstacle.step_height_m == 0.20
 
 
+def test_the_g1_turns_to_a_heading_at_0_6():
+    from tinynav.core.robot_specs import G1_CONFIG, GO2_CONFIG, RobotConfig
+    assert (RobotConfig.face_turn_vel, GO2_CONFIG.face_turn_vel, G1_CONFIG.face_turn_vel) == (0.35, 0.35, 0.6)
+
+
 def test_the_climb_region_is_the_cells_near_a_climb_point():
     from planning_node import PlanningNode
     node = PlanningNode.__new__(PlanningNode)
