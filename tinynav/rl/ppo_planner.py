@@ -176,6 +176,7 @@ class RLPlanner:
     def __init__(self, policy, geometry=None):
         self.policy = policy
         self.start_assist = None
+        self.semantic_feedback = None
         self.geometry = geometry if geometry is not None else PPOGeometry()
         self.edge = _edge_points(footprint=RLFootprint(
             self.geometry.front, self.geometry.rear, self.geometry.half_width,
@@ -185,6 +186,7 @@ class RLPlanner:
     def reset(self):
         """New goal: clear the GRU memory, own trail, velocity estimate and stuck state."""
         self.policy.reset()
+        self.semantic_feedback = None
         if self.start_assist is not None:
             self.start_assist.reset()
         self.hist, self.last = [], None
@@ -316,7 +318,8 @@ class RLPlanner:
     def step(self, grid, origin, T, stamp, goal_xy, esdf):
         """grid/origin: planning occupancy grid; T: camera->world; esdf: 2D ESDF on the same grid.
         Returns (v, w, rollout poses, policy BEV, status) with status one of GUARD_REASONS or "stuck"."""
-        assist_started_at = monotonic() if self.start_assist is not None else None
+        semantic = hasattr(self.policy, "infer_frame")
+        assist_started_at = monotonic() if semantic else None
         yaw = camera_yaw(T)
         center = self.control_center(T, yaw)
         if self.last is not None:
@@ -327,7 +330,7 @@ class RLPlanner:
         self.last = (stamp, center, yaw)
         self.hist = [center] + self.hist[:TRAIL_LEN - 1]
 
-        if hasattr(self.policy, "infer_frame"):
+        if semantic:
             try:
                 if getattr(self, "semantic_input", None) is None:
                     raise ValueError("Missing synchronized Infra1")
@@ -356,11 +359,31 @@ class RLPlanner:
             w = float(a[1] * W_MAX)
             policy_speed = v
         v, w = route_guided_command(getattr(self, "route_xy", None), center, yaw, v, w)
+        rejoin = None
+        if semantic and ROBOT_CONFIG.name == "go2" and self.recovery is None and not self.stuck:
+            feedback = self.semantic_feedback
+            if feedback is not None and monotonic() - feedback[0] <= .25:
+                from tinynav.rl.semantic_forward_guide import forward_rejoin
+                age = self.semantic_pose_age + monotonic() - assist_started_at
+                rejoin = forward_rejoin(getattr(self, "route_xy", None), center, yaw, goal_xy,
+                                        (v, w), feedback[1:], self.vel, age, esdf, origin, self.edge)
+                if rejoin is not None:
+                    checked_v, checked_w, reason = safe_command(
+                        center, yaw, *rejoin, esdf, origin, GRID_RES, edge=self.edge,
+                        min_forward=ROBOT_CONFIG.min_linear_vel, min_turn=ROBOT_CONFIG.min_angular_vel,
+                    )
+                    if reason != 0 or checked_v != rejoin[0]:
+                        rejoin = None
+                    else:
+                        v, w = checked_v, checked_w
         self.guided_command = (v, w)
         turn_age = stamp - self.turn_started
         preferred_turn = self.turn_direction if 0.0 <= turn_age < TURN_PREFERENCE_S else 0.0
-        v, w, status = self._guard_command(center, yaw, goal_xy, (v, w), policy_speed, esdf, origin,
-                                          preferred_turn=preferred_turn)
+        if rejoin is None:
+            v, w, status = self._guard_command(center, yaw, goal_xy, (v, w), policy_speed, esdf, origin,
+                                              preferred_turn=preferred_turn)
+        else:
+            status = "semantic forward rejoin"
         if self.start_assist is not None and self.recovery is None and not self.stuck:
             route = getattr(self, "route_xy", None)
             cap, route_turn = route_guided_command(route, center, yaw, .55, np.nan)

@@ -2,7 +2,7 @@ import array
 import json
 import os
 from threading import Lock
-from time import perf_counter_ns
+from time import monotonic, perf_counter_ns
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.clock import Clock, ClockType
@@ -463,10 +463,11 @@ class PlanningNode(Node):
                 else:
                     policy = TRTPolicy()
                 self.rl = RLPlanner(policy, geometry)
+                if self.semantic_bev:
+                    self.create_subscription(Twist, "/cmd_vel", self.semantic_actual_cmd, 10)
                 if self.semantic_bev and ROBOT_CONFIG.name == "go2" and os.environ.get("TINYNAV_SEMANTIC_START_ASSIST") == "1":
                     from tinynav.rl.semantic_start_assist import SemanticStartAssist
                     self.rl.start_assist = SemanticStartAssist()
-                    self.create_subscription(Twist, "/cmd_vel", self.semantic_actual_cmd, 10)
                     self.get_logger().info("Semantic Go2 start assist enabled")
             else:
                 self.rl = RLPlanner(TRTPolicy())
@@ -475,7 +476,9 @@ class PlanningNode(Node):
             self.get_logger().info("TINYNAV_PLANNER=rl: learned policy replaces the trajectory library")
 
     def semantic_actual_cmd(self, msg):
-        self.rl.start_assist.observe_command(msg.linear.x, msg.angular.z)
+        self.rl.semantic_feedback = (monotonic(), msg.linear.x, msg.angular.z)
+        if self.rl.start_assist is not None:
+            self.rl.start_assist.observe_command(msg.linear.x, msg.angular.z)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
