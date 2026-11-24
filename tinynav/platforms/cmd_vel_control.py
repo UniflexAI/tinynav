@@ -210,9 +210,14 @@ class CmdVelControlNode(Node):
             out.linear.x = 0.0
 
         # Angular z: same idea; tiny requested turns snap to executable min, decays snap to 0.
-        if 0.0 < abs(out.angular.z) < self.min_effective_angular_speed:
-            if abs(target_cmd.angular.z) >= self.min_effective_angular_speed:
-                out.angular.z = float(np.sign(target_cmd.angular.z) * self.min_effective_angular_speed)
+        turn_minimum = self.min_effective_angular_speed
+        if self.stair_mode and out.linear.x == 0.:
+            turn_minimum = max(turn_minimum, ROBOT_CONFIG.stair_min_turn_vel)
+            if age <= stale_slow_s and abs(out.angular.z) > 1e-6:
+                out.angular.z = float(np.sign(out.angular.z) * max(abs(out.angular.z), turn_minimum))
+        if 0.0 < abs(out.angular.z) < turn_minimum:
+            if abs(target_cmd.angular.z) >= turn_minimum:
+                out.angular.z = float(np.sign(target_cmd.angular.z) * turn_minimum)
             else:
                 out.angular.z = 0.0
 

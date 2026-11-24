@@ -1,0 +1,853 @@
+{
+  "date": "2026-11-24",
+  "passed": true,
+  "baseline_commit": "9544dd92a7b80d25a73919f3f7ff3ef351b465c8",
+  "python_tests_passed": 193,
+  "config": {
+    "stair_in_place_min_yaw_rad_s": 0.25,
+    "stair_turn_score_horizon_s": 0.5,
+    "short_turn_score_scope": "Stair non-search alignment only; landing search retains original endpoint score",
+    "uturn_step_in_m": 0.6,
+    "linear_min_m_s": 0.25,
+    "moving_turn_limit_rad_s": 0.2,
+    "band_m": [
+      -0.2,
+      0.2
+    ],
+    "min_wall_span_m": 0.3,
+    "max_tread_step_m": 0.22
+  },
+  "bags": {
+    "passed": true,
+    "bags": [
+      {
+        "bag": "field_2026_11_24_10_28_45_754593",
+        "passed": true,
+        "frames": 984,
+        "command_ticks": 906,
+        "fresh_low_turns_before": 608,
+        "fresh_low_turns_after": 0,
+        "masks_changed": 338,
+        "measured_support_frames": 531,
+        "obstacle_cell_samples_before": 159034,
+        "obstacle_cell_samples_after": 145609,
+        "front_obstacle_cell_samples_before": 38503,
+        "front_obstacle_cell_samples_after": 29346,
+        "clipped_wall_cell_samples_preserved": 7157,
+        "safety_stops": {
+          "samples": 0,
+          "violations": 0
+        }
+      },
+      {
+        "bag": "field_2026_11_24_10_30_37_492826",
+        "passed": true,
+        "frames": 4757,
+        "command_ticks": 10948,
+        "fresh_low_turns_before": 581,
+        "fresh_low_turns_after": 0,
+        "masks_changed": 0,
+        "measured_support_frames": 0,
+        "obstacle_cell_samples_before": 1175805,
+        "obstacle_cell_samples_after": 1175805,
+        "front_obstacle_cell_samples_before": 61311,
+        "front_obstacle_cell_samples_after": 61311,
+        "clipped_wall_cell_samples_preserved": 262978,
+        "safety_stops": {
+          "samples": 6737,
+          "violations": 0
+        }
+      },
+      {
+        "bag": "field_2026_11_24_10_37_59_294071",
+        "passed": true,
+        "frames": 1519,
+        "command_ticks": 2045,
+        "fresh_low_turns_before": 390,
+        "fresh_low_turns_after": 0,
+        "masks_changed": 215,
+        "measured_support_frames": 253,
+        "obstacle_cell_samples_before": 357580,
+        "obstacle_cell_samples_after": 346439,
+        "front_obstacle_cell_samples_before": 40837,
+        "front_obstacle_cell_samples_after": 34741,
+        "clipped_wall_cell_samples_preserved": 72380,
+        "safety_stops": {
+          "samples": 875,
+          "violations": 0
+        }
+      }
+    ],
+    "scope": "Cold-start sensor/mask replay and control replay from recorded Paths at recorded command receipt times; no ROS playback, executor or SDK. Manual interventions and sensor poses remain fixed. No semantic wall ground truth or physical success-rate claim."
+  },
+  "upstairs_front_obstacle_cell_sample_reduction_fraction": 0.1922485505419712,
+  "bag_replay_source": "/devwork/experiments/turn-stair-fix-20261124/source-r3",
+  "bag_replay_components_identical_to_release": true,
+  "bag_replay_component_sha256": {
+    "tinynav/core/planning_node.py": "7eb1830b321c70db878583a20ec01e87d8ce94c5f8822c5ede1b99d03ddf6677",
+    "tinynav/core/robot_specs.py": "7a78a344735f071b87ffeb8057cbbaac92a8f005b045496cd2928900ded80002",
+    "tinynav/core/stair_obstacles.py": "5b372c38d71ccc8df89a1a9c8c42d853a8afa9f0c5fed922c03bacf5b8a417be",
+    "tinynav/platforms/cmd_vel_control.py": "fe969abc70161d63edf910526f87487ca49c3e666b04ece76317992374f8ea19",
+    "tool/field_stair_regression.py": "5148e68ae5fe70eabb1266000731eb10a60e5e8d5e3fd83824ec072f771805b0"
+  },
+  "simulations": {
+    "up": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 1000.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "none",
+        "at": 3.0,
+        "lock_time": null,
+        "recovery_time": null,
+        "rejected_early": false
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 418.0999999996912,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.15969247244659654,
+      "stop": [
+        -0.5859040619617208,
+        0.8328628866760477,
+        26.228217202220886
+      ],
+      "hold": [
+        -0.6052474100248223,
+        0.8341001659801238,
+        26.20781352179867
+      ],
+      "landing_events": [
+        [
+          19.70000000000013,
+          1,
+          2.612788252881159,
+          -0.0475151381533619,
+          1.7478083129903799
+        ],
+        [
+          43.200000000004266,
+          2,
+          -0.35031943437253144,
+          1.3534179257903027,
+          3.1947136647887224
+        ],
+        [
+          65.90000000001146,
+          3,
+          2.6955010325990387,
+          -0.06978955679014738,
+          4.632216033594188
+        ],
+        [
+          89.89999999998963,
+          4,
+          -0.28617120260859535,
+          1.4006095746576002,
+          6.07264071070647
+        ],
+        [
+          113.29999999996835,
+          5,
+          2.6470694847530885,
+          -0.0868245282980608,
+          7.513253037209408
+        ],
+        [
+          137.49999999994637,
+          6,
+          -0.2967183565746556,
+          1.3074277187452366,
+          8.953524933862218
+        ],
+        [
+          160.59999999992536,
+          7,
+          2.813442942480194,
+          0.24579521070593036,
+          10.394193159140857
+        ],
+        [
+          182.39999999990553,
+          8,
+          -0.2207986090595552,
+          1.2755027578014024,
+          11.780533694933993
+        ],
+        [
+          204.39999999988552,
+          9,
+          2.7361110508025455,
+          0.05049542521354172,
+          13.273229946307898
+        ],
+        [
+          226.0999999998658,
+          10,
+          -0.34856599116502446,
+          1.4040097568954713,
+          14.70812104169077
+        ],
+        [
+          248.89999999984505,
+          11,
+          2.6946045587185843,
+          -0.0895677532423071,
+          16.152327169570516
+        ],
+        [
+          275.7999999998206,
+          12,
+          -0.4018912688568548,
+          0.9336975980658221,
+          17.589421856853722
+        ],
+        [
+          297.9999999998004,
+          13,
+          2.8172635513873665,
+          0.2518625003740328,
+          19.03254838678864
+        ],
+        [
+          319.09999999978123,
+          14,
+          -0.3497867360269923,
+          1.3719026083168886,
+          20.46840069813751
+        ],
+        [
+          345.99999999975677,
+          15,
+          2.82975265885942,
+          0.3986248252851209,
+          21.914724682956496
+        ],
+        [
+          366.4999999997381,
+          16,
+          -0.33110978090486803,
+          1.3637658901060727,
+          23.350805960787625
+        ],
+        [
+          392.7999999997142,
+          17,
+          2.7942475386728263,
+          0.4226107866074865,
+          24.78852691486968
+        ],
+        [
+          415.59999999969347,
+          18,
+          -0.40725077275951077,
+          1.0434640881704291,
+          26.233956501710733
+        ]
+      ],
+      "trace_file": "up.trace.npz",
+      "in_place_min_abs_yaw_rad_s": 0.25,
+      "in_place_turn_samples": 680
+    },
+    "down": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 1000.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "none",
+        "at": 3.0,
+        "lock_time": null,
+        "recovery_time": null,
+        "rejected_early": false
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 405.099999999703,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.2761842321641293,
+      "stop": [
+        -0.562204938272756,
+        1.089829025930789,
+        -25.60406491981143
+      ],
+      "hold": [
+        -0.5728579777064843,
+        1.0877313568187905,
+        -25.634561532420932
+      ],
+      "landing_events": [
+        [
+          26.199999999998838,
+          1,
+          2.843192242377671,
+          0.176304362475618,
+          -1.130457075626915
+        ],
+        [
+          48.400000000006926,
+          2,
+          -0.4493170626402398,
+          1.2162832141786701,
+          -2.571416146011218
+        ],
+        [
+          69.90000000000782,
+          3,
+          2.8123965479443878,
+          0.1420313855557445,
+          -3.9997563733604107
+        ],
+        [
+          92.69999999998709,
+          4,
+          -0.4064441351059142,
+          1.2314635185749565,
+          -5.436377030837177
+        ],
+        [
+          114.9999999999668,
+          5,
+          2.8396664421997517,
+          0.27303920428862716,
+          -6.890161774276771
+        ],
+        [
+          137.6999999999462,
+          6,
+          -0.44270178914039965,
+          1.1794669435260798,
+          -8.31931315653479
+        ],
+        [
+          159.39999999992645,
+          7,
+          2.7875944338636502,
+          0.0609595478001855,
+          -9.775584610716189
+        ],
+        [
+          180.9999999999068,
+          8,
+          -0.441779150296228,
+          1.0429943462446507,
+          -11.21217259541777
+        ],
+        [
+          203.69999999988616,
+          9,
+          2.844471246095597,
+          0.1366297118481692,
+          -12.641779950828932
+        ],
+        [
+          225.39999999986642,
+          10,
+          -0.454714015119469,
+          1.2035100782934596,
+          -14.091137113277355
+        ],
+        [
+          246.69999999984705,
+          11,
+          2.774238727451256,
+          0.06074246244489222,
+          -15.529936863961225
+        ],
+        [
+          269.49999999982634,
+          12,
+          -0.38078910273054445,
+          1.2215135012519986,
+          -16.969320517987075
+        ],
+        [
+          292.2999999998056,
+          13,
+          2.7682466699639026,
+          0.08104231350781602,
+          -18.408912862909776
+        ],
+        [
+          315.1999999997848,
+          14,
+          -0.41044691627017443,
+          1.1888912971058037,
+          -19.84078074636249
+        ],
+        [
+          336.3999999997655,
+          15,
+          2.792988894881075,
+          0.06699450639100879,
+          -21.2935420365334
+        ],
+        [
+          358.3999999997455,
+          16,
+          -0.39496699362176796,
+          1.2327872216885332,
+          -22.725625423775885
+        ],
+        [
+          380.7999999997251,
+          17,
+          2.817872438206105,
+          0.10597015116934906,
+          -24.17026207643797
+        ],
+        [
+          402.9999999997049,
+          18,
+          -0.4281613895341619,
+          1.2058325237192165,
+          -25.608331656290027
+        ]
+      ],
+      "trace_file": "down.trace.npz",
+      "in_place_min_abs_yaw_rad_s": 0.25,
+      "in_place_turn_samples": 729
+    }
+  },
+  "minimum_release_shaft_clearance_m": 0.1,
+  "original_safety_assertions_retained": 12,
+  "current_assertion_count": 21,
+  "simulation_harness_unchanged": true,
+  "jit_functions_unchanged": true,
+  "performance": {
+    "samples": 90,
+    "median_ms": 14.101445092819631,
+    "p95_ms": 18.8679761136882,
+    "scope": "Six saved 544x640 field frames, 15 repeats each, single BLAS thread, concurrent simulation load; not end-to-end latency"
+  },
+  "source_snapshot": "/devwork/experiments/turn-stair-fix-20261124/source-r4",
+  "source_sha256": {
+    "tinynav/core/stair_target.py": "76a151874057b3023a9d0bdf69de3730a71ef72c7fcb48f5e5faa43b62b728cb",
+    "tinynav/core/planning_node.py": "7eb1830b321c70db878583a20ec01e87d8ce94c5f8822c5ede1b99d03ddf6677",
+    "tinynav/core/robot_specs.py": "7a78a344735f071b87ffeb8057cbbaac92a8f005b045496cd2928900ded80002",
+    "tinynav/core/stair_obstacles.py": "5b372c38d71ccc8df89a1a9c8c42d853a8afa9f0c5fed922c03bacf5b8a417be",
+    "tinynav/platforms/cmd_vel_control.py": "fe969abc70161d63edf910526f87487ca49c3e666b04ece76317992374f8ea19",
+    "tool/field_stair_regression.py": "5148e68ae5fe70eabb1266000731eb10a60e5e8d5e3fd83824ec072f771805b0",
+    "tests/test_stair_mode.py": "97892f25eed1ac40f2857f60bee41dcacc2042be2b3bfe3be5414ca4dea0e6a9",
+    "tests/test_stair_tread_obstacles.py": "6eb76f6dd957dd16673859141cec73550e0d628463b1994ec194c8d7e71437df",
+    "tool/stair_mode_sim.py": "095da3e973ddb14cbe7dc3fff4c7ca2524933df63174e7b22787d477e6a0fa91"
+  },
+  "first_full_candidate": {
+    "up": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 1000.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "none",
+        "at": 3.0,
+        "lock_time": null,
+        "recovery_time": null,
+        "rejected_early": false
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 418.59999999969074,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.009460743477950145,
+      "stop": [
+        -0.5256068241666273,
+        0.6845890941572693,
+        26.221952414066205
+      ],
+      "hold": [
+        -0.5370592181296251,
+        0.6822027300272377,
+        26.204345925487342
+      ],
+      "landing_events": [
+        [
+          19.70000000000013,
+          1,
+          2.612788252881159,
+          -0.0475151381533619,
+          1.7478083129903799
+        ],
+        [
+          44.30000000000483,
+          2,
+          -0.40535799642435144,
+          1.229111798367667,
+          3.1879258937467267
+        ],
+        [
+          68.20000000000937,
+          3,
+          2.8052424361437294,
+          0.4065263063037036,
+          4.63155638666561
+        ],
+        [
+          88.99999999999045,
+          4,
+          -0.34288303200128284,
+          1.3040816222644387,
+          6.072432366180461
+        ],
+        [
+          113.29999999996835,
+          5,
+          2.8429068460204,
+          0.30834643558928354,
+          7.508595058438586
+        ],
+        [
+          134.29999999994928,
+          6,
+          -0.24178287521427297,
+          1.408394131557727,
+          8.953629958038308
+        ],
+        [
+          156.4999999999291,
+          7,
+          2.693450573471839,
+          -0.06118304834551367,
+          10.38975017234
+        ],
+        [
+          180.799999999907,
+          8,
+          -0.3917251841323581,
+          1.1924680125318652,
+          11.831458476112303
+        ],
+        [
+          202.09999999988761,
+          9,
+          2.732247087758843,
+          -0.09156556974993443,
+          13.267764748183078
+        ],
+        [
+          224.89999999986688,
+          10,
+          -0.2924613918198541,
+          1.4213273167161593,
+          14.712590195365017
+        ],
+        [
+          247.69999999984614,
+          11,
+          2.754053185145391,
+          -0.017900576446371722,
+          16.145844709749767
+        ],
+        [
+          278.7999999998179,
+          12,
+          -0.38114372051423484,
+          0.669587781654225,
+          17.590225437396636
+        ],
+        [
+          298.09999999980033,
+          13,
+          2.719766668705842,
+          -0.03647677445962332,
+          19.027754216120552
+        ],
+        [
+          323.89999999977687,
+          14,
+          -0.45038124072323577,
+          0.8829867874435223,
+          20.468763057807784
+        ],
+        [
+          345.1999999997575,
+          15,
+          2.692470229751277,
+          0.02318029437469812,
+          21.914978100727385
+        ],
+        [
+          368.5999999997362,
+          16,
+          -0.31963942480970353,
+          1.2369024830780546,
+          23.349504559679904
+        ],
+        [
+          390.4999999997163,
+          17,
+          2.713866663683944,
+          -0.04285384290447654,
+          24.78947774967424
+        ],
+        [
+          416.1999999996929,
+          18,
+          -0.3699189133833559,
+          0.9049993572748675,
+          26.229302924848536
+        ]
+      ],
+      "trace_file": "up.trace.npz"
+    },
+    "down": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 1000.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "none",
+        "at": 3.0,
+        "lock_time": null,
+        "recovery_time": null,
+        "rejected_early": false
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 405.59999999970256,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.2589666038802934,
+      "stop": [
+        -0.5771712293636205,
+        1.1196654494528357,
+        -25.603865344715615
+      ],
+      "hold": [
+        -0.592821183053221,
+        1.1141622560790359,
+        -25.634249202269686
+      ],
+      "landing_events": [
+        [
+          26.199999999998838,
+          1,
+          2.843192242377671,
+          0.176304362475618,
+          -1.130457075626915
+        ],
+        [
+          48.300000000006875,
+          2,
+          -0.4225570328393961,
+          1.2456180108480264,
+          -2.5611848218330184
+        ],
+        [
+          69.80000000000791,
+          3,
+          2.8004732723785337,
+          0.0593818221335331,
+          -4.004439412554119
+        ],
+        [
+          92.59999999998718,
+          4,
+          -0.4197610634633243,
+          1.1857028594053984,
+          -5.441533774279411
+        ],
+        [
+          114.29999999996744,
+          5,
+          2.778194835662843,
+          0.04729845170730755,
+          -6.888621143050316
+        ],
+        [
+          136.29999999994746,
+          6,
+          -0.38222618702668865,
+          1.2775707184659169,
+          -8.332053351572208
+        ],
+        [
+          159.09999999992672,
+          7,
+          2.7709088781732314,
+          0.052283499048824504,
+          -9.774670292568103
+        ],
+        [
+          180.9999999999068,
+          8,
+          -0.4352086495311745,
+          1.2127124915713783,
+          -11.208015577509373
+        ],
+        [
+          203.19999999988661,
+          9,
+          2.834563646665651,
+          0.1540193313249516,
+          -12.650127931337126
+        ],
+        [
+          224.39999999986733,
+          10,
+          -0.3590704839854306,
+          1.1067191228599325,
+          -14.089479050002213
+        ],
+        [
+          246.89999999984687,
+          11,
+          2.8081075313821837,
+          0.08692611866719517,
+          -15.519552501880943
+        ],
+        [
+          270.2999999998256,
+          12,
+          -0.4331219526750422,
+          1.2343368997970303,
+          -16.962009044690856
+        ],
+        [
+          291.69999999980615,
+          13,
+          2.7689133152583683,
+          0.07531886882114788,
+          -18.406577117516587
+        ],
+        [
+          314.79999999978514,
+          14,
+          -0.4456215048713397,
+          1.1873714487887665,
+          -19.84643896604705
+        ],
+        [
+          336.09999999976577,
+          15,
+          2.7352106193720864,
+          -0.013187536198565887,
+          -21.26612534122513
+        ],
+        [
+          359.19999999974476,
+          16,
+          -0.41189138985136137,
+          1.2164220008774156,
+          -22.729127366197265
+        ],
+        [
+          381.39999999972457,
+          17,
+          2.8245635735122816,
+          0.12481503844414929,
+          -24.172085297387188
+        ],
+        [
+          403.49999999970447,
+          18,
+          -0.4552445343640863,
+          1.2331450833425888,
+          -25.602566852715913
+        ]
+      ],
+      "trace_file": "down.trace.npz"
+    },
+    "accepted": false,
+    "reason": "UP completed but only 0.00946m shaft clearance; increased landing step-in from .5 to .6m and reran full UP9/DOWN9"
+  },
+  "artifacts": "/devwork/experiments/turn-stair-fix-20261124",
+  "physical_robot_tested": false,
+  "production_updated": false,
+  "flutter_changed": false,
+  "limitations": [
+    "All three real bags contain manual intervention; fixed sensor/Path replay is not autonomous physical success rate",
+    "No SDK execution feedback in bags; .25 rad/s is a software floor, not a measured universal actuator threshold",
+    "Moving small-curvature yaw remains unchanged; floor is specifically for in-place turns",
+    "Tread evidence is conservative and does not remove every false obstacle; unknown space is not cleared and unobserved thin railings remain a limitation",
+    "Open door/corridor layouts and other noise seeds were not newly validated by these two full runs"
+  ]
+}

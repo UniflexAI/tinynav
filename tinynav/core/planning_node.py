@@ -21,6 +21,7 @@ from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
+from tinynav.core.stair_obstacles import measured_tread_mask
 from tinynav.core.vio_safety import safety_blocked, accept_safety
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
@@ -108,7 +109,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
     return occupancy_grid
 
 
-def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
+def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None, tread_mask=None):
     """Obstacle = cells where occupied voxels span >= min_wall_span_m in z.
     Walls have large z-span; stair risers / ground bumps have small span."""
     config = config or ObstacleConfig()
@@ -128,6 +129,8 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
         z_span = (occ_high - occ_low) * resolution
         obstacle = has_occ & (z_span >= config.min_wall_span_m)
 
+    if tread_mask is not None:
+        obstacle &= ~tread_mask
     if config.dilation_cells > 0 and np.any(obstacle):
         obstacle = binary_dilation(obstacle, iterations=config.dilation_cells)
     return obstacle
@@ -305,7 +308,7 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
-def generate_trajectories(init_p, init_q, min_forward_speed=0., duration=3., max_forward_angular=None):
+def generate_trajectories(init_p, init_q, min_forward_speed=0., duration=3., max_forward_angular=None, min_turn_speed=0.):
     trajectories, params = generate_trajectory_library_3d(
         init_p=init_p, init_q=init_q, duration=duration,
         max_linear_vel=ROBOT_CONFIG.max_linear_vel,
@@ -328,6 +331,15 @@ def generate_trajectories(init_p, init_q, min_forward_speed=0., duration=3., max
     if max_forward_angular is not None:
         keep = (params[:, 0] <= 0.) | (np.abs(params[:, 1]) <= max_forward_angular)
         trajectories, params = trajectories[keep], params[keep]
+    if min_turn_speed > 0.:
+        keep = (params[:, 0] != 0.) | (params[:, 1] == 0.) | (np.abs(params[:, 1]) >= min_turn_speed)
+        trajectories, params = trajectories[keep], params[keep]
+        extra, extra_params = generate_trajectory_library_3d(
+            init_p=init_p, init_q=init_q, duration=duration,
+            max_linear_vel=ROBOT_CONFIG.max_linear_vel, max_angular_vel=min_turn_speed)
+        selected = (extra_params[:, 0] == 0.) & np.isclose(np.abs(extra_params[:, 1]), min_turn_speed)
+        trajectories = np.concatenate([trajectories, extra[selected]], axis=0)
+        params = np.concatenate([params, extra_params[selected]], axis=0)
     return trajectories, params
 
 
@@ -343,6 +355,7 @@ class StairPlanning:
     only when no turn is collision free."""
     min_linear_vel: float = 0.25
     moving_turn_limit: float = 0.2  # sharper turns must rotate in place before advancing
+    turn_score_horizon_s: float = 0.5
     min_wall_span_m: float = 0.3
     safety_radius: float = 0.1
     dilation_cells: int = 1         # 0 let the robot run into a wall on a wide landing (field_2026_10_09_13_36_59,
@@ -460,6 +473,15 @@ class PlanningNode(Node):
         parts = msg.data.split()
         self._stair_finishing = len(parts) > 1 and parts[1] == 'finishing'
         self._stair_searching = len(parts) > 1 and parts[1] == 'search'
+        self._stair_up = bool(parts and parts[0] == 'up')
+        height = next((p.split('=', 1)[1] for p in parts if p.startswith('cam_h=')), None)
+        if height is not None:
+            try:
+                height = float(height)
+            except ValueError:
+                height = None
+            if height is not None and np.isfinite(height) and .1 <= height <= 1.5:
+                self._stair_camera_height = height
         pitch = next((p.split('=', 1)[1] for p in parts if p.startswith('pitch=')), '0')
         try:
             pitch = float(pitch)
@@ -674,12 +696,16 @@ class PlanningNode(Node):
                 reverse_gate_penalty = 1e9
 
         # regular trajectory penalty
-        traj_end = np.array(traj[-1,:3])
+        turn = self.in_stair_mode and not getattr(self, '_stair_searching', False) and param[0] == 0.
+        endpoint = traj[min(len(traj) - 1, round(STAIR.turn_score_horizon_s / .1))] if turn else traj[-1]
+        traj_end = np.array(endpoint[:3])
         target_end = target_pose if target_pose is not None else traj_end
         dist = np.linalg.norm(traj_end - target_end)
         # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
         # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
-        heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
+        # Score a stair turn before it overshoots a small bearing correction;
+        # collision checking still covers the complete sampled trajectory.
+        heading = goal_heading_error(endpoint, target_end) * max(.3 if turn else 0., min(1.0, dist / 2.0))
 
         return (
             score * 2000
@@ -736,9 +762,14 @@ class PlanningNode(Node):
             # self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            treads = None
+            if stair and getattr(self, '_stair_up', False) and ROBOT_CONFIG.name in ('go2', 'go2w'):
+                treads = measured_tread_mask(depth, T, self.K, self.occupancy_grid, self.origin,
+                    self.resolution, getattr(self, '_stair_camera_height', ROBOT_CONFIG.camera_height))
             obstacle_mask = build_obstacle_map(
                 self.occupancy_grid, self.origin, self.resolution,
                 robot_z=T[2, 3], config=self.active_obstacle_config(stair),
+                tread_mask=treads,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
@@ -759,7 +790,8 @@ class PlanningNode(Node):
             trajectories, params = generate_trajectories(init_p, init_q,
                 min_forward_speed=STAIR.min_linear_vel if stair else 0.,
                 duration=(1. if self._stair_finishing else 1.5 if self._stair_searching else 3.) if stair else 3.,
-                max_forward_angular=STAIR.moving_turn_limit if stair else None)
+                max_forward_angular=STAIR.moving_turn_limit if stair else None,
+                min_turn_speed=max(ROBOT_CONFIG.min_angular_vel, ROBOT_CONFIG.stair_min_turn_vel) if stair else 0.)
             self.last_T = T
             self.last_stamp = stamp
 

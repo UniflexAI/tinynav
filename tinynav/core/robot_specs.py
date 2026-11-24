@@ -45,6 +45,7 @@ class RobotConfig:
     min_linear_vel: float = 0.1
     max_linear_vel: float = 1.0
     min_angular_vel: float = 0.1
+    stair_min_turn_vel: float = 0.25  # rad/s, in-place stair turns; shared by planning and control
     max_angular_vel: float = 0.75
     obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
 

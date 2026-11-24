@@ -546,6 +546,80 @@ def test_stair_lattice_has_no_dead_zone_forward_samples_and_keeps_rotation():
         assert trajectories.shape[1]==round(duration/.1)+1
 
 
+@pytest.mark.parametrize('duration', [1., 1.5, 3.])
+def test_stair_lattice_samples_executable_in_place_turns(duration):
+    from tinynav.core.planning_node import generate_trajectories
+    from tinynav.core.robot_specs import ROBOT_CONFIG
+    q = Rotation.from_matrix(camera_pose()[:3, :3]).as_quat()
+    trajectories, params = generate_trajectories(np.zeros(3), q, min_forward_speed=.25,
+        duration=duration, max_forward_angular=.2, min_turn_speed=ROBOT_CONFIG.stair_min_turn_vel)
+    turns = (params[:, 0] == 0.) & (params[:, 1] != 0.)
+    assert np.all(np.abs(params[turns, 1]) >= .25 - 1e-9)
+    for sign in (-1, 1):
+        index = np.flatnonzero((params[:, 0] == 0.) & np.isclose(params[:, 1], sign * .25))[0]
+        body0 = Rotation.from_quat(trajectories[index, 0, 3:]).as_matrix()
+        body1 = Rotation.from_quat(trajectories[index, -1, 3:]).as_matrix()
+        assert np.linalg.norm(Rotation.from_matrix(body0.T @ body1).as_rotvec()) == pytest.approx(.25 * duration)
+        assert np.allclose(trajectories[index, :, :3], 0.)
+    assert np.any((params[:, 0] > 0.) & (np.abs(params[:, 1]) > 0.) & (np.abs(params[:, 1]) < .2))
+
+
+@pytest.mark.parametrize('vx', [0., .01])
+@pytest.mark.parametrize('yaw', [-.214285714, -.107142857, .107142857, .214285714, 0.])
+def test_stair_in_place_turn_floor_and_stale_stop(node, monkeypatch, vx, yaw):
+    from tinynav.platforms import cmd_vel_control
+    clock = SimpleNamespace(monotonic=lambda: 10.)
+    monkeypatch.setattr(cmd_vel_control, 'time', clock)
+    control = CmdVelControlNode()
+    try:
+        control.cmd_pub = Mock()
+        control._nav_active = True
+        control._on_stair_status(String(data='up ok pitch=17'))
+        control.latest_cmd.linear.x = vx
+        control.latest_cmd.angular.z = yaw
+        control.last_path_update_time = 10.
+        control.cmd_timer_callback()
+        command = control.cmd_pub.publish.call_args.args[0]
+        assert command.linear.x == 0.
+        assert command.angular.z == pytest.approx(np.sign(yaw) * .25)
+        # A delayed path must stop, rather than being boosted back to the turn floor.
+        clock.monotonic = lambda: 10.6
+        control.cmd_timer_callback()
+        assert control.cmd_pub.publish.call_args.args[0].angular.z == 0.
+        control._paused = True
+        control.last_path_update_time = 10.6
+        control.cmd_timer_callback()
+        assert control.cmd_pub.publish.call_args.args[0].angular.z == 0.
+    finally:
+        control.destroy_node()
+
+
+@pytest.mark.parametrize('bearing', [-10., 10.])
+@pytest.mark.parametrize('distance', [.3, 1.])
+def test_executable_turn_beats_stalling_at_small_stair_bearing(bearing, distance):
+    from tinynav.core.planning_node import generate_trajectories, PlanningNode
+    q = Rotation.from_matrix(camera_pose()[:3, :3]).as_quat()
+    trajectories, params = generate_trajectories(np.zeros(3), q, min_turn_speed=.25)
+    stop = np.flatnonzero((params[:, 0] == 0.) & (params[:, 1] == 0.))[0]
+    turn = np.flatnonzero((params[:, 0] == 0.) & np.isclose(params[:, 1], -np.sign(bearing) * .25))[0]
+    target = np.array([distance * np.cos(np.deg2rad(bearing)), distance * np.sin(np.deg2rad(bearing)), 0.])
+    fake = SimpleNamespace(in_stair_mode=True, last_param=(0., 0.))
+    costs = [PlanningNode.trajectory_cost(fake, trajectories[i], params[i], 0., target, False) for i in (stop, turn)]
+    assert costs[1] < costs[0]
+
+
+def test_landing_search_keeps_original_turn_cost_horizon():
+    from tinynav.core.planning_node import generate_trajectories, PlanningNode
+    q = Rotation.from_matrix(camera_pose()[:3, :3]).as_quat()
+    trajectories, params = generate_trajectories(np.zeros(3), q, duration=1.5, min_turn_speed=.25)
+    search = SimpleNamespace(in_stair_mode=True, _stair_searching=True, last_param=(0., 0.))
+    normal = SimpleNamespace(in_stair_mode=False, last_param=(0., 0.))
+    for i in np.flatnonzero(params[:, 0] == 0.):
+        target = np.array([.3, .2, 0.])
+        assert PlanningNode.trajectory_cost(search, trajectories[i], params[i], 0., target, False) \
+            == PlanningNode.trajectory_cost(normal, trajectories[i], params[i], 0., target, False)
+
+
 @pytest.mark.parametrize('direction', ['up','down'])
 @pytest.mark.parametrize('phase', ['ok','search','finishing'])
 @pytest.mark.parametrize('yaw', [0.,.4])

@@ -89,7 +89,7 @@ class StairConfig:
     uturn_align_deg: float = 45.0   # turn side given: turn in place until the U-turn aim point is within this of the
                                     # heading, then walk to it
     uturn_ahead: float = 1.0        # ... past the next flight's start, aim this far along it (back along the last flight)
-    uturn_step_in: float = 0.5      # ... but first walk straight on this far past the last pitched pose: turning as soon as
+    uturn_step_in: float = 0.6      # ... but first walk straight on this far past the last pitched pose: turning as soon as
                                     # the last step is left swings the body into the railing post there (manual driving on
                                     # field_2026_10_08_16_02_45 was 0.13-0.49 m in at 90 deg, the robot -0.16-0.24 m)
     uturn_step_clearance: float = 0.3  # ... as long as the cell walked to keeps this far from walls

@@ -853,3 +853,7 @@ in ordinary navigation and all stair phases. The extra ascent bottom raise is
 zero; min_wall_span_m remains 0.3 m. Restart backend/planning after updating
 Python sources. This band-only follow-up does not require another Flutter build.
 See [current parameters and validation](stair_vio_safety.md).
+
+## 2026-11-24 turn and measured-tread update
+
+The [turn/tread release notes and field regression](stair_turn_treads_2026_11_24.md) cover the shared 0.25 rad/s stair in-place turn floor, phase-specific heading score, measured-support obstacle filtering on ascent, and 0.6 m landing step-in. The obstacle band remains [-0.2, +0.2] m and min_wall remains 0.3 m. Pull the complete branch and restart the stair, planning and cmd_vel backend processes together; the new `tinynav/core/stair_obstacles.py` module is required. Flutter has no changes. These regressions do not claim a new physical robot run.

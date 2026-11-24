@@ -184,3 +184,5 @@ SHA256、各场景结果和速度轨迹检查。服务器原始工件保存在
 ## 2026-11-24 field follow-up
 
 See [today's field audit and target correction](stair_field_2026_11_24.md). The target correction rejects measured railing/wall crossings without changing the VIO recovery policy, speed settings or obstacle band. All three Nov24 bags include manual intervention. Noisy UP9/DOWN9 and 169 focused tests pass; physical dead-zone calibration and false stair obstacles remain open. `min_wall=0.4` is not deployed because it empties the current narrow-band obstacle map.
+
+See the [Nov24 turn/tread follow-up](stair_turn_treads_2026_11_24.md) for the shared 0.25 rad/s in-place turn floor, measured-tread obstacle classification and noisy UP9/DOWN9 regressions. VIO recovery behavior is unchanged; hardware actuator calibration remains unvalidated.
