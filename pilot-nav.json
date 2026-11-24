@@ -3,7 +3,7 @@
   "capabilities": ["planner.views", "planner.arrival", "planner.route",
                    "planner.strict_follow", "planner.priors", "planner.footprint_scale",
                    "robot.measured_camera", "robot.footprint", "robot.open_speed",
-                   "robot.face_turn_speed"],
+                   "robot.face_turn_speed", "map.slim"],
   "processes": {"planning": "tinynav/core/planning_node.py",
                 "planning_vis": "tinynav/core/planning_vis_node.py",
                 "cmd_vel_control": "tinynav/platforms/cmd_vel_control.py"},

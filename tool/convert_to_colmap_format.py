@@ -21,6 +21,7 @@ import shelve
 from tqdm import tqdm
 from convert_to_nerf_format import convert_nerf_format
 from video_db import VideoDB
+from tinynav.core.map_store import decode_depth
 
 
 
@@ -228,7 +229,7 @@ class TinynavToColmapConverter:
         K = self.infra1_intrinsics
             
         for image_id, timestamp, image_name, rgb_pose_in_world, infra1_pose_in_world in tqdm(images, desc="Generating 3D points from depth"):
-            depth = self.depths[str(timestamp)]
+            depth = decode_depth(self.depths[str(timestamp)])
             # Convert depth to 3D points
             points_3d = self._depth_to_points3d(
                 depth, K, infra1_pose_in_world, 

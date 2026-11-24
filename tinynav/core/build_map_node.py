@@ -37,6 +37,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.flexglue import FlexGlueTRT
+from tinynav.core.map_store import decode_depth, encode_depth, half_descriptors
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
 from tinynav.core.vlad import compute_vlad, train_vocabulary_streaming
@@ -313,6 +314,16 @@ class IntKeyShelf:
         self.db.close()
 
 
+class DepthShelf(IntKeyShelf):
+    """Float32 metres in and out, `encode_depth`'s uint16 millimetres on disk."""
+
+    def __getitem__(self, key: int):
+        return decode_depth(super().__getitem__(key))
+
+    def __setitem__(self, key: int, depth):
+        super().__setitem__(key, encode_depth(depth))
+
+
 class OdomPoseRecorder:
     """
     Utility class to record continuous odometry data to disk.
@@ -388,7 +399,7 @@ class TinyNavDB():
         self.semantic_embeddings = IntKeyShelf(f"{map_save_path}/semantic_embeddings")
         self.vlad_descriptors = IntKeyShelf(f"{map_save_path}/vlad_descriptors")
         self.patch_tokens = IntKeyShelf(f"{map_save_path}/patch_tokens")
-        self.depths = IntKeyShelf(f"{map_save_path}/depths")
+        self.depths = DepthShelf(f"{map_save_path}/depths")
         self.metadata = shelve.open(f"{map_save_path}/metadata")
 
     def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None, vlad_descriptor:np.ndarray = None, patch_tokens:np.ndarray = None, infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
@@ -403,7 +414,7 @@ class TinyNavDB():
         if semantic_embedding is not None:
             self.semantic_embeddings[key] = semantic_embedding
         if features is not None:
-            self.features[key] = features
+            self.features[key] = half_descriptors(features)
         if vlad_descriptor is not None:
             self.vlad_descriptors[key] = vlad_descriptor
         if patch_tokens is not None:
