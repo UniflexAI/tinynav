@@ -333,7 +333,9 @@ class RLPlanner:
                 bev = self.policy.bev
                 a = self.policy.last_action
                 policy_speed = v
+                self.semantic_raw_command = (v, w)
             except (ValueError, RuntimeError) as exc:
+                self.semantic_raw_command = (0., 0.)
                 self.guided_command = (0., 0.)
                 self.motion_command_sent = False
                 bev = np.zeros((4,24,24),dtype=np.float32)
@@ -348,7 +350,7 @@ class RLPlanner:
             v = float(a[0] * V_MAX if a[0] >= 0 else -a[0] * V_MIN)
             w = float(a[1] * W_MAX)
             policy_speed = v
-            v, w = route_guided_command(getattr(self, "route_xy", None), center, yaw, v, w)
+        v, w = route_guided_command(getattr(self, "route_xy", None), center, yaw, v, w)
         self.guided_command = (v, w)
         turn_age = stamp - self.turn_started
         preferred_turn = self.turn_direction if 0.0 <= turn_age < TURN_PREFERENCE_S else 0.0

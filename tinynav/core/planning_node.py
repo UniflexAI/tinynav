@@ -454,6 +454,7 @@ class PlanningNode(Node):
                     from tinynav.rl.semantic_bev_policy import LiveSemanticPolicy
                     policy = LiveSemanticPolicy()
                     self.semantic_request_pub = self.create_publisher(Twist, "/planning/semantic_raw_cmd", 10)
+                    self.semantic_guided_pub = self.create_publisher(Twist, "/planning/semantic_guided_cmd", 10)
                     self.get_logger().info(f"Semantic BEV PPO enabled (R31, device={policy.device})")
                 else:
                     policy = TRTPolicy()
@@ -873,8 +874,11 @@ class PlanningNode(Node):
         self.rl_cmd_pub.publish(cmd)
         if self.semantic_bev:
             raw = Twist()
-            raw.linear.x, raw.angular.z = self.rl.guided_command
+            raw.linear.x, raw.angular.z = self.rl.semantic_raw_command
             self.semantic_request_pub.publish(raw)
+            guided = Twist()
+            guided.linear.x, guided.angular.z = self.rl.guided_command
+            self.semantic_guided_pub.publish(guided)
 
         # Same pose convention as the library path: control-center position, camera orientation.
         path = Path()
