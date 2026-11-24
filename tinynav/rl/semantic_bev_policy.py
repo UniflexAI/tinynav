@@ -1,5 +1,6 @@
 """Online semantic BEV using TensorRT engines built on the target."""
 import asyncio
+import os
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +35,8 @@ class LiveSemanticPolicy:
         directory = Path(__file__).resolve().parents[1] / "models" / "semantic_bev"
         self.device = "tensorrt"
         self.record_input = False
+        self.allow_neutral_projection = os.environ.get("TINYNAV_SEMANTIC_NEUTRAL_FALLBACK") == "1"
+        self.semantic_projection_missing = False
         self.loop = asyncio.new_event_loop()
         self.student = SemanticEngine(directory / "r31-infra1.plan")
         self.actor = SemanticEngine(directory / "semantic-bev-ppo.plan")
@@ -47,7 +50,11 @@ class LiveSemanticPolicy:
         self.streak = 0
         self.committed = False
 
-    def choose(self, results):
+    def choose(self, results, *, neutral_projection=False):
+        if neutral_projection:
+            self.streak = 0
+            self.tick += 1
+            return results["cautious"][0]
         e=results["evidence"][0]
         if self.tick<9:
             right,left=e[0],e[4]
@@ -86,8 +93,13 @@ class LiveSemanticPolicy:
         np.minimum.at(scores,(i[inside],j[inside]),score_result["score"][0,v,u][inside])
         scores[~np.isfinite(scores)]=.5
         scores[blocked]=0
-        if not inside.any():
-            raise ValueError("Infra1 projection did not observe any BEV cells")
+        self.semantic_projection_missing = not inside.any()
+        if self.semantic_projection_missing:
+            # Keep the normal stop on missing depth. This trial only substitutes
+            # neutral scores when a depth frame with near returns is available.
+            near_depth = np.isfinite(depth) & (depth > .15) & (depth < 2.3)
+            if not self.allow_neutral_projection or np.count_nonzero(near_depth) < 64:
+                raise ValueError("Infra1 projection did not observe any BEV cells")
         self.bev=np.stack((blocked,clearance,FWD/2.3,2*scores-1)).astype(np.float32)
         dx,dy=goal-center
         vector=np.asarray([(c*dx+s*dy)/4,(-s*dx+c*dy)/4,
@@ -99,7 +111,7 @@ class LiveSemanticPolicy:
             frame[96,:9] = (*vector, self.tick, self.streak, self.committed)
             self.replay_input = frame
         outputs=self.loop.run_until_complete(self.actor.infer(bev=self.bev[None],state=vector[None]))
-        action=self.choose(outputs)
+        action=self.choose(outputs, neutral_projection=self.semantic_projection_missing)
         if not np.isfinite(action).all():
             raise ValueError("Semantic policy output is not finite")
         self.last_action=action
