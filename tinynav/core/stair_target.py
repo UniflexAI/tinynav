@@ -766,7 +766,10 @@ class StairTargetGenerator:
         kept = False
         wall_side = -(self.uturn_side or np.sign(self.well_side))
         if out['status'] == 'ok' and self.on_flight and travel is not None and wall_side != 0:
-            target, kept = self._keep_off_railing(target, cam, travel, wall_side, obstacle, reachable, cell_xy, height)
+            corrected, kept = self._keep_off_railing(target, cam, travel, wall_side, obstacle, reachable, cell_xy, height)
+            kept = kept and self._correction_connected(cam, corrected, inflated, height, origin)
+            if kept:
+                target = corrected
             out['wall_keep'] = kept
         if cfg.target_open_radius > 0 and not kept:
             # nudge the target into open space so planning is not pulled along a wall or railing
@@ -814,11 +817,32 @@ class StairTargetGenerator:
                 candidate = reachable & observed & (np.linalg.norm(cell_xy - aim, axis=-1) < .2)
                 if np.any(candidate):
                     c = np.unravel_index(np.argmin(np.where(candidate, np.linalg.norm(cell_xy - aim, axis=-1), np.inf)), height.shape)
-                    target = np.array([*cell_xy[c], height[c]])
-                    out['tread_aligned'] = True
+                    corrected = np.array([*cell_xy[c], height[c]])
+                    if self._correction_connected(cam, corrected, inflated, height, origin):
+                        target = corrected
+                        out['tread_aligned'] = True
         target = self._keep_in_front(target, cam, heading, reachable, observed, clearance, cell_xy, height, rel_xy, r_robot, out)
         out.update(goal=path_xyz[-1], target=target, path=path_xyz)
         return out
+
+    def _correction_connected(self, reference, target, blocked, height, origin):
+        # Global reachability can go around a railing; a flight correction must not cut through it.
+        delta = target[:2] - reference[:2]
+        count = max(1, int(np.ceil(np.max(np.abs(delta)) / self.cfg.resolution * 3)))
+        xy = reference[:2] + np.linspace(0., 1., count + 1)[:, None] * delta
+        cells = np.floor((xy - origin) / self.cfg.resolution).astype(int)
+        if np.any(cells < 0) or np.any(cells >= np.array(height.shape)):
+            return False
+        ix = tuple(cells.T)
+        z = height[ix]
+        if np.any(blocked[ix]) or not np.isfinite(z[-1]):
+            return False
+        # Descending treads hide one another. Keep the existing unknown-space policy,
+        # but reject discontinuities between adjacent measured support cells.
+        dz = np.diff(z)
+        dz = dz[np.isfinite(z[:-1]) & np.isfinite(z[1:])]
+        drop = self.cfg.max_drop_down if self.direction_sign < 0 else self.cfg.max_step
+        return bool(np.all(dz <= self.cfg.max_step) and np.all(dz >= -drop))
 
     def _keep_off_railing(self, target, cam, travel, wall_side, obstacle, reachable, cell_xy, height):
         """Move the target across the flight to wall_keep from the wall (wall_side: +1 left of travel, -1 right), at the

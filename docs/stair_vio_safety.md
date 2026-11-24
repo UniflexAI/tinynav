@@ -180,3 +180,7 @@ SHA256、各场景结果和速度轨迹检查。服务器原始工件保存在
 [固定高度带验证记录](validation/stair_obstacle_band_020_2026_11_23.json)。
 源码、初次失败、接触诊断及新结果保存在服务器
 `/home/dm/tinynav-stair-dev/experiments/band-020-20261123/`，最终结果在 `r2/`。
+
+## 2026-11-24 field follow-up
+
+See [today's field audit and target correction](stair_field_2026_11_24.md). The target correction rejects measured railing/wall crossings without changing the VIO recovery policy, speed settings or obstacle band. All three Nov24 bags include manual intervention. Noisy UP9/DOWN9 and 169 focused tests pass; physical dead-zone calibration and false stair obstacles remain open. `min_wall=0.4` is not deployed because it empties the current narrow-band obstacle map.

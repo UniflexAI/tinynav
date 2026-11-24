@@ -21,6 +21,35 @@ def camera_pose(z=0.4669, pitch=0.0):
     return T
 
 
+def test_target_correction_cannot_shortcut_a_railing_between_connected_lanes():
+    gen = StairTargetGenerator(StairConfig(resolution=.05))
+    height = np.zeros((40, 40))
+    blocked = np.zeros_like(height, dtype=bool)
+    blocked[20, :30] = True
+    # Both lanes connect around the end, but moving a target across the rail is invalid.
+    assert not gen._correction_connected(np.array([.8, .5, 0.]), np.array([1.2, .5, 0.]),
+                                         blocked, height, np.zeros(2))
+    assert gen._correction_connected(np.array([.8, 1.7, 0.]), np.array([1.2, 1.7, 0.]),
+                                    blocked, height, np.zeros(2))
+
+
+@pytest.mark.parametrize('sign', [1., -1.])
+def test_target_correction_keeps_step_limits_and_unknown_support(sign):
+    gen = StairTargetGenerator(StairConfig(resolution=.05))
+    gen.direction_sign = sign
+    height = np.zeros((40, 40))
+    height[20:] = sign * .4
+    blocked = np.zeros_like(height, dtype=bool)
+    args = (np.array([.825, .525, 0.]), np.array([1.225, .525, sign * .4]), blocked, height, np.zeros(2))
+    assert gen._correction_connected(*args) == (sign < 0.)
+    height[20:] = sign * .16
+    assert gen._correction_connected(*args)
+    height[20, 10] = np.nan
+    assert gen._correction_connected(*args)
+    height[24, 10] = np.nan
+    assert not gen._correction_connected(*args)
+
+
 @pytest.fixture
 def node(monkeypatch):
     rclpy.init()
