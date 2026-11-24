@@ -65,7 +65,7 @@ class CmdVelControlNode(Node):
         self.path_stale_stop_s = 0.8
         self.path_stale_slow_factor = 3.5
         self.path_stale_stop_factor = 5.0
-        self.max_linear_acc = 0.6   # m/s^2
+        self.max_linear_acc = self.robot.max_linear_acc  # m/s^2, per model (RobotConfig)
         self.max_angular_acc = 0.8  # rad/s^2
         self.max_angular_speed = self.robot.max_angular_vel  # rad/s
         self.max_forward_speed = self.robot.max_linear_vel  # m/s

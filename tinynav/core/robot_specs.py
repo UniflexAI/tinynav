@@ -82,9 +82,17 @@ class RobotConfig:
     max_linear_vel: float = 1.0
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
+    #: The cap on how fast cmd_vel_control ramps the linear speed (m/s^2), starting
+    #: and stopping alike. Per model: a humanoid pitches over on a ramp a quadruped
+    #: takes in its stride.
+    max_linear_acc: float = 0.6
     #: The slowest turn in place, where the gait needs more than min_angular_vel to
     #: take a step at all (`FREE_GAIT_FLOORS`); 0 is no floor beyond it.
     min_spin_vel: float = 0.0
+    #: The reverse gate (planning_node.reverse_armed): the reverse family is armed once
+    #: the way forward is this short (m), and stays armed until it opens past the exit.
+    reverse_enter_m: float = 0.10
+    reverse_exit_m: float = 0.15
     obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
 
     @property
@@ -267,6 +275,14 @@ G1_CONFIG = RobotConfig(
     camera_fwd=0.064, camera_left=0.035,
     safety_radius=0.15,
     min_linear_vel=0.2, min_angular_vel=0.3,
+    # Half the default ramp, against falls: a g1 (8038) has run 0.3 since 2026-10-21,
+    # when 0.6 was halved there as a fall mitigation.
+    max_linear_acc=0.3,
+    # Backs off from further out than the default 0.10/0.15. At 0.10 a g1 (8038,
+    # 2026-11-17) drove on into cells that flicker in and out of the occupancy map at
+    # that range; with one in, every row scored inf and it stopped, went, stopped. At
+    # 0.20/0.30 it turns or backs away before the flicker reaches it.
+    reverse_enter_m=0.20, reverse_exit_m=0.30,
     # Pelvis 0.78 m up ([RLG] g1_config.py base_height_target; [ROS] FK 0.784 at the
     # default stance) + 0.460 = 1.24 m camera height -> -1.18. The default -0.45 left
     # g1 blind below ~0.79 m. The top: the head's top is 0.092 m over the lens

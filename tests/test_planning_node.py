@@ -784,6 +784,47 @@ def test_a_clear_corridor_does_not_arm_reverse_however_blocked_the_rollouts_are(
     assert not reverse_armed(3.0, 0.05)
 
 
+def test_this_models_gate_is_its_robot_config():
+    from tinynav.core.robot_specs import ROBOT_CONFIG
+    assert (REVERSE_ENTER_M, REVERSE_EXIT_M) == \
+        (ROBOT_CONFIG.reverse_enter_m, ROBOT_CONFIG.reverse_exit_m)
+
+
+def test_the_g1_backs_off_from_further_out():
+    """8038, 2026-11-17: at 0.10 the g1 drove into cells that flicker at that range,
+    every row scored inf and it stopped and went."""
+    from tinynav.core.robot_specs import G1_CONFIG
+    assert (G1_CONFIG.reverse_enter_m, G1_CONFIG.reverse_exit_m) == \
+        pytest.approx((0.20, 0.30))
+
+
+def _gates():
+    from tinynav.core import robot_specs
+    return sorted({(c.reverse_enter_m, c.reverse_exit_m)
+                   for n, c in vars(robot_specs).items()
+                   if n.endswith('_CONFIG') and isinstance(c, robot_specs.RobotConfig)})
+
+
+@pytest.mark.parametrize('enter, exit_', _gates())
+def test_every_models_gate_fires_at_its_own_distance_and_holds_its_band(enter, exit_):
+    """The step tests above, at each model's pair passed in rather than this one's."""
+    assert exit_ > enter, f'exit {exit_} leaves no band above the entry {enter}'
+    for res in (0.05, 0.1):
+        for d in _steps_to(enter, res):
+            assert reverse_armed(d, res, enter_m=enter, exit_m=exit_), \
+                f'{d:.2f} m at res {res} did not arm a {enter}/{exit_} gate'
+        beyond = int(round(enter / res)) + 1
+        for step in range(beyond, beyond + 20):
+            assert not reverse_armed(step * res, res, enter_m=enter, exit_m=exit_), \
+                f'{step * res:.2f} m at res {res} armed a {enter}/{exit_} gate'
+    res = 0.05
+    lo, hi = enter + res / 2, exit_ + res / 2
+    between = (lo + hi) / 2
+    assert not reverse_armed(between, res, False, enter, exit_)
+    assert reverse_armed(between, res, True, enter, exit_)
+    assert not reverse_armed(hi + res, res, True, enter, exit_)
+
+
 def _lattice_speeds(v_allow, floor):
     _, params = generate_trajectory_library_3d(
         max_linear_vel=v_allow, min_linear_vel=floor)

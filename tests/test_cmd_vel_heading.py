@@ -307,5 +307,13 @@ class ReverseSpeedTest(_NodeCase):
         self.assertGreater(slow, fast + 0.05)
 
 
+class LinearRampTest(_NodeCase):
+    """The ramp's cap is the model's (RobotConfig.max_linear_acc), not a constant."""
+
+    def test_the_node_ramps_at_its_models_cap(self):
+        self.assertAlmostEqual(self.node.max_linear_acc,
+                               cmd_vel_control.ROBOT_CONFIG.max_linear_acc, places=9)
+
+
 if __name__ == '__main__':
     unittest.main()
