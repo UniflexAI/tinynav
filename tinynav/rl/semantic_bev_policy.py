@@ -95,10 +95,10 @@ class LiveSemanticPolicy:
         scores[blocked]=0
         self.semantic_projection_missing = not inside.any()
         if self.semantic_projection_missing:
-            # Keep the normal stop on missing depth. This trial only substitutes
-            # neutral scores when a depth frame with near returns is available.
-            near_depth = np.isfinite(depth) & (depth > .15) & (depth < 2.3)
-            if not self.allow_neutral_projection or np.count_nonzero(near_depth) < 64:
+            # A measured return beyond the score window can still provide
+            # geometry to the obstacle map. Keep the stop on missing depth.
+            measured_depth = np.isfinite(depth) & (depth > .15) & (depth < 8.)
+            if not self.allow_neutral_projection or np.count_nonzero(measured_depth) < 64:
                 raise ValueError("Infra1 projection did not observe any BEV cells")
         self.bev=np.stack((blocked,clearance,FWD/2.3,2*scores-1)).astype(np.float32)
         dx,dy=goal-center
