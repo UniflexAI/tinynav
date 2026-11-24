@@ -376,13 +376,15 @@ def angle_between(a, b):
 
 
 #: How short the way forward has to be for the reverse family to be armed, and how
-#: far it has to open back up before it disengages. Upstream's pair is 0.30/0.45;
-#: the entry is 0.10 here, and the exit keeps upstream's 1.5x so the band is a band.
-REVERSE_ENTER_M = 0.10
-REVERSE_EXIT_M = 0.15
+#: far it has to open back up before it disengages -- the model's (RobotConfig
+#: reverse_enter_m / reverse_exit_m). Upstream's pair is 0.30/0.45; the default entry
+#: is 0.10, and the exit keeps upstream's 1.5x so the band is a band.
+REVERSE_ENTER_M = ROBOT_CONFIG.reverse_enter_m
+REVERSE_EXIT_M = ROBOT_CONFIG.reverse_exit_m
 
 
-def reverse_armed(front_clearance, resolution, engaged=False):
+def reverse_armed(front_clearance, resolution, engaged=False,
+                  enter_m=None, exit_m=None):
     """The reverse family is armed by the wall being close enough to back off.
 
     Never on "no forward row is clear": with turn-in-place rows clear the robot turns
@@ -394,8 +396,12 @@ def reverse_armed(front_clearance, resolution, engaged=False):
     frames of `front_clr=0.30 should_reverse=False` on 122 on 2026-09-16, the robot
     stationary in front of something 0.30 m away for five minutes. The slack is under
     one step, so it admits the step nearest the threshold and no further one.
+
+    `enter_m` / `exit_m` default to this model's pair; a test passes another's.
     """
-    threshold = REVERSE_EXIT_M if engaged else REVERSE_ENTER_M
+    enter_m = REVERSE_ENTER_M if enter_m is None else enter_m
+    exit_m = REVERSE_EXIT_M if exit_m is None else exit_m
+    threshold = exit_m if engaged else enter_m
     return front_clearance <= threshold + resolution / 2
 
 

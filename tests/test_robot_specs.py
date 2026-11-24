@@ -157,3 +157,15 @@ def test_a_scale_that_is_not_a_scale_is_refused(tmp_path, capsys, bad):
     path.write_text('{"forward_m": 0.3, "left_m": 0.0, "footprint_scale": %s}' % bad)
     assert with_measured_camera(GO2_CONFIG, path) is GO2_CONFIG
     assert str(path) in capsys.readouterr().err
+
+
+def test_the_g1_ramps_at_half_the_default_acceleration():
+    """A humanoid pitches over on the ramp a quadruped takes (8038, 2026-10-21)."""
+    from tinynav.core.robot_specs import G1_CONFIG
+    assert G1_CONFIG.max_linear_acc == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize('name', sorted(n for n in TYPES if n != 'G1_CONFIG'))
+def test_every_other_model_keeps_the_ramp_it_had(name):
+    assert TYPES[name].max_linear_acc == pytest.approx(0.6)
+
