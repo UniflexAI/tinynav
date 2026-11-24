@@ -38,6 +38,11 @@ class ObstacleConfig:
     #: above the band are floating obstacles and keep a single-voxel noise floor.
     ground_band_m: float = 0.3
     dilation_cells: int = 0
+    #: What tops out lower than this above the floor is floor (m): a step or a bump the
+    #: robot walks over, not an obstacle. A cell's highest occupied voxel is measured
+    #: from the floor (FLOOR_CLEARANCE_M under robot_z_bottom). 0 is off: the band and
+    #: the span filter alone decide. A climb region keeps its own step rule.
+    step_height_m: float = 0.0
 
 
 @dataclass
@@ -294,7 +299,9 @@ G1_CONFIG = RobotConfig(
     # default stance) + 0.460 = 1.24 m camera height -> -1.18. The default -0.45 left
     # g1 blind below ~0.79 m. The top: the head's top is 0.092 m over the lens
     # ([G1-URDF] glb, 1.344 m vs 1.252 m) + 0.05 -> 0.14.
-    obstacle=ObstacleConfig(robot_z_bottom=-1.18, robot_z_top=0.14),
+    # step_height_m: what tops out under 0.20 m over the floor is floor a g1 steps over
+    # (8038, 2026-11-24): the band's bottom alone left anything over ~0.12 m blocking.
+    obstacle=ObstacleConfig(robot_z_bottom=-1.18, robot_z_top=0.14, step_height_m=0.20),
 )
 
 #: This rig's measured camera offset, over the robot type's. `forward_m` / `left_m`

@@ -167,6 +167,11 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
                            z_span >= config.min_wall_span_m,
                            z_span >= resolution)
         obstacle = has_occ & span_ok
+        if config.step_height_m > 0:
+            # What tops out under the step height is floor the robot walks over.
+            top_over_floor = (z_rel_band[np.clip(occ_high, 0, n_z - 1).astype(np.int64)]
+                              - config.robot_z_bottom + FLOOR_CLEARANCE_M)
+            obstacle = obstacle & (top_over_floor >= config.step_height_m)
         if climb_region is not None:
             # Above the cell's own lowest voxel, or the floor when it reaches the band's
             # bottom; an empty cell's span is negative.
@@ -999,7 +1004,8 @@ class PlanningNode(Node):
             f"{cf:.3f}/{cr:.3f}/{ch:.3f}m, "
             f"cam=({ROBOT_CONFIG.camera_fwd},{ROBOT_CONFIG.camera_left}), "
             f"safety_r={ROBOT_CONFIG.safety_radius}m, "
-            f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
+            f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m, "
+            f"step={ROBOT_CONFIG.obstacle.step_height_m}m)"
         )
         # The outline collision is checked over, from the rig's scale until a map sends
         # its own (footprint_scale_callback). Every check reads _collision_fp, so a
