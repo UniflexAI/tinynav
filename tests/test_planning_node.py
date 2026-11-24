@@ -357,6 +357,38 @@ def test_a_tread_above_the_robot_is_its_own_ground():
                               climb_region=_region((1, 1)))[1, 1]
 
 
+def test_what_tops_out_under_the_step_height_is_floor():
+    """0.10 m of band over the floor clearance tops out ~0.14 m over the floor: an
+    obstacle by the span filter alone, floor under a 0.20 m step height; 0.25 m of
+    band is not."""
+    from planning_node import build_obstacle_map
+    from tinynav.core.robot_specs import ObstacleConfig
+    config = ObstacleConfig(step_height_m=0.20)
+    low, origin = _riser_grid(0.10, config)
+    assert build_obstacle_map(low, origin, 0.05, robot_z=0.0, config=ObstacleConfig())[1, 1]
+    assert not build_obstacle_map(low, origin, 0.05, robot_z=0.0, config=config)[1, 1]
+    high, _ = _riser_grid(0.25, config)
+    assert build_obstacle_map(high, origin, 0.05, robot_z=0.0, config=config)[1, 1]
+
+
+def test_the_step_height_leaves_what_hangs_high_and_the_climb_region_alone():
+    from planning_node import build_obstacle_map
+    from tinynav.core.robot_specs import ObstacleConfig
+    config = ObstacleConfig(step_height_m=0.20)
+    grid, origin = _riser_grid(0.0, config)
+    grid[1, 1, 7:9] = 0.2                       # floating, 0.4 m over the band's bottom
+    assert build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config)[1, 1]
+    riser, _ = _riser_grid(0.10, config)        # under the step height, but on a stair
+    assert build_obstacle_map(riser, origin, 0.05, robot_z=0.0, config=config,
+                              climb_region=_region((1, 1)), step_m=0.1)[1, 1]
+
+
+def test_the_g1_walks_over_what_is_under_20_cm():
+    from tinynav.core.robot_specs import G1_CONFIG, GO2_CONFIG, ObstacleConfig
+    assert (ObstacleConfig().step_height_m, GO2_CONFIG.obstacle.step_height_m) == (0.0, 0.0)
+    assert G1_CONFIG.obstacle.step_height_m == 0.20
+
+
 def test_the_climb_region_is_the_cells_near_a_climb_point():
     from planning_node import PlanningNode
     node = PlanningNode.__new__(PlanningNode)
