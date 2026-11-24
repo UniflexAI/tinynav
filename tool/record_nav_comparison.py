@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import rclpy
 from rclpy.node import Node
 
-from tinynav.core.planner_config import planner_mode, route_guidance, shared_safety
+from tinynav.core.planner_config import planner_mode
 
 
 TOPICS = [
@@ -39,10 +39,15 @@ PROBE = """
 import json, os
 from dataclasses import asdict
 from tinynav.core.robot_specs import ROBOT_CONFIG
-from tinynav.core.planner_config import go2_response_guard, planner_mode, route_guidance, policy_engine_path, shared_safety
-from tinynav.core.navigation_safety import NavigationLimits
+from tinynav.core import planner_config
+from tinynav.core.planner_config import planner_mode, route_guidance, policy_engine_path
 from tinynav.rl.ppo_planner import PPOGeometry, GUARD_MARGIN
-limits = NavigationLimits.from_environment() if shared_safety() else None
+shared_safety = getattr(planner_config, 'shared_safety', lambda: False)
+go2_response_guard = getattr(planner_config, 'go2_response_guard', lambda _: False)
+limits = None
+if shared_safety():
+    from tinynav.core.navigation_safety import NavigationLimits
+    limits = NavigationLimits.from_environment()
 geometry = None
 if route_guidance():
     default = PPOGeometry()
@@ -116,8 +121,6 @@ def capture_config(nodes):
     controller = nodes["cmd_vel_control"][0]
     if planner_mode(planner["environ"]) != planner_mode(controller["environ"]):
         raise ValueError("Planning and velocity control selected different planners. Restart both nodes.")
-    if shared_safety(planner["environ"]) != shared_safety(controller["environ"]):
-        raise ValueError("Planning and velocity control selected different navigation safety modes.")
     repo = planner["source"].parents[2]
     env = dict(planner["environ"])
     env["PYTHONPATH"] = str(repo) + os.pathsep + env.get("PYTHONPATH", "")
@@ -127,7 +130,10 @@ def capture_config(nodes):
     control_env["PYTHONPATH"] = str(repo) + os.pathsep + control_env.get("PYTHONPATH", "")
     control_result = subprocess.check_output([str(controller["executable"]), "-c", PROBE],
                                             cwd=repo, env=control_env, text=True)
-    control_limits = json.loads(control_result)["navigation_limits"]
+    control = json.loads(control_result)
+    if effective["shared_safety"] != control["shared_safety"]:
+        raise ValueError("Planning and velocity control selected different navigation safety modes.")
+    control_limits = control["navigation_limits"]
     if effective["navigation_limits"] != control_limits:
         raise ValueError("Planning and velocity control have different navigation limits.")
     if (controller["environ"].get("ROBOT_TYPE", "go2").strip().lower()
@@ -229,7 +235,8 @@ def main():
                                         "tinynav/rl/calibrated_guard.py", "tinynav/rl/go2_response.json",
                                         "tinynav/rl/ppo_planner.py"))
     for path in sorted(paths):
-        (sources / path.name).write_bytes(path.read_bytes())
+        if path.is_file():
+            (sources / path.name).write_bytes(path.read_bytes())
     topics = [*TOPICS]
     for topic in (os.environ.get("TINYNAV_EKF_TOPIC", "/go2/ekf/odometry"), "/camera/camera/vio_image"):
         if topic in available and topic not in topics:
