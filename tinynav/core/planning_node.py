@@ -453,17 +453,29 @@ class PlanningNode(Node):
                 if self.semantic_bev:
                     from tinynav.rl.semantic_bev_policy import LiveSemanticPolicy
                     policy = LiveSemanticPolicy()
+                    self.semantic_input_pub = None
+                    if os.environ.get("TINYNAV_SEMANTIC_REPLAY_DIAG") == "1":
+                        self.semantic_input_pub = self.create_publisher(Image, "/planning/semantic_input", 10)
+                        policy.record_input = True
                     self.semantic_request_pub = self.create_publisher(Twist, "/planning/semantic_raw_cmd", 10)
                     self.semantic_guided_pub = self.create_publisher(Twist, "/planning/semantic_guided_cmd", 10)
                     self.get_logger().info(f"Semantic BEV PPO enabled (R31, device={policy.device})")
                 else:
                     policy = TRTPolicy()
                 self.rl = RLPlanner(policy, geometry)
+                if self.semantic_bev and ROBOT_CONFIG.name == "go2" and os.environ.get("TINYNAV_SEMANTIC_START_ASSIST") == "1":
+                    from tinynav.rl.semantic_start_assist import SemanticStartAssist
+                    self.rl.start_assist = SemanticStartAssist()
+                    self.create_subscription(Twist, "/cmd_vel", self.semantic_actual_cmd, 10)
+                    self.get_logger().info("Semantic Go2 start assist enabled")
             else:
                 self.rl = RLPlanner(TRTPolicy())
             self.rl_cmd_pub = self.create_publisher(Twist, '/planning/rl_cmd', 10)
             self.rl_bev_pub = self.create_publisher(Image, '/planning/rl_bev', 10)
             self.get_logger().info("TINYNAV_PLANNER=rl: learned policy replaces the trajectory library")
+
+    def semantic_actual_cmd(self, msg):
+        self.rl.start_assist.observe_command(msg.linear.x, msg.angular.z)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
@@ -802,6 +814,8 @@ class PlanningNode(Node):
             self.last_T, self.last_stamp = T, stamp
             with Timer(name='rl policy', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
                 if self.semantic_bev:
+                    self.rl.semantic_pose_age = self.get_clock().now().nanoseconds / 1e9 - stamp
+                    self.rl.policy.replay_input = None
                     self.rl.semantic_input = None
                     if infra_msg is not None:
                         try:
@@ -879,6 +893,11 @@ class PlanningNode(Node):
             guided = Twist()
             guided.linear.x, guided.angular.z = self.rl.guided_command
             self.semantic_guided_pub.publish(guided)
+            replay = self.rl.policy.replay_input
+            if self.semantic_input_pub is not None and replay is not None:
+                msg = self.bridge.cv2_to_imgmsg(replay, encoding="32FC1")
+                msg.header = header
+                self.semantic_input_pub.publish(msg)
 
         # Same pose convention as the library path: control-center position, camera orientation.
         path = Path()

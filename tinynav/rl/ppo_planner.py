@@ -8,6 +8,7 @@ including turning in place, and falls back to the first safe alternative or a st
 stays put while being commanded to move is declared stuck and stopped until the next goal.
 """
 from dataclasses import dataclass
+from time import monotonic
 
 import numpy as np
 
@@ -174,6 +175,7 @@ class RLPlanner:
 
     def __init__(self, policy, geometry=None):
         self.policy = policy
+        self.start_assist = None
         self.geometry = geometry if geometry is not None else PPOGeometry()
         self.edge = _edge_points(footprint=RLFootprint(
             self.geometry.front, self.geometry.rear, self.geometry.half_width,
@@ -183,6 +185,8 @@ class RLPlanner:
     def reset(self):
         """New goal: clear the GRU memory, own trail, velocity estimate and stuck state."""
         self.policy.reset()
+        if self.start_assist is not None:
+            self.start_assist.reset()
         self.hist, self.last = [], None
         self.vel = np.zeros(2, np.float32)
         self.last_action = np.zeros(2, np.float32)
@@ -312,6 +316,7 @@ class RLPlanner:
     def step(self, grid, origin, T, stamp, goal_xy, esdf):
         """grid/origin: planning occupancy grid; T: camera->world; esdf: 2D ESDF on the same grid.
         Returns (v, w, rollout poses, policy BEV, status) with status one of GUARD_REASONS or "stuck"."""
+        assist_started_at = monotonic() if self.start_assist is not None else None
         yaw = camera_yaw(T)
         center = self.control_center(T, yaw)
         if self.last is not None:
@@ -356,6 +361,16 @@ class RLPlanner:
         preferred_turn = self.turn_direction if 0.0 <= turn_age < TURN_PREFERENCE_S else 0.0
         v, w, status = self._guard_command(center, yaw, goal_xy, (v, w), policy_speed, esdf, origin,
                                           preferred_turn=preferred_turn)
+        if self.start_assist is not None and self.recovery is None and not self.stuck:
+            route = getattr(self, "route_xy", None)
+            cap, route_turn = route_guided_command(route, center, yaw, .55, np.nan)
+            age = self.semantic_pose_age + monotonic() - assist_started_at
+            assist = self.start_assist.forward(center, yaw, (v, w), route_turn,
+                cap, age, esdf, origin, self.edge)
+            if assist is not None:
+                v, w = assist
+                status = "semantic start assist"
+                self.motion.clear()
         preferred = -1.0 if a[1] >= 0.0 else 1.0
         if status == "clearance blocked":
             self.motion.clear()

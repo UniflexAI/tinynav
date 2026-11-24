@@ -33,6 +33,7 @@ class LiveSemanticPolicy:
     def __init__(self):
         directory = Path(__file__).resolve().parents[1] / "models" / "semantic_bev"
         self.device = "tensorrt"
+        self.record_input = False
         self.loop = asyncio.new_event_loop()
         self.student = SemanticEngine(directory / "r31-infra1.plan")
         self.actor = SemanticEngine(directory / "semantic-bev-ppo.plan")
@@ -41,6 +42,7 @@ class LiveSemanticPolicy:
     def reset(self):
         self.last_action = np.zeros(2, dtype=np.float32)
         self.bev = None
+        self.replay_input = None
         self.tick = 0
         self.streak = 0
         self.committed = False
@@ -90,6 +92,12 @@ class LiveSemanticPolicy:
         dx,dy=goal-center
         vector=np.asarray([(c*dx+s*dy)/4,(-s*dx+c*dy)/4,
                            velocity[0]/.55,velocity[1]/.9,*self.last_action],dtype=np.float32)
+        self.replay_input = None
+        if self.record_input:
+            frame = np.zeros((97,24), dtype=np.float32)
+            frame[:96] = self.bev.reshape(96,24)
+            frame[96,:9] = (*vector, self.tick, self.streak, self.committed)
+            self.replay_input = frame
         outputs=self.loop.run_until_complete(self.actor.infer(bev=self.bev[None],state=vector[None]))
         action=self.choose(outputs)
         if not np.isfinite(action).all():
