@@ -98,6 +98,10 @@ class RobotConfig:
     #: The slowest turn in place, where the gait needs more than min_angular_vel to
     #: take a step at all (`FREE_GAIT_FLOORS`); 0 is no floor beyond it.
     min_spin_vel: float = 0.0
+    #: How fast pilot turns in place to a heading (rad/s): its lookat_turn -- an
+    #: arrival's face, the turn server, the dock's alignment. 0.35 is what it ran for
+    #: every model; lookat_turn's lead and pulse are tuned to it.
+    face_turn_vel: float = 0.35
     #: The reverse gate (planning_node.reverse_armed): the reverse family is armed once
     #: the way forward is this short (m), and stays armed until it opens past the exit.
     reverse_enter_m: float = 0.10
@@ -295,6 +299,9 @@ G1_CONFIG = RobotConfig(
     # that range; with one in, every row scored inf and it stopped, went, stopped. At
     # 0.20/0.30 it turns or backs away before the flicker reaches it.
     reverse_enter_m=0.20, reverse_exit_m=0.30,
+    # Turns to a heading at 0.6 rad/s, not the default 0.35 (8038, 2026-11-24): a face
+    # of 120-180 deg took 9-12 s.
+    face_turn_vel=0.6,
     # Pelvis 0.78 m up ([RLG] g1_config.py base_height_target; [ROS] FK 0.784 at the
     # default stance) + 0.460 = 1.24 m camera height -> -1.18. The default -0.45 left
     # g1 blind below ~0.79 m. The top: the head's top is 0.092 m over the lens
