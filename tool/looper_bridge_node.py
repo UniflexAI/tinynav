@@ -1,7 +1,5 @@
 import argparse
 import copy
-import os
-from collections import deque
 
 import cv2
 import message_filters
@@ -20,8 +18,7 @@ from rclpy.qos import (
 from sensor_msgs.msg import CameraInfo, Image
 from tf2_msgs.msg import TFMessage
 
-from tinynav.core.math_utils import msg2np, np2msg, pose_msg2np
-from tinynav.core.ekf_camera import EkfCamera
+from tinynav.core.math_utils import np2msg, pose_msg2np
 
 
 class LooperBridgeNode(Node):
@@ -48,27 +45,9 @@ class LooperBridgeNode(Node):
         self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
 
-        mode = os.environ.get("TINYNAV_USE_EKF", "0")
-        if mode not in ("0", "1"):
-            raise ValueError("TINYNAV_USE_EKF must be 0 or 1")
-        self.ekf = None
-        if mode == "1":
-            def vector(name, default):
-                values = np.asarray(os.environ.get(name, default).split(","), dtype=float)
-                if values.shape != (3,) or not np.isfinite(values).all():
-                    raise ValueError(f"{name} requires three finite comma-separated numbers")
-                return values
-
-            self.ekf = EkfCamera(vector("TINYNAV_EKF_CAMERA_RPY_DEG", "-90.37,0.01,-88.81"),
-                                 vector("TINYNAV_EKF_CAMERA_LEVER_M", "0.288,0.01,0.077"))
-            self.pending_images = deque(maxlen=6)
-            topic = os.environ.get("TINYNAV_EKF_TOPIC", "/go2/ekf/odometry")
-            self.create_subscription(Odometry, topic, self.ekf_callback, 100)
-            self.get_logger().info(f"Navigation pose source: EKF {topic}, waiting for timed Looper anchor")
-        else:
-            self.vio_100hz_sub = self.create_subscription(
-                PoseStamped, "/camera/camera/vio_100hz", self.vio_100hz_callback, 50
-            )
+        self.vio_100hz_sub = self.create_subscription(
+            PoseStamped, "/camera/camera/vio_100hz", self.vio_100hz_callback, 50
+        )
 
         self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
@@ -97,48 +76,9 @@ class LooperBridgeNode(Node):
         self.get_logger().info(
             "Bridging /camera/camera/vio_image + /camera/camera/depth/image_rect_raw + /camera/camera/infra1/image_rect_raw into TinyNav /slam topics."
         )
-    @staticmethod
-    def stamp_ns(stamp):
-        return stamp.sec * 1_000_000_000 + stamp.nanosec
-
-    def ekf_callback(self, msg):
-        if (msg.header.frame_id, msg.child_frame_id) != ("odom", "base_link"):
-            self.get_logger().warning("Expected EKF odom -> base_link", throttle_duration_sec=5)
-            return
-        stamp = msg.header.stamp
-        ns = self.stamp_ns(stamp)
-        pose, _ = msg2np(msg)
-        if not self.ekf.add(ns, pose):
-            return
-        if self.pending_images:
-            self.try_ekf_image()
-        if self.ekf.world_odom is not None:
-            camera = self.ekf.world_odom @ pose @ self.ekf.body_camera
-            self.odom_pub.publish(np2msg(camera, stamp, "world", "camera"))
-
-    def try_ekf_image(self):
-        if not self.ekf.times:
-            return
-        ready = None
-        while self.pending_images:
-            candidate = self.pending_images[0]
-            ns = self.stamp_ns(candidate[0].header.stamp)
-            if ns > self.ekf.times[-1]:
-                break
-            self.pending_images.popleft()
-            camera = self.ekf.camera_at(ns)
-            if camera is not None:
-                ready = candidate, camera
-        if ready is None:
-            self.get_logger().warning("Waiting for EKF coverage at depth timestamp", throttle_duration_sec=5)
-            return
-        (depth, visual, image), camera = ready
-        stamp = depth.header.stamp
-        ns = self.stamp_ns(stamp)
-        if self.ekf.world_odom is None:
-            self.ekf.anchor(ns, pose_msg2np(visual))
-            self.get_logger().info("EKF camera aligned to Looper world at depth timestamp")
-        self.publish_frame(depth, image, stamp, self.ekf.world_odom @ camera)
+        self.get_logger().info(
+            "Bridging /camera/camera/vio_100hz into /slam/odometry."
+        )
 
     def vio_100hz_callback(self, pose_msg: PoseStamped):
         # /camera/camera/vio_100hz already reports T_world_camera.
@@ -254,13 +194,8 @@ class LooperBridgeNode(Node):
             self.log_missing_inputs()
             return
 
-        if self.ekf is not None:
-            self.pending_images.append((depth_msg, pose_msg, image_msg))
-            self.try_ekf_image()
-            return
-        self.publish_frame(depth_msg, image_msg, pose_msg.header.stamp, pose_msg2np(pose_msg))
-
-    def publish_frame(self, depth_msg, image_msg, stamp, T_world_camera):
+        T_world_camera = pose_msg2np(pose_msg)
+        stamp = pose_msg.header.stamp
 
         odom_msg = self.build_odom(T_world_camera, stamp)
         self.odom_visual_pub.publish(odom_msg)

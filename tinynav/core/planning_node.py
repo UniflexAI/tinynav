@@ -1,7 +1,5 @@
 import array
-from dataclasses import asdict
 import json
-import hashlib
 import os
 from threading import Lock
 from time import perf_counter_ns
@@ -20,15 +18,14 @@ from numba import njit
 import message_filters
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
-from geometry_msgs.msg import PoseStamped, Point32, Twist, TwistStamped
+from geometry_msgs.msg import PoseStamped, Point32, Twist
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header, String
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
-from tinynav.core.planner_config import go2_response_guard, planner_mode, route_guidance, shared_safety
-from tinynav.core.navigation_safety import CALIBRATED_COMMAND_LEASE_S, NavigationGuard, NavigationLimits
+from tinynav.core.planner_config import planner_mode, route_guidance
 
 # "library": sample + ESDF-score the trajectory library (default). "rl": the learned policy in
 # tinynav/rl picks (v, w) and publishes it on /planning/rl_cmd for cmd_vel_control.
@@ -188,7 +185,7 @@ def generate_trajectory_library_3d(
 
 def generate_predefined_trajectory_vocabularies(
     duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]), reverse_speed=.3
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
     """
     Predefined trajectory vocabularies.
@@ -199,6 +196,7 @@ def generate_predefined_trajectory_vocabularies(
 
     # constant reverse trajectory
     # vx = -0.3 m/s, omega = 0
+    reverse_speed = 0.3
     p = init_p.copy()
     q = quat_to_matrix(init_q)
     traj = np.empty((num_steps, 7), dtype=np.float64)
@@ -325,22 +323,16 @@ def update_occupancy_grid(occupancy_grid, origin, depth, T, K, resolution, step)
     return occupancy_grid, origin
 
 
-def generate_trajectories(init_p, init_q, max_forward=None, max_turn=None, max_reverse=.3):
+def generate_trajectories(init_p, init_q):
     trajectories, params = generate_trajectory_library_3d(
         init_p=init_p, init_q=init_q,
-        max_linear_vel=ROBOT_CONFIG.max_linear_vel if max_forward is None else max_forward,
-        max_angular_vel=ROBOT_CONFIG.max_angular_vel if max_turn is None else max_turn,
+        max_linear_vel=ROBOT_CONFIG.max_linear_vel,
+        max_angular_vel=ROBOT_CONFIG.max_angular_vel,
     )
-    vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(
-        init_p=init_p, init_q=init_q, reverse_speed=max_reverse)
+    vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
     trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
     params = np.concatenate([params, vocab_params], axis=0)
     return trajectories, params
-
-
-def library_commands(params):
-    # The library rotates about optical +Y (down), opposite to body +Z yaw.
-    return np.column_stack((params[:, 0], -params[:, 1]))
 
 
 # === PlanningNode class ===
@@ -355,22 +347,6 @@ class PlanningNode(Node):
             f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
         )
         self.bridge = CvBridge()
-        self.navigation_limits = NavigationLimits.from_environment() if shared_safety() else None
-        self.response_profile = None
-        if go2_response_guard(ROBOT_CONFIG.name):
-            from pathlib import Path as FilePath
-            from tinynav.rl import calibrated_guard
-            self.response_profile = calibrated_guard.compile_profile(json.loads(
-                FilePath(calibrated_guard.__file__).with_name("go2_response.json").read_text()))
-        self.get_logger().info(f"Go2 measured response guard: {self.response_profile is not None}")
-        self.live_odom = None
-        self.drive_command = (0., 0.)
-        self.nav_command_until = 0.
-        self.last_nav_command = (0., 0.)
-        if self.navigation_limits is not None:
-            self.nav_cmd_pub = self.create_publisher(TwistStamped, '/planning/nav_cmd', 10)
-            self.decision_pub = self.create_publisher(String, '/planning/decision', 10)
-            self.get_logger().info(f"Shared navigation limits: {self.navigation_limits}")
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
@@ -392,10 +368,6 @@ class PlanningNode(Node):
         self.pose_sub = message_filters.Subscriber(
             self, Odometry, '/slam/odometry_visual', callback_group=input_group,
         )
-        if self.navigation_limits is not None:
-            self.pose_sub.registerCallback(self.live_pose_callback)
-            self.create_subscription(Twist, '/cmd_vel', self.drive_command_callback, 10,
-                                     callback_group=input_group)
 
         self.timing_pub = None
         if os.environ.get("TINYNAV_PLANNING_TIMING") == "1":
@@ -449,11 +421,6 @@ class PlanningNode(Node):
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
         self.rl = None
-        self.poi_trace = None
-        if PLANNER == "rl" and os.environ.get("TINYNAV_POI_DIAGNOSTICS") == "1":
-            self.poi_trace = self.create_publisher(String, "/planning/poi_diagnostics", 10)
-            self.trace_route_stamp = None
-            self.trace_target_stamp = None
         if PLANNER == "rl":
             from tinynav.rl.rl_planner import RLPlanner, TRTPolicy
             self.ppo_route_guidance = route_guidance()
@@ -469,9 +436,6 @@ class PlanningNode(Node):
                     name: float(os.environ.get(f"TINYNAV_PPO_{name.upper()}_M", getattr(defaults, name)))
                     for name in ("front", "rear", "half_width", "control_x", "control_y")
                 })
-                if self.navigation_limits is not None:
-                    geometry = PPOGeometry(**{name: getattr(self.navigation_limits, name)
-                                             for name in ("front", "rear", "half_width", "control_x", "control_y")})
                 self.get_logger().info(f"PPO guard geometry (m): {geometry}")
                 self.rl = RLPlanner(TRTPolicy(), geometry)
             else:
@@ -480,152 +444,31 @@ class PlanningNode(Node):
             self.rl_bev_pub = self.create_publisher(Image, '/planning/rl_bev', 10)
             self.get_logger().info("TINYNAV_PLANNER=rl: learned policy replaces the trajectory library")
 
-    def live_pose_callback(self, msg):
-        self.live_odom = msg
-
-    def drive_command_callback(self, msg):
-        self.drive_command = (float(msg.linear.x), float(msg.angular.z))
-
-    def make_navigation_guard(self, esdf):
-        msg = self.live_odom
-        p, q = msg.pose.pose.position, msg.pose.pose.orientation
-        rotation = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
-        yaw = float(np.arctan2(rotation[1, 2], rotation[0, 2]))
-        center = (np.array([p.x, p.y, p.z]) - rotation @ ROBOT_CONFIG.cam_offset_3d)[:2]
-        limits = self.navigation_limits
-        center += limits.control_x * np.array([np.cos(yaw), np.sin(yaw)])
-        center += limits.control_y * np.array([-np.sin(yaw), np.cos(yaw)])
-        now = self.get_clock().now().nanoseconds / 1e9
-        source = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
-        return NavigationGuard(limits, [*center, yaw], self.drive_command, esdf, self.origin,
-                               self.resolution, delay=max(0., now - source) + limits.period, stamp=now)
-
-    def publish_navigation_command(self, requested, guard, header, status, *, policy=None, guided=None):
-        selection_start = perf_counter_ns()
-        guard = self.make_navigation_guard(guard.esdf)
-        calibrated = self.response_profile is not None and policy is not None
-        if calibrated:
-            from tinynav.rl.calibrated_guard import SELECTION_BUDGET_S, select
-            guard.delay += SELECTION_BUDGET_S
-            guard.pending_command = self.last_nav_command if guard.stamp < self.nav_command_until else guard.command
-        command = guard.limits.executable([requested])[0]
-        calibrated_room = None
-        if calibrated:
-            escape_band = guard.limits.margin <= guard.now < guard.limits.margin + .5 * guard.resolution
-            if status in ("stuck", "recovery no motion", "recovery blocked", "recovery complete") or (
-                    status == "clearance blocked" and not escape_band):
-                command = np.zeros(2)
-            else:
-                v, w, calibrated_room = select(guard, self.target_pose[:2], self.rl.route_xy,
-                                               command.tolist(), self.response_profile, self.rl.vel,
-                                               route_speed=guided[0] if guided is not None else requested[0])
-                command = np.array([v, w])
-                status = "calibrated clearance retreat" if escape_band and v < 0 else "calibrated route selection"
-            valid, room, paths = guard.evaluate([command])
-            if calibrated_room is not None:
-                room[0] = min(room[0], calibrated_room)
-                valid[0] &= room[0] >= guard.limits.margin
-        else:
-            valid, room, paths = guard.evaluate([command])
-            if not valid[0]:
-                v, w, status = guard.select(command, self.target_pose[:2])
-                command = np.array([v, w])
-                valid, room, paths = guard.evaluate([command])
-        selection_s = (perf_counter_ns() - selection_start) * 1e-9
-        if calibrated and selection_s > SELECTION_BUDGET_S and np.any(command):
-            command = np.zeros(2)
-            valid, room, paths = guard.evaluate([command])
-            status = "selection deadline exceeded"
-        msg = TwistStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "base_link"
-        msg.twist.linear.x, msg.twist.angular.z = map(float, command)
-        self.nav_cmd_pub.publish(msg)
-        if calibrated:
-            self.last_nav_command = tuple(command)
-            self.nav_command_until = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 + CALIBRATED_COMMAND_LEASE_S
-        path = Path()
-        path.header = header
-        path.header.frame_id = "world"
-        for x, y, yaw in paths[0, ::4]:
-            forward = np.array([np.cos(yaw), np.sin(yaw), 0.])
-            right = np.array([np.sin(yaw), -np.cos(yaw), 0.])
-            rotation = np.stack((right, np.cross(forward, right), forward), axis=1)
-            quaternion = R.from_matrix(rotation).as_quat()
-            pose = PoseStamped()
-            pose.header = path.header
-            pose.pose.position.x, pose.pose.position.y = float(x), float(y)
-            pose.pose.position.z = float(self.live_odom.pose.pose.position.z)
-            pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = map(float, quaternion)
-            path.poses.append(pose)
-        self.path_pub.publish(path)
-        details = dict(limits=asdict(guard.limits), pose=guard.pose.tolist(),
-                       observation_stamp_ns=header.stamp.sec * 10**9 + header.stamp.nanosec,
-                       current_command=guard.command.tolist(), delay_s=guard.delay, selection_s=selection_s, stamp=guard.stamp,
-                       observed_clearance_m=guard.now if np.isfinite(guard.now) else None,
-                       checked_clearance_m=float(room[0]) if np.isfinite(room[0]) else None,
-                       required_clearance_m=guard.minimum, requested=list(map(float, requested)),
-                       command=command.tolist(), admissible=bool(valid[0]), status=status,
-                       policy_action=policy, guided_command=guided)
-        self.decision_pub.publish(String(data=json.dumps(details, separators=(",", ":"))))
-        return tuple(command)
-
-    def publish_poi_trace(self, event, **fields):
-        self.poi_trace.publish(String(data=json.dumps(dict(
-            event=event, node_time_ns=self.get_clock().now().nanoseconds, **fields))))
-
-    @staticmethod
-    def trace_stamp(header):
-        return header.stamp.sec * 10**9 + header.stamp.nanosec
-
     def poi_change_callback(self, msg):
         self.target_pose = None
         if getattr(self, "ppo_route_guidance", False):
             self.global_route = None
             self.rl.reset()
 
-        if self.poi_trace is not None:
-            p = msg.pose.pose.position
-            self.publish_poi_trace("poi_change", stamp_ns=self.trace_stamp(msg.header),
-                                   child_frame=msg.child_frame_id, position=[p.x, p.y, p.z])
-
     def global_route_callback(self, msg):
         self.global_route = np.asarray(
             [[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses]
         ) if msg.header.frame_id == "map" and msg.poses else None
-
-        if self.poi_trace is not None:
-            self.trace_route_stamp = (self.global_route, self.trace_stamp(msg.header))
-            self.publish_poi_trace("route_received", stamp_ns=self.trace_stamp(msg.header),
-                                   points=len(msg.poses), frame=msg.header.frame_id)
 
     def route_in_world(self):
         from tf2_ros import TransformException
         if self.global_route is None:
             return None
         try:
-            tf = self.route_tf_buffer.lookup_transform("world", "map", Time())
-            transform = tf.transform
+            transform = self.route_tf_buffer.lookup_transform("world", "map", Time()).transform
         except TransformException:
             return None
         q, t = transform.rotation, transform.translation
         rotation = quat_to_matrix(np.array([q.x, q.y, q.z, q.w]))
-        route = self.global_route
-        if self.poi_trace is not None and route is not None:
-            metadata = self.trace_route_stamp
-            self.trace_route_lookup = dict(
-                stamp_ns=metadata[1] if metadata is not None and metadata[0] is route else None,
-                sha256=hashlib.sha256(route.tobytes()).hexdigest(),
-                points=len(route), endpoint_map=route[-1].tolist(),
-                tf=dict(source=tf.child_frame_id, target=tf.header.frame_id, query_ns=0,
-                        stamp_ns=self.trace_stamp(tf.header), translation=[t.x, t.y, t.z],
-                        quaternion=[q.x, q.y, q.z, q.w]))
-        return (route @ rotation.T + np.array([t.x, t.y, t.z]))[:, :2]
+        return (self.global_route @ rotation.T + np.array([t.x, t.y, t.z]))[:, :2]
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
-        if self.poi_trace is not None:
-            self.trace_target_stamp = (self.target_pose, self.trace_stamp(msg.header))
 
     def info_callback(self, msg):
         if self.K is None:
@@ -639,12 +482,7 @@ class PlanningNode(Node):
 
     def camera_to_robot_center(self, T):
         """World control-center position derived from camera pose T_cam->world."""
-        center = T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
-        if self.navigation_limits is not None:
-            yaw = np.arctan2(T[1, 2], T[0, 2])
-            center[:2] += self.navigation_limits.control_x * np.array([np.cos(yaw), np.sin(yaw)])
-            center[:2] += self.navigation_limits.control_y * np.array([-np.sin(yaw), np.cos(yaw)])
-        return center
+        return T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
 
     def publish_footprint(self, T, stamp):
         """Publish robot footprint rectangle as a PointCloud for RViz."""
@@ -652,8 +490,6 @@ class PlanningNode(Node):
         left    = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
         center  = self.camera_to_robot_center(T)
         fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
-        if self.navigation_limits is not None:
-            fl, rl, hw = self.navigation_limits.front, self.navigation_limits.rear, self.navigation_limits.half_width
         corners = [
             center + forward * fl + left * hw,
             center + forward * fl - left * hw,
@@ -950,29 +786,12 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            guard = None
-            if self.navigation_limits is not None:
-                guard = self.make_navigation_guard(ESDF_map)
-                live = self.live_odom.pose.pose
-                init_p = np.array([*guard.pose[:2], live.position.z])
-                init_q = np.array([live.orientation.x, live.orientation.y, live.orientation.z, live.orientation.w])
-            trajectories, params = generate_trajectories(init_p, init_q,
-                self.navigation_limits.max_forward if guard is not None else None,
-                self.navigation_limits.max_turn if guard is not None else None,
-                self.navigation_limits.max_reverse if guard is not None else .3)
-            if guard is not None:
-                v, w = params.T
-                executable = ((v <= guard.limits.max_forward) & (v >= -guard.limits.max_reverse)
-                              & (np.abs(w) <= guard.limits.max_turn)
-                              & ((v <= 0) | (v >= ROBOT_CONFIG.min_linear_vel)))
-                trajectories, params = trajectories[executable], params[executable]
+            trajectories, params = generate_trajectories(init_p, init_q)
             self.last_T = T
             self.last_stamp = stamp
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
-            if guard is not None:
-                front_len, rear_len, half_w = guard.limits.front, guard.limits.rear, guard.limits.half_width
             scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -982,31 +801,10 @@ class PlanningNode(Node):
             self.reverse_engaged = should_reverse
 
             top_k = 1
-            costs = np.array([self.trajectory_cost(trajectories[i], params[i], scores[i],
-                              self.target_pose, should_reverse) for i in range(len(trajectories))])
-            top_indices = np.argsort(costs, kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([self.trajectory_cost(trajectories[i], params[i], scores[i], self.target_pose, should_reverse) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             if self.target_pose is None:
-                return
-
-            if guard is not None:
-                commands = library_commands(params)
-                order = np.argsort(costs, kind='stable')
-                selected = None
-                for at in range(0, len(order), 8):
-                    batch = order[at:at + 8]
-                    valid, _, _ = guard.evaluate(commands[batch])
-                    allowed = batch[valid & np.isfinite(costs[batch])]
-                    if len(allowed):
-                        selected = commands[allowed[0]]
-                        break
-                status = "dwa shared clearance"
-                if selected is None:
-                    v, w, status = guard.select((.10, 0.), self.target_pose[:2])
-                    selected = (v, w)
-                issued = self.publish_navigation_command(selected, guard, depth_msg.header, status)
-                self.last_param = np.array([issued[0], -issued[1]])
                 return
 
             if all(s == float('inf') for s in scores):
@@ -1016,21 +814,12 @@ class PlanningNode(Node):
             self.publish_selected_path(trajectories, top_indices, depth_msg.header)
 
     def rl_plan(self, T, stamp, ESDF_map, header):
-        diagnostic = self.poi_trace is not None
-        if diagnostic:
-            started_ns = self.get_clock().now().nanoseconds
-            self.trace_route_lookup = None
         if self.target_pose is None:
             self.rl.reset()  # next goal starts with fresh memory; no command -> cmd_vel_control stops
             return
         if getattr(self, "ppo_route_guidance", False):
             self.rl.route_xy = self.route_in_world()
-            if self.navigation_limits is not None:
-                self.rl.navigation_guard_factory = lambda: self.make_navigation_guard(ESDF_map)
-        target = self.target_pose
-        target_metadata = self.trace_target_stamp if diagnostic else None
-        issued = None
-        v, w, poses, bev, status = self.rl.step(self.occupancy_grid, self.origin, T, stamp, target[:2], ESDF_map)
+        v, w, poses, bev, status = self.rl.step(self.occupancy_grid, self.origin, T, stamp, self.target_pose[:2], ESDF_map)
         if getattr(self, "ppo_route_guidance", False) and status == "stuck":
             self.get_logger().error(
                 "PPO stuck: no measured motion after publishing nonzero commands; stopped until the next goal",
@@ -1055,26 +844,6 @@ class PlanningNode(Node):
         cmd.linear.x, cmd.angular.z = v, w
         self.rl_cmd_pub.publish(cmd)
 
-        if self.navigation_limits is not None:
-            guard = self.make_navigation_guard(ESDF_map)
-            issued = self.publish_navigation_command((v, w), guard, header, status,
-                     policy=getattr(self.rl, "policy_action", np.zeros(2)).tolist(),
-                     guided=list(getattr(self.rl, "guided_command", (v, w))))
-            if hasattr(self.rl, "response"):
-                self.rl.response.issued(issued)
-
-        if diagnostic:
-            self.publish_poi_trace(
-                "frame", observation_stamp_ns=self.trace_stamp(header),
-                planning_start_ns=started_ns, target_world=target.tolist(),
-                target_stamp_ns=target_metadata[1] if target_metadata is not None and target_metadata[0] is target else None,
-                route_lookup=self.trace_route_lookup,
-                policy_command=getattr(self.rl, "policy_command", None),
-                guided_command=getattr(self.rl, "guided_command", None),
-                guard_output=getattr(self.rl, "guard_output", None),
-                planner_output=list(map(float, (v, w))), issued_command=list(map(float, issued)) if issued is not None else None,
-                status=status)
-
         # Same pose convention as the library path: control-center position, camera orientation.
         path = Path()
         path.header = header
@@ -1088,8 +857,7 @@ class PlanningNode(Node):
             pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = float(x), float(y), float(center[2])
             pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = map(float, q)
             path.poses.append(pose)
-        if self.navigation_limits is None:
-            self.path_pub.publish(path)
+        self.path_pub.publish(path)
 
         # Debug view of the policy input: elevation colored, never-seen cells black, own trail red.
         img = cv2.applyColorMap(np.uint8(np.clip((bev[0] + 0.5) / 1.5, 0, 1) * 255), cv2.COLORMAP_VIRIDIS)

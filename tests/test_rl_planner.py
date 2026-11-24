@@ -176,9 +176,9 @@ def test_ppo_uses_configured_extents_and_control_center():
     grid, origin, esdf = _scene(wall_x=0.70)
     pose = _camera_pose(CAM, 0.0, 0.0)
     goal = np.array([3.0, 0.0])
-    large = PPOPlanner(FakePolicy([0.2, 0.0]), PPOGeometry(.50, .50, .25))
+    default = PPOPlanner(FakePolicy([0.2, 0.0]))
     configured = PPOPlanner(FakePolicy([0.2, 0.0]), PPOGeometry(.25, .35, .15, .05, .07))
-    assert large.step(grid, origin, pose, 0.0, goal, esdf)[4] != "ok"
+    assert default.step(grid, origin, pose, 0.0, goal, esdf)[4] != "ok"
     v, w, poses, _, status = configured.step(grid, origin, pose, 0.0, goal, esdf)
     assert np.allclose(poses[0], [.05, .07, 0])
     assert np.isclose(v, .2) and w == 0 and status == "ok"
@@ -224,10 +224,10 @@ def test_ppo_checks_the_executable_forward_speed_before_selecting_it():
 
 
 def test_ppo_fallback_prefers_a_recent_turn_only_while_safe():
-    from tinynav.rl.ppo_planner import PPOGeometry, RLPlanner as PPOPlanner
+    from tinynav.rl.ppo_planner import RLPlanner as PPOPlanner
 
     policy = FakePolicy([0.9, 0.5])
-    planner = PPOPlanner(policy, PPOGeometry(.50, .50, .25))
+    planner = PPOPlanner(policy)
     grid, origin, _ = _scene()
     symmetric = _field(origin, lambda X, Y: np.clip(0.68 + GRID_RES / 2 - X, 0, None))
     pose = _camera_pose(CAM, 0.0, 0.0)

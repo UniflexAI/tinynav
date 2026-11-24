@@ -14,11 +14,11 @@ from datetime import datetime, timezone
 import rclpy
 from rclpy.node import Node
 
-from tinynav.core.planner_config import planner_mode
+from tinynav.core.planner_config import planner_mode, route_guidance
 
 
 TOPICS = [
-    "/cmd_vel", "/planning/rl_cmd", "/planning/nav_cmd", "/planning/decision", "/planning/trajectory_path",
+    "/cmd_vel", "/planning/rl_cmd", "/planning/trajectory_path",
     "/planning/obstacle_mask", "/planning/height_map", "/planning/footprint",
     "/planning/rl_bev", "/planning/timing",
     "/slam/odometry", "/slam/odometry_visual", "/slam/camera_info",
@@ -39,15 +39,8 @@ PROBE = """
 import json, os
 from dataclasses import asdict
 from tinynav.core.robot_specs import ROBOT_CONFIG
-from tinynav.core import planner_config
 from tinynav.core.planner_config import planner_mode, route_guidance, policy_engine_path
 from tinynav.rl.ppo_planner import PPOGeometry, GUARD_MARGIN
-shared_safety = getattr(planner_config, 'shared_safety', lambda: False)
-go2_response_guard = getattr(planner_config, 'go2_response_guard', lambda _: False)
-limits = None
-if shared_safety():
-    from tinynav.core.navigation_safety import NavigationLimits
-    limits = NavigationLimits.from_environment()
 geometry = None
 if route_guidance():
     default = PPOGeometry()
@@ -55,9 +48,6 @@ if route_guidance():
         k: float(os.environ.get('TINYNAV_PPO_' + k.upper() + '_M', getattr(default, k)))
         for k in ('front', 'rear', 'half_width', 'control_x', 'control_y')
     })
-    if limits is not None:
-        geometry = PPOGeometry(**{k: getattr(limits, k) for k in
-                               ('front', 'rear', 'half_width', 'control_x', 'control_y')})
 print(json.dumps(dict(
     mode=planner_mode(), route_guidance=route_guidance(), robot=asdict(ROBOT_CONFIG),
     ppo_geometry_m=asdict(geometry) if geometry is not None else None,
@@ -65,8 +55,6 @@ print(json.dumps(dict(
     diagnostic_clouds=os.environ.get('TINYNAV_PLANNING_DIAGNOSTIC_CLOUDS', '0') == '1',
     latest_pair_only=os.environ.get('TINYNAV_PLANNING_LATEST_PAIR_ONLY', '1') == '1',
     timing_enabled=os.environ.get('TINYNAV_PLANNING_TIMING') == '1',
-    shared_safety=shared_safety(), go2_response_guard=go2_response_guard(ROBOT_CONFIG.name),
-    navigation_limits=asdict(limits) if limits is not None else None,
     engine=policy_engine_path() if planner_mode() == 'rl' else None,
 )))
 """
@@ -126,16 +114,6 @@ def capture_config(nodes):
     env["PYTHONPATH"] = str(repo) + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.check_output([str(planner["executable"]), "-c", PROBE], cwd=repo, env=env, text=True)
     effective = json.loads(result)
-    control_env = dict(controller["environ"])
-    control_env["PYTHONPATH"] = str(repo) + os.pathsep + control_env.get("PYTHONPATH", "")
-    control_result = subprocess.check_output([str(controller["executable"]), "-c", PROBE],
-                                            cwd=repo, env=control_env, text=True)
-    control = json.loads(control_result)
-    if effective["shared_safety"] != control["shared_safety"]:
-        raise ValueError("Planning and velocity control selected different navigation safety modes.")
-    control_limits = control["navigation_limits"]
-    if effective["navigation_limits"] != control_limits:
-        raise ValueError("Planning and velocity control have different navigation limits.")
     if (controller["environ"].get("ROBOT_TYPE", "go2").strip().lower()
             != planner["environ"].get("ROBOT_TYPE", "go2").strip().lower()):
         raise ValueError("Planning and velocity control selected different robot profiles.")
@@ -186,14 +164,7 @@ def main():
     parser.add_argument("--image-topic", help="Front camera Image or CompressedImage topic")
     parser.add_argument("--no-video", action="store_true", help="Skip the front camera")
     parser.add_argument("--depth", action="store_true", help="Also record raw /slam/depth for perception replay")
-    parser.add_argument("--semantic-inputs", action="store_true",
-                        help="Record raw Looper Infra1 with synchronized depth and calibration")
     args = parser.parse_args()
-    if args.semantic_inputs:
-        if args.no_video or args.image_topic:
-            parser.error("--semantic-inputs selects raw Infra1 automatically")
-        args.image_topic = "/camera/camera/infra1/image_rect_raw"
-        args.depth = True
     nodes = running_nodes()
     config, repo = capture_config(nodes)
     mode = "ppo" if config["effective"]["mode"] == "rl" and config["effective"]["route_guidance"] else config["effective"]["mode"]
@@ -211,16 +182,6 @@ def main():
         node.destroy_node()
         rclpy.shutdown()
 
-    calibration_topics = ("/slam/camera_info", "/camera/camera/infra1/camera_info",
-                          "/camera/camera/infra2/camera_info")
-    if args.semantic_inputs:
-        required = (args.image_topic, "/slam/depth", "/slam/odometry_visual")
-        missing = [topic for topic in required if topic not in available]
-        if missing:
-            raise SystemExit("Waiting for Looper inputs. Missing: " + ", ".join(missing))
-        if not any(topic in available for topic in calibration_topics):
-            raise SystemExit("Waiting for Looper camera calibration.")
-
     label = re.sub(r"[^A-Za-z0-9_.-]+", "-", args.label).strip("-.") or "run"
     root = args.output_root.expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -230,24 +191,14 @@ def main():
     sources.mkdir()
     paths = {item["source"] for items in nodes.values() for item in items}
     paths.update(repo / name for name in ("tinynav/core/robot_specs.py", "tinynav/core/planner_config.py",
-                                        "tinynav/core/map_node.py",
-                                        "tinynav/core/navigation_safety.py", "tinynav/rl/route_rejoin.py",
-                                        "tinynav/rl/calibrated_guard.py", "tinynav/rl/go2_response.json",
                                         "tinynav/rl/ppo_planner.py"))
     for path in sorted(paths):
-        if path.is_file():
-            (sources / path.name).write_bytes(path.read_bytes())
+        (sources / path.name).write_bytes(path.read_bytes())
     topics = [*TOPICS]
-    for topic in (os.environ.get("TINYNAV_EKF_TOPIC", "/go2/ekf/odometry"), "/camera/camera/vio_image"):
-        if topic in available and topic not in topics:
-            topics.append(topic)
     if camera:
         topics.append(camera)
     if args.depth:
         topics.append("/slam/depth")
-    if args.semantic_inputs:
-        topics.extend(topic for topic in (*calibration_topics, "/map/map_to_odom")
-                      if topic not in topics)
     config.update(started_at=datetime.now(timezone.utc).isoformat(), label=args.label,
                   front_camera=camera, topics=topics, publishers_at_start=publishers,
                   topic_types_at_start=available)

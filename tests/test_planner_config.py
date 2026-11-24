@@ -1,6 +1,6 @@
 import unittest
 
-from tinynav.core.planner_config import planner_mode, policy_engine_path, route_guidance, shared_safety
+from tinynav.core.planner_config import planner_mode, policy_engine_path, route_guidance
 
 
 class PlannerSelectionTests(unittest.TestCase):
@@ -12,11 +12,6 @@ class PlannerSelectionTests(unittest.TestCase):
         self.assertEqual(planner_mode({}), "library")
         with self.assertRaises(ValueError):
             planner_mode({"TINYNAV_PLANNER": "unknown"})
-        for name in ("dwa", "ppo"):
-            self.assertTrue(shared_safety({"TINYNAV_PLANNER": name}))
-            self.assertFalse(shared_safety({"TINYNAV_PLANNER": name, "TINYNAV_NAV_SHARED_SAFETY": "0"}))
-        self.assertFalse(shared_safety({"TINYNAV_PLANNER": "library"}))
-        self.assertTrue(shared_safety({"TINYNAV_PLANNER": "rl", "TINYNAV_NAV_SHARED_SAFETY": "1"}))
 
     def test_ppo_selects_route_guidance(self):
         self.assertTrue(route_guidance({"TINYNAV_PLANNER": "ppo"}))
