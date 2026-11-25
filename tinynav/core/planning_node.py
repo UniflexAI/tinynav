@@ -1118,7 +1118,13 @@ class PlanningNode(Node):
                                                         qos_profile=latest_depth_only)
             self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual',
                                                        qos_profile=poses_covering_one_depth_frame)
-            self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
+            # Approximate, not exact: on the camera odom line the bridge stamps the kf
+            # stream with the depth frame's stamp, so pairs are bit-equal and the slop
+            # never engages; on the lidar odom line odometry_visual carries lightning's
+            # own stamps, and exact equality pairs nothing -- the planner sits silent.
+            # Depth ~12 Hz against ~10 Hz odom: 0.06 covers the 50 ms worst-case skew.
+            self.ts = message_filters.ApproximateTimeSynchronizer(
+                [self.depth_sub, self.pose_sub], queue_size=10, slop=0.06)
             self.ts.registerCallback(self.sync_callback)
         else:
             self._build_lidar_pipeline()
