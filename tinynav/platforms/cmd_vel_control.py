@@ -69,6 +69,15 @@ class CmdVelControlNode(Node):
         self.max_angular_acc = 0.8  # rad/s^2
         self.max_angular_speed = self.robot.max_angular_vel  # rad/s
         self.max_forward_speed = self.robot.max_linear_vel  # m/s
+        #: Exponential brake rate once nav releases /cmd_vel -- the stick's own
+        #: rate (pilot's teleop.py TELEOP_BRAKE_PER_S): 95% shed in ~0.5s, about
+        #: 0.1 m of rollout at 0.6 m/s. `/nav/active` going false used to publish
+        #: one all-zero Twist, a step the chassis read as slamming on (measured on
+        #: poi5 2026-11-24: the arrival fired while the planner still commanded
+        #: 0.60 m/s and had 1.10 m of path left).
+        self.nav_brake_per_s = 6.0
+        #: Within this of zero the brake snaps and publishes its one definite zero.
+        self.nav_brake_eps = 0.01
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -111,6 +120,8 @@ class CmdVelControlNode(Node):
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
+        #: The command being shed after nav released /cmd_vel (None: not braking).
+        self._braking = None
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
         self._paused = False
@@ -125,17 +136,45 @@ class CmdVelControlNode(Node):
         if not self._paused:
             # Reset prev_cmd so resume starts from zero cleanly
             self.prev_cmd = Twist()
+        elif self._braking is not None:
+            # A pause is a stop, not a ramp: end the release brake on a zero.
+            self._braking = None
+            self.prev_cmd = Twist()
+            self.cmd_pub.publish(Twist())
 
     def _on_nav_active(self, msg: Bool):
         was_active = self._nav_active
         self._nav_active = bool(msg.data)
-        if was_active and not self._nav_active:
+        if self._nav_active:
+            # Re-engaged mid-brake: the planner owns /cmd_vel again.
+            self._braking = None
+        elif was_active:
             self.latest_cmd = Twist()
-            self.prev_cmd = Twist()
             self.last_path_update_time = None
-            # Send one stop when navigation is deactivated, then stay silent so
-            # manual teleop can own /cmd_vel without being overwritten by zeros.
+            # Shed what was last published rather than step to zero: this edge is
+            # where nav hands /cmd_vel back, and the robot may still be doing
+            # 0.6 m/s (see `nav_brake_per_s`). `_brake_tick` ends on one exact
+            # zero and stays silent, so teleop owns the bus from then on.
+            self._braking = Twist()
+            self._braking.linear.x = self.prev_cmd.linear.x
+            self._braking.angular.z = self.prev_cmd.angular.z
+
+    def _brake_tick(self, dt: float) -> None:
+        """One step of the release brake: shed the last command exponentially,
+        then publish its one definite zero and go quiet."""
+        k = float(np.exp(-self.nav_brake_per_s * dt))
+        nxt = Twist()
+        nxt.linear.x = self._braking.linear.x * k
+        nxt.angular.z = self._braking.angular.z * k
+        if (abs(nxt.linear.x) <= self.nav_brake_eps
+                and abs(nxt.angular.z) <= self.nav_brake_eps):
             self.cmd_pub.publish(Twist())
+            self.prev_cmd = Twist()
+            self._braking = None
+            return
+        self.cmd_pub.publish(nxt)
+        self.prev_cmd = nxt
+        self._braking = nxt
 
     def pose_callback(self, msg):
         self.pose = msg
@@ -188,6 +227,12 @@ class CmdVelControlNode(Node):
         self.last_cmd_pub_time = now
         # Only a tick that walked straight leaves a heading for the next to difference.
         prev_heading, self._bias_heading = self._bias_heading, None
+
+        # A released nav sheds its last command before the bus goes quiet; nav
+        # going active again clears `_braking` in `_on_nav_active`.
+        if self._braking is not None:
+            self._brake_tick(dt)
+            return
 
         if not self._nav_active:
             return
