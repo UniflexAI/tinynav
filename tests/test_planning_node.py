@@ -1372,3 +1372,15 @@ def test_the_provider_declares_what_the_planner_reads():
         assert FOOTPRINT_SCALE_IN_USE_TOPIC.format(d) not in topics
     # The plugin's range is this one (plugins/footprint/scales.py).
     assert FOOTPRINT_SCALE_RANGE == (0.5, 1.0)
+
+
+def test_a_g1_turns_to_a_heading_led_by_its_own_carry_and_no_bursts():
+    """pilot's lookat_turn reads these where pilot-nav.json declares them: every model
+    as it ran (13 deg, bursts), a g1 7 deg and none (8038, 2026-11-25)."""
+    from tinynav.core import robot_specs
+    from tinynav.core.robot_specs import G1_CONFIG, RobotConfig
+    assert (RobotConfig.face_turn_lead_deg, RobotConfig.face_turn_pulses) == (13.0, True)
+    for name in ('go2', 'go2w', 'as2', 'as2w', 'b2', 'b2w'):
+        config = getattr(robot_specs, f'{name.upper()}_CONFIG')
+        assert (config.face_turn_lead_deg, config.face_turn_pulses) == (13.0, True), name
+    assert (G1_CONFIG.face_turn_lead_deg, G1_CONFIG.face_turn_pulses) == (7.0, False)
