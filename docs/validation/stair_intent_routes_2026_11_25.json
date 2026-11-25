@@ -1,0 +1,509 @@
+{
+  "date": "2026-11-25",
+  "branch": "xiaole/stair-floors",
+  "baseline_commit": "ad4f3c0125491a5e780802727bc81a38556f3329",
+  "source_snapshot": "/home/dm/tinynav-stair-dev/experiments/stair-intent-20261125/source-r19",
+  "results_directory": "/home/dm/tinynav-stair-dev/experiments/stair-intent-20261125/r19",
+  "tests": {
+    "passed": 225,
+    "log": "tests.log",
+    "suites": [
+      "test_stair_intent",
+      "test_stair_tread_obstacles",
+      "test_stair_mode",
+      "test_cmd_vel_path",
+      "test_stair_obstacle_band",
+      "test_stair_app_bridge",
+      "test_vio_safety",
+      "test_vio_integration",
+      "test_stair_odom_noise",
+      "test_stair_sim_course",
+      "test_stair_sim_control",
+      "test_stair_sim_api"
+    ]
+  },
+  "simulations": {
+    "up": {
+      "passed": true,
+      "failure": null,
+      "direction": "up",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 1000.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "none",
+        "at": 3.0,
+        "lock_time": null,
+        "recovery_time": null,
+        "rejected_early": false
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 505.5999999996116,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.1292394099107142,
+      "stop": [
+        -0.5482811125564848,
+        1.4261569357808839,
+        26.213933951565632
+      ],
+      "hold": [
+        -0.5518557378142989,
+        1.42409414897573,
+        26.205719583277276
+      ],
+      "landing_events": [
+        [
+          22.299999999999613,
+          1,
+          2.8849143168240277,
+          -0.06762377323958016,
+          1.7582782480937778
+        ],
+        [
+          43.70000000000452,
+          2,
+          -0.31868453366185717,
+          1.3344976304449774,
+          3.173446436303899
+        ],
+        [
+          71.900000000006,
+          3,
+          2.6493192596768584,
+          -0.13345748476654978,
+          4.616948542480171
+        ],
+        [
+          95.49999999998454,
+          4,
+          -0.2660069979912708,
+          1.4617187703231647,
+          6.062155577499944
+        ],
+        [
+          119.89999999996235,
+          5,
+          2.6918176607961355,
+          -0.10632954473099518,
+          7.497845338663366
+        ],
+        [
+          146.19999999993846,
+          6,
+          -0.46183111214864325,
+          1.231515959543746,
+          8.961466578490521
+        ],
+        [
+          176.19999999991117,
+          7,
+          2.85462115285087,
+          0.09296400618582723,
+          10.373250517976048
+        ],
+        [
+          208.39999999988189,
+          8,
+          -0.45706431866988956,
+          1.2448786306512112,
+          11.837375322979202
+        ],
+        [
+          237.99999999985496,
+          9,
+          2.6307880966668544,
+          -0.10478166162888221,
+          13.261170824400162
+        ],
+        [
+          261.3999999998337,
+          10,
+          -0.2788320756771484,
+          1.4109184693050172,
+          14.7005393619168
+        ],
+        [
+          293.89999999980415,
+          11,
+          2.677369138191763,
+          -0.11669607279121842,
+          16.137309845725607
+        ],
+        [
+          315.4999999997845,
+          12,
+          -0.3937665978664044,
+          1.431379614173298,
+          17.590707996204586
+        ],
+        [
+          338.3999999997637,
+          13,
+          2.6494549770953273,
+          -0.10695262549608177,
+          19.025767844921397
+        ],
+        [
+          365.79999999973876,
+          14,
+          -0.4521750697060547,
+          1.223894755722999,
+          20.45177060176549
+        ],
+        [
+          410.2999999996983,
+          15,
+          2.83810942588322,
+          0.09821155660335164,
+          21.89107428431763
+        ],
+        [
+          446.7999999996651,
+          16,
+          -0.3907496130923335,
+          1.261526012140555,
+          23.33007294184038
+        ],
+        [
+          477.699999999637,
+          17,
+          2.624628941074113,
+          -0.04892972279914589,
+          24.7845485052396
+        ],
+        [
+          503.1999999996138,
+          18,
+          -0.4590691739520139,
+          1.415413666744646,
+          26.22725698856255
+        ]
+      ],
+      "trace_file": "up.trace.npz"
+    },
+    "down": {
+      "passed": true,
+      "failure": null,
+      "direction": "down",
+      "floors": 9,
+      "levels": 10,
+      "flight_width": 1.2,
+      "time_budget_s": 1000.0,
+      "landing_depth": 1.2,
+      "noise": {
+        "mode": "combined",
+        "seed": 7,
+        "scale": 0.5,
+        "position_std_m": 0.01,
+        "yaw_std_deg": 0.5,
+        "pitch_std_deg": 0.5,
+        "pitch_amplitude_deg": 1.0,
+        "pitch_hz": 1.7,
+        "correlation_s": 0.2,
+        "sample_step_s": 0.02,
+        "position_frame": "world",
+        "yaw_axis": "world_z",
+        "pitch_axis": "camera_optical_x",
+        "ramp_s": 1.0,
+        "model": "stationary OU samples with linear interpolation plus periodic pitch"
+      },
+      "vio_fault": {
+        "kind": "none",
+        "at": 3.0,
+        "lock_time": null,
+        "recovery_time": null,
+        "rejected_early": false
+      },
+      "open_landings": [],
+      "min_opening_clearance_m": null,
+      "simulated_s": 480.59999999963435,
+      "landings": 18,
+      "node_arrived": true,
+      "min_shaft_clearance_m": 0.1196934788846652,
+      "stop": [
+        -0.690087659351429,
+        1.3343717416766128,
+        -25.603015142679332
+      ],
+      "hold": [
+        -0.6920082143644875,
+        1.3446495140790673,
+        -25.62923532889263
+      ],
+      "landing_events": [
+        [
+          29.79999999999812,
+          1,
+          2.7941860243042673,
+          0.0821579302079264,
+          -1.1359249051729274
+        ],
+        [
+          53.400000000009484,
+          2,
+          -0.3914453542843953,
+          1.2924182419817243,
+          -2.5693502276288225
+        ],
+        [
+          80.49999999999818,
+          3,
+          2.80840950547116,
+          -0.030512668545556555,
+          -4.0143576643269965
+        ],
+        [
+          106.0999999999749,
+          4,
+          -0.38632566229379567,
+          1.3501726959846059,
+          -5.459570259498282
+        ],
+        [
+          130.69999999995255,
+          5,
+          2.7916118670092565,
+          0.0035872795203711785,
+          -6.902559561544986
+        ],
+        [
+          154.69999999993072,
+          6,
+          -0.39028319619765006,
+          1.3429020921992443,
+          -8.342722858085143
+        ],
+        [
+          179.59999999990808,
+          7,
+          2.8011232596108107,
+          0.03127010472406835,
+          -9.76724284401652
+        ],
+        [
+          202.69999999988707,
+          8,
+          -0.49544268101298183,
+          1.261776980991558,
+          -11.202815589191065
+        ],
+        [
+          244.69999999984887,
+          9,
+          2.791256269212946,
+          -0.0326188051346676,
+          -12.662971879985887
+        ],
+        [
+          269.1999999998266,
+          10,
+          -0.3905845177030683,
+          1.3551609810980083,
+          -14.09625639974438
+        ],
+        [
+          293.69999999980433,
+          11,
+          2.802794083135902,
+          0.10267752987229485,
+          -15.53019816314273
+        ],
+        [
+          319.6999999997807,
+          12,
+          -0.39399240503339195,
+          1.3665117158470113,
+          -16.983237613478813
+        ],
+        [
+          342.59999999975986,
+          13,
+          2.780636613218889,
+          -0.005622314004794664,
+          -18.41246466819764
+        ],
+        [
+          367.0999999997376,
+          14,
+          -0.38721745837871185,
+          1.34897266828114,
+          -19.85920150252252
+        ],
+        [
+          389.99999999971675,
+          15,
+          2.797090629128593,
+          0.011360827622859972,
+          -21.287788534626284
+        ],
+        [
+          414.49999999969447,
+          16,
+          -0.42689671054138534,
+          1.275197839600407,
+          -22.728479611025982
+        ],
+        [
+          447.49999999966445,
+          17,
+          2.7882240124882545,
+          -0.02953166312793739,
+          -24.186857296274496
+        ],
+        [
+          475.09999999963935,
+          18,
+          -0.3925698312397356,
+          1.3504330100241866,
+          -25.617942628905976
+        ]
+      ],
+      "trace_file": "down.trace.npz"
+    }
+  },
+  "field_replay": {
+    "passed": true,
+    "bags": [
+      {
+        "bag": "field_2026_11_25_08_54_15_749196",
+        "passed": true,
+        "recorded_commit": "ad4f3c0125491a5e780802727bc81a38556f3329",
+        "direction": "up",
+        "paired_frames": 2048,
+        "targets": 288,
+        "commands": 4083,
+        "counters": {
+          "turn_ticks": 1453,
+          "turn_translation_violations": 0,
+          "rejected_moving_paths": 665,
+          "guarded_ticks": 2464,
+          "guarded_violations": 0,
+          "moving_targets": 26,
+          "turn_targets": 228,
+          "stop_ticks": 34
+        },
+        "obstacle_cell_samples_before": 380014,
+        "obstacle_cell_samples_after": 373150,
+        "front_cell_samples_before": 74027,
+        "front_cell_samples_after": 70549,
+        "clipped_wall_cell_samples_preserved": 20830
+      },
+      {
+        "bag": "field_2026_11_25_08_57_29_676784",
+        "passed": true,
+        "recorded_commit": "ad4f3c0125491a5e780802727bc81a38556f3329",
+        "direction": "down",
+        "paired_frames": 817,
+        "targets": 118,
+        "commands": 2125,
+        "counters": {
+          "turn_ticks": 676,
+          "turn_translation_violations": 0,
+          "rejected_moving_paths": 331,
+          "guarded_ticks": 1400,
+          "guarded_violations": 0,
+          "moving_targets": 3,
+          "turn_targets": 113,
+          "stop_ticks": 2
+        },
+        "obstacle_cell_samples_before": 182563,
+        "obstacle_cell_samples_after": 182563,
+        "front_cell_samples_before": 16469,
+        "front_cell_samples_after": 16469,
+        "clipped_wall_cell_samples_preserved": 33582
+      }
+    ],
+    "scope": "Cold-start production StairNode target/intent replay, old Path injection and source-paired obstacle evidence. Manual physical poses remain fixed; not a physical success-rate claim. No executor, SDK or ROS playback."
+  },
+  "safety": {
+    "original_assertions_retained": 21,
+    "current_assertions": 22,
+    "additional_check": "drive.vx == 0 during intent=turn",
+    "release_min_shaft_clearance_m": 0.1,
+    "jit_definitions_unchanged": true,
+    "jit_functions": [
+      "run_raycasting_loopy",
+      "generate_trajectory_library_3d",
+      "score_trajectories_by_ESDF"
+    ]
+  },
+  "environment": {
+    "ros_domains": {
+      "up": 171,
+      "down": 172,
+      "tests": 173,
+      "bags": 174
+    },
+    "unitree_enabled": false,
+    "ros_localhost_only": true,
+    "numba_cache": "Separate directory per process; do not copy cached snapshot artifacts"
+  },
+  "manifest": {
+    "source_sha256": {
+      "tinynav/core/planning_node.py": "e59cee8d760a587bfebd330a45da3bb7d9b633a7eb354004c03c9fc67a4fde29",
+      "tinynav/core/stair_node.py": "2a6f70fd6f61dd42a196baf4060cf6dc4b49970502eba2d9f3f030a4b26615e0",
+      "tinynav/core/stair_obstacles.py": "ca17b9af93a17917ced2c288d4bb8b74f72debd2e71ed54f086f86f8cc41b887",
+      "tinynav/core/stair_target.py": "f7df1ff72c376607f1a1d36e58bfa3998435ea42de5021a484a83dfcb5ce03cd",
+      "tinynav/platforms/cmd_vel_control.py": "d973b7746539b31afdea7f1d0dc32907d8d695be20cef8dd2559ba801e643caf",
+      "tests/test_stair_intent.py": "3f672f53aa5f658b249ed983fa9e063cdecfa68712714f8b0111415fdfacaaf0",
+      "tests/test_stair_tread_obstacles.py": "bdead1734af0c17a4c51a891e6277ed007bdd8a5ff9ca14ea3349c2443f92bf6",
+      "tests/test_stair_mode.py": "ac042900b63e07815d2efdafd9eea402f74d63a47d6ed23b5dbe24d773f394e2",
+      "tool/field_stair_task_regression.py": "0da7425b553d81ae6874c6d83a4e8cd5aca28561200eba764050b43023e23e50",
+      "tool/stair_mode_sim.py": "04991266e1c0d60097f99c8d69ec1f4ab940cf2ec827cee1d0e6a9af90719a20"
+    },
+    "baseline_sha256": {
+      "tinynav/core/planning_node.py": "7eb1830b321c70db878583a20ec01e87d8ce94c5f8822c5ede1b99d03ddf6677",
+      "tinynav/core/stair_obstacles.py": "5b372c38d71ccc8df89a1a9c8c42d853a8afa9f0c5fed922c03bacf5b8a417be"
+    },
+    "result_sha256": {
+      "up.json": "4ed5c33bb36c1f390f8d8135469dfaf760868a81e830dcb8d4fca8185ea2f7a5",
+      "down.json": "a25480a0c62c323cfc78ee445e9441cefc9c063c21917c969ede0f76c133e980",
+      "tests.log": "e61da096f7f73fe33c9e3cc2d2f536157585090a58c8bf080124bce53234557b",
+      "bags/bags.json": "479a745df46158bcb9ccc4465a59fe4f757e8ab4b7b60ec7787a2f08d99b2b20"
+    }
+  },
+  "scope": [
+    "Read-only recorded inputs include manual intervention; not post-fix physical autonomy.",
+    "Old Path arrivals are injected into the updated control gate; no executor, SDK or rosbag playback.",
+    "MuJoCo depth with combined odometry noise, scale 0.5, seed 7; no new depth-noise model.",
+    "No new physical actuator/Unitree feedback validation, no full-SLAM mapping qualification.",
+    "Live App and robot services were not hot-updated."
+  ],
+  "trace_audit": [
+    {
+      "direction": "up",
+      "ticks": 5041,
+      "turn_ticks": 1950,
+      "turn_translation_violations": 0,
+      "min_forward_command": 0.25
+    },
+    {
+      "direction": "down",
+      "ticks": 4791,
+      "turn_ticks": 1610,
+      "turn_translation_violations": 0,
+      "min_forward_command": 0.25
+    }
+  ]
+}

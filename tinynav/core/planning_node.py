@@ -21,7 +21,7 @@ from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
-from tinynav.core.stair_obstacles import measured_tread_mask
+from tinynav.core.stair_obstacles import measured_tread_mask, projective_free_mask
 from tinynav.core.vio_safety import safety_blocked, accept_safety
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
@@ -179,6 +179,17 @@ def generate_trajectory_library_3d(
     return trajectories, params
 
 
+def stop_at_target_distance(trajectories, params, init_p, distance):
+    """Landing motion ends at the local goal instead of continuing into its end wall."""
+    for i in np.flatnonzero(params[:, 0] > 0.):
+        points = trajectories[i, :, :2]
+        arc = np.cumsum(np.linalg.norm(np.diff(np.vstack([init_p[:2], points]), axis=0), axis=1))
+        stop = np.searchsorted(arc, distance)
+        if stop < len(points):
+            trajectories[i, stop:] = trajectories[i, stop]
+    return trajectories
+
+
 def generate_predefined_trajectory_vocabularies(
     duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
@@ -308,7 +319,7 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
-def generate_trajectories(init_p, init_q, min_forward_speed=0., duration=3., max_forward_angular=None, min_turn_speed=0.):
+def generate_trajectories(init_p, init_q, min_forward_speed=0., duration=3., max_forward_angular=None, min_turn_speed=0., turn_in_place=False):
     trajectories, params = generate_trajectory_library_3d(
         init_p=init_p, init_q=init_q, duration=duration,
         max_linear_vel=ROBOT_CONFIG.max_linear_vel,
@@ -340,6 +351,9 @@ def generate_trajectories(init_p, init_q, min_forward_speed=0., duration=3., max
         selected = (extra_params[:, 0] == 0.) & np.isclose(np.abs(extra_params[:, 1]), min_turn_speed)
         trajectories = np.concatenate([trajectories, extra[selected]], axis=0)
         params = np.concatenate([params, extra_params[selected]], axis=0)
+    if turn_in_place:
+        keep = params[:, 0] == 0.
+        trajectories, params = trajectories[keep], params[keep]
     return trajectories, params
 
 
@@ -473,6 +487,7 @@ class PlanningNode(Node):
         parts = msg.data.split()
         self._stair_finishing = len(parts) > 1 and parts[1] == 'finishing'
         self._stair_searching = len(parts) > 1 and parts[1] == 'search'
+        self._stair_turning = 'intent=turn' in parts
         self._stair_up = bool(parts and parts[0] == 'up')
         height = next((p.split('=', 1)[1] for p in parts if p.startswith('cam_h=')), None)
         if height is not None:
@@ -672,6 +687,12 @@ class PlanningNode(Node):
             new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
             self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
         new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
+        if self.in_stair_mode and getattr(self, '_stair_up', False) and ROBOT_CONFIG.name in ('go2', 'go2w'):
+            K = np.array([[fx, 0., cx], [0., fy, cy], [0., 0., 1.]])
+            free = projective_free_mask(depth, T, K, self.occupancy_grid, self.origin, self.resolution)
+            # Keep the normal belief update: one frame cannot erase confirmed occupancy.
+            free &= new_occ <= 0.
+            new_occ[free] = np.minimum(new_occ[free], -.05)
         # A stair landing wall behind the camera is unobserved, not free.
         # Keep confirmed occupancy until a free ray, map roll or VIO reset clears it.
         retain = self.in_stair_mode & (new_occ == 0.) & (self.occupancy_grid > self.obstacle_config.occ_threshold)
@@ -696,11 +717,15 @@ class PlanningNode(Node):
                 reverse_gate_penalty = 1e9
 
         # regular trajectory penalty
-        turn = self.in_stair_mode and not getattr(self, '_stair_searching', False) and param[0] == 0.
+        turn = self.in_stair_mode and (not getattr(self, '_stair_searching', False)
+            or getattr(self, '_stair_turning', False)) and param[0] == 0.
         endpoint = traj[min(len(traj) - 1, round(STAIR.turn_score_horizon_s / .1))] if turn else traj[-1]
         traj_end = np.array(endpoint[:3])
         target_end = target_pose if target_pose is not None else traj_end
-        dist = np.linalg.norm(traj_end - target_end)
+        # Stair goals lie on support, while trajectories use the camera/control
+        # height. Their vertical offset must not keep yaw weighting high at arrival.
+        delta = traj_end - target_end
+        dist = np.linalg.norm(delta[:2] if self.in_stair_mode else delta)
         # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
         # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
         # Score a stair turn before it overshoots a small bearing correction;
@@ -786,12 +811,18 @@ class PlanningNode(Node):
             return
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
+            near_landing = stair and self.target_pose is not None and abs(
+                self.target_pose[2] - T[2, 3] + getattr(self, '_stair_camera_height', ROBOT_CONFIG.camera_height)) < .22
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             trajectories, params = generate_trajectories(init_p, init_q,
                 min_forward_speed=STAIR.min_linear_vel if stair else 0.,
-                duration=(1. if self._stair_finishing else 1.5 if self._stair_searching else 3.) if stair else 3.,
+                duration=(1. if self._stair_finishing else 1.5 if self._stair_searching or near_landing else 3.) if stair else 3.,
                 max_forward_angular=STAIR.moving_turn_limit if stair else None,
-                min_turn_speed=max(ROBOT_CONFIG.min_angular_vel, ROBOT_CONFIG.stair_min_turn_vel) if stair else 0.)
+                min_turn_speed=max(ROBOT_CONFIG.min_angular_vel, ROBOT_CONFIG.stair_min_turn_vel) if stair else 0.,
+                turn_in_place=stair and getattr(self, '_stair_turning', False))
+            if stair and self.target_pose is not None and (self._stair_searching or self._stair_finishing or near_landing):
+                trajectories = stop_at_target_distance(trajectories, params, init_p,
+                    np.linalg.norm(self.target_pose[:2] - init_p[:2]))
             self.last_T = T
             self.last_stamp = stamp
 

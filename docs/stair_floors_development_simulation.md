@@ -137,3 +137,13 @@ report for exact settings, margins and single-seed limitations.
 The live pause/resume parity repair and independent arrival/hold validation are
 documented in [live/offline parity](stair_live_offline_parity.md). The four focused
 suites pass 57 tests.
+
+## November 25 stair intent and landing regression
+
+The [November 25 release notes](stair_intent_routes_2026_11_25.md) describe explicit
+in-place turn intent, route/height consistency and oblique/partial tread evidence.
+The headless harness retains its 21 existing assertions and adds a zero-translation
+assertion for turn intent. Capture overlays use the same control-center map origin
+as target generation. Live and headless motion use the shared stair/planner/control
+modules; restart all relevant backend processes after updating them. Historical App
+recordings and older validation results elsewhere in this guide remain dated results.

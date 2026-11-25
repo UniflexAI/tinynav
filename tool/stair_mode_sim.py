@@ -167,7 +167,7 @@ def record_compute(*values, **options):
     latest_result.update(result)
     points = np.concatenate([p for _, p in stair.gen.frames])
     _, _, observed, _ = build_height_map(
-        points, values[0][:2, 3], values[0][2, 3], stair.gen.cfg)
+        points, stair.gen._control_xy(values[0]), values[0][2, 3], stair.gen.cfg)
     latest_result["observed"] = observed
     return result
 
@@ -307,6 +307,8 @@ try:
         command = outputs[-1] if outputs else None
         drive.vx = command.linear.x if command else 0.
         drive.wz = command.angular.z if command else 0.
+        if 'intent=turn' in (status.last or '').split():
+            assert drive.vx == 0., 'Translation during an in-place stair turn'
         if vio_state['blocked']:
             assert drive.vx == drive.wz == 0., 'Motion while VIO safety blocked'
         trace_target[-1] = np.full(2, np.nan) if planner.target_pose is None else planner.target_pose[:2].copy()

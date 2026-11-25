@@ -45,7 +45,10 @@ class StairNode(Node):
     def __init__(self, args):
         super().__init__('stair_node')
         camera_height = args.camera_height if args.camera_height is not None else ROBOT_CONFIG.camera_height
-        self.gen = StairTargetGenerator(StairConfig(camera_height=camera_height))
+        self.gen = StairTargetGenerator(StairConfig(
+            camera_height=camera_height,
+            camera_forward_offset=ROBOT_CONFIG.camera_x - ROBOT_CONFIG.control_x,
+            camera_lateral_offset=ROBOT_CONFIG.camera_y - ROBOT_CONFIG.control_y))
         self.gen.turn_side = TURN_SIDES[args.turn]
         # stop on the landing that ends the last floor; 0: no limit (stop stair mode by hand)
         self.floors = args.floors
@@ -224,7 +227,9 @@ class StairNode(Node):
             self.stop_robot(f'arrived: {self.gen.landings} landings')
             return
         self.guided = bool(res.get('guided', False))
-        self.publish_status(res['status'], reason=res.get('reason'))
+        self.publish_status(res['status'], reason=res.get('reason'),
+                            intent='stop' if res['status'] in STOP_STATUSES or res['target'] is None
+                            else 'turn' if res.get('turn_in_place') else 'move')
         if res['status'] in STOP_STATUSES or res['target'] is None:
             self.stop_robot(res['status'])
             return
@@ -233,24 +238,26 @@ class StairNode(Node):
         target[:3, 3] = res['target']
         self.target_pub.publish(np2msg(target, now, 'world', 'camera'))
         self.stopped = False
+        path = Path()
+        path.header.stamp = now
+        path.header.frame_id = 'world'
         if res['path'] is not None:
-            path = Path()
-            path.header.stamp = now
-            path.header.frame_id = 'world'
             for x, y, z in res['path']:
                 pose = PoseStamped()
                 pose.header = path.header
                 pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = float(x), float(y), float(z)
                 pose.pose.orientation.w = 1.0
                 path.poses.append(pose)
-            self.path_pub.publish(path)
+        self.path_pub.publish(path)
 
-    def publish_status(self, status, reason=None):
+    def publish_status(self, status, reason=None, intent=None):
         text = f'{self.direction} {status} well_side={self.gen.well_side:+.1f} cam_h={self.gen.camera_height:.2f} pitch={self.gen.pitch:+.0f}'
         text += f' landings={self.gen.landings}' + (f'/{self.landings_goal}' if self.landings_goal else '')
         text += f' floors={self.gen.landings // self.landings_per_floor}' + (f'/{self.floors}' if self.floors else '')
         text += f' recovery={int(self.gen.latest_stamp < self.gen.search_recovery_until)}'
         text += f' turn={"left" if self.gen.turn_side > 0 else "right" if self.gen.turn_side < 0 else "auto"}'
+        if intent is not None:
+            text += f' intent={intent}'
         if reason:
             text += f' reason={reason}'
         if self.memory is not None:
@@ -260,6 +267,10 @@ class StairNode(Node):
     def stop_robot(self, reason):
         if self.stopped:
             return
+        path = Path()
+        path.header.stamp = self.get_clock().now().to_msg()
+        path.header.frame_id = 'world'
+        self.path_pub.publish(path)
         # planning drops its target on poi_change, stops publishing paths, and cmd_vel times out to zero
         self.poi_change_pub.publish(np2msg(np.eye(4), self.get_clock().now().to_msg(), 'world', 'map'))
         self.stopped = True

@@ -108,10 +108,13 @@ class CmdVelControlNode(Node):
     def _on_stair_status(self, msg):
         self._stair_status_time = time.monotonic()
         parts = msg.data.split()
+        turning = 'intent=turn' in parts
+        changed = turning != getattr(self, '_stair_turning', False)
+        self._stair_turning = turning
         self._stair_finishing = len(parts) > 1 and parts[1] == 'finishing'
         self._stair_blocked = len(parts) > 1 and parts[1] in (
             'no_seed', 'odom_invalid', 'depth_invalid', 'paused', 'arrived', 'landing', 'stopped', 'vio_locked', 'vio_wait')
-        if self._stair_blocked and self._nav_active:
+        if (self._stair_blocked or changed) and self._nav_active:
             self.latest_cmd = Twist()
             self.prev_cmd = Twist()
             self.last_path_update_time = None
@@ -176,6 +179,8 @@ class CmdVelControlNode(Node):
         elif age > stale_slow_s:
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
+        if self.stair_mode and getattr(self, '_stair_turning', False):
+            target_cmd.linear.x = 0.
 
         out = Twist()
         out.linear.y = 0.0
@@ -263,6 +268,11 @@ class CmdVelControlNode(Node):
         rotation_1 = T_robot_1[:3, :3]
         p = rotation_1.T @ (T_robot_2[:3, 3] - T_robot_1[:3, 3])
         has_translation = np.linalg.norm(p[:2]) > PATH_TRANSLATION_EPS_M
+        if self.stair_mode and getattr(self, '_stair_turning', False) and has_translation:
+            self.latest_cmd = self.prev_cmd = Twist()
+            self.last_path_update_time = None
+            self.cmd_pub.publish(Twist())
+            return
         heading_err = float(np.arctan2(p[1], p[0]))
         # dt must match actual spacing between published Path poses, not raw trajectory dt.
         dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)

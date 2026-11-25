@@ -1,6 +1,6 @@
 # App 控制与 stairs mode：更新、使用和真机升级
 
-更新日期：2026-11-23；分支：`xiaole/stair-floors`。
+更新日期：2026-11-25；分支：`xiaole/stair-floors`。
 
 ## 本次交付
 
@@ -13,6 +13,10 @@
 ## 2026-11-23 真机反馈修复
 
 控制转换已修复原地路径因浮点残差产生倒退/大角速度的问题；五个真机 bag 的 5,652 条路径回归通过。当前 Go2/Go2W 障碍高度带已统一为 bottom -0.2 m、top +0.2 m，上楼不再额外抬高下界（替代此前的上楼抬高 10 cm 策略）。弱转向置信度平台会以 `landing reason=turn_uncertain` 停车等待明确转向，不再继续搜索平地开口。带噪 UP 9 / DOWN 9 重新通过；新增开放门洞测试仍未通过，见[详细结果与范围](stair_field_control_fix.md)。本次是 Python 修改，重启后端和导航子进程即可加载，不需因本次修改单独重建 Flutter。
+
+## 2026-11-25 转向、目标与踏面修复
+
+原地转向现在通过显式 `intent=turn` 同时约束规划和控制；下楼移动目标绑定当前连接路径并检查高度，上楼加入斜视/部分可见支持面识别及保守空闲证据。平台按阶段转换，收尾时保留端墙空间。最新两段实测回放、加噪上下九层结果和复现命令见 [11 月 25 日修复报告](stair_intent_routes_2026_11_25.md)。需要同步更新并重启 Python 后端及三个导航节点；本次没有 Flutter 修改，也没有热更新正在运行的 App/真机服务。
 
 ## 3090 仿真使用
 
@@ -28,7 +32,7 @@ Operate 顶部可选 color / depth，下面是实时 BEV。所有页面共享一
 
 该环境使用 MuJoCo 深度与带噪仿真 odom，调用原有 stair/planning/control 方法；不是视觉 SLAM 定位验收，也不是分布式 ROS 链路验收。楼梯模式无需先扫完整地图或设置全局 POI。详细仿真部署见 [MuJoCo App 部署](stair_mujoco_app.md) 和 [原生 App 使用](stair_tinynav_app_view.md)。
 
-## 上下九层验证
+## 早期 App 验证（2026-11-21）
 
 两次任务均从原生 App 发起，楼梯净宽/平台进深均为 1.2 m，10 个整层平台、18 段楼梯。
 噪声为 `combined / scale 0.5 / seed 7`：每轴位置标准差 5 mm，yaw 标准差 0.25°，pitch 随机标准差 0.25° 加 1.7 Hz、峰值 0.5° 的周期扰动。见 [噪声模型](stair_odom_noise_trial.md)。

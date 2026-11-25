@@ -857,3 +857,7 @@ See [current parameters and validation](stair_vio_safety.md).
 ## 2026-11-24 turn and measured-tread update
 
 The [turn/tread release notes and field regression](stair_turn_treads_2026_11_24.md) cover the shared 0.25 rad/s stair in-place turn floor, phase-specific heading score, measured-support obstacle filtering on ascent, and 0.6 m landing step-in. The obstacle band remains [-0.2, +0.2] m and min_wall remains 0.3 m. Pull the complete branch and restart the stair, planning and cmd_vel backend processes together; the new `tinynav/core/stair_obstacles.py` module is required. Flutter has no changes. These regressions do not claim a new physical robot run.
+
+## 2026-11-25 stair intent, routes and oblique support
+
+See [the stair intent/route field regression](stair_intent_routes_2026_11_25.md) for explicit zero-translation turns, height-constrained descending goals tied to their route, measured oblique/partial ascending support, and landing-phase fixes. Update and restart the stair, planning, cmd_vel and managing backend processes together; Flutter is unchanged. Keep the existing sensor/extrinsic and Unitree configuration. The Go2 obstacle band remains [-0.2, +0.2] m and min_wall remains 0.3 m. The report identifies the two November 25 recordings, the exact noise settings, reproducible checks and the limits of replaying manually assisted motion.

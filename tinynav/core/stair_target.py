@@ -24,6 +24,8 @@ class StairConfig:
     memory_s: float = 3.0           # keep points seen within the last memory_s seconds
     final_memory_s: float = 6.0     # final step-in: retain measured floor while it passes into the camera blind zone
     camera_height: float = 0.66     # camera optical center above the ground it stands on (initial value) ...
+    camera_forward_offset: float = 0.0
+    camera_lateral_offset: float = 0.0
     auto_camera_height: bool = True # ... re-measured on flat ground from the floor in the depth image: a wrong value
                                     # puts the feet on the step below and ends a flight early
     band_above_cam: float = 0.3     # ignore points higher than this above camera (ceiling)
@@ -62,6 +64,7 @@ class StairConfig:
     well_decay: float = 0.97        # memory of which side the stairwell is on
     turn_target_dist: float = 0.6   # last-resort in-place turn target distance
     search_clearance: float = 0.35  # landing targets keep this far from walls (planning backs off near walls)
+    turn_clearance: float = 0.45  # room for the complete footprint to rotate plus the planner safety margin
     search_commit_s: float = 4.0    # keep a landing target this long instead of re-picking every call
     search_stall_s: float = 6.0   # landing target has produced neither translation nor turning
     search_recovery_s: float = 4.0
@@ -81,19 +84,19 @@ class StairConfig:
     landing_min_rise: float = 1.0   # a landing counts (self.landings) only this much lower (higher, going up) than
                                     # the last one counted: a flight is ~1.45 m, and stepping back up a few steps or
                                     # pitching on the next flight's top step must not count twice
-    next_flight_lateral: float = 1.3  # a U-turn landing: the next flight starts this far to the turn side of where
+    next_flight_lateral: float = 1.4  # a U-turn landing: the next flight starts this far to the turn side of where
     next_flight_back: float = 0.4     # we arrived and this far back (1.2-1.4 / 0.3-0.5 m on all recorded landings)
     auto_side_min: float = 3.0        # turn side 'auto': once |well_side| reaches this, U-turn like a given side. The
                                       # frontier search hugged the stairwell railing into the next flight and planning
                                       # got stuck against it there (field_2026_10_09_15_26_00, 61-80 s, 148-161 s)
-    uturn_align_deg: float = 45.0   # turn side given: turn in place until the U-turn aim point is within this of the
+    uturn_align_deg: float = 10.0   # turn side given: turn in place until the U-turn aim point is within this of the
                                     # heading, then walk to it
     uturn_ahead: float = 1.0        # ... past the next flight's start, aim this far along it (back along the last flight)
     uturn_step_in: float = 0.6      # ... but first walk straight on this far past the last pitched pose: turning as soon as
                                     # the last step is left swings the body into the railing post there (manual driving on
                                     # field_2026_10_08_16_02_45 was 0.13-0.49 m in at 90 deg, the robot -0.16-0.24 m)
     uturn_step_clearance: float = 0.3  # ... as long as the cell walked to keeps this far from walls
-    uturn_cross_slack: float = 0.3  # ... then cross the landing sideways (in front of the railing post, not past it) until
+    uturn_cross_slack: float = 0.05 # ... then cross the landing sideways (in front of the railing post, not past it) until
                                     # this close to next_flight_lateral, then turn back along the next flight
     flight_cone_deg: float = 25.0   # flights are straight: on one (or anywhere, turn side given) the next level only
                                     # counts within this of the last flight's direction, or of its reverse once we face
@@ -104,6 +107,7 @@ class StairConfig:
                                     # still on a flight the steps read as a floor (0.45 -> 0.18 m on 16_07_34)
     max_target_bearing: float = 75.0    # never put the target further round than this from the camera heading;
                                         # a U-turn is done by turning toward the side instead of aiming behind
+    max_move_bearing: float = 10.0
     guide_min_dist: float = 0.8     # with a remembered direction (stair_memory.py), aim at a reachable cell
     guide_max_dist: float = 2.0     # this far away ...
     guide_max_angle: float = 60.0   # ... within this many degrees of it, else ignore the memory
@@ -195,6 +199,8 @@ class StairTargetGenerator:
         self.next_entry = None    # predicted start of the next flight, set on arriving at a landing
         self.uturn_entry = None   # turn side given: where this landing's U-turn heads (next_entry, else from here)
         self.uturn_at_entry = False  # ... reached it, now facing back along the next flight
+        self.uturn_step_complete = False
+        self.uturn_step_distance = None
         self.flight_end = None    # camera xy at the last pitched (on a flight) depth frame
         self.landings = 0         # landings reached this run (see landing_min_rise)
         self.recovering = False   # after an odometry jump: what was kept in world coordinates is gone, look again
@@ -254,13 +260,16 @@ class StairTargetGenerator:
             self._update_flight_dir()
 
     def _update_flight_dir(self):
+        if self.flight_done:
+            return
         now, arc = self.track[-1], 0.0
         for i in range(len(self.track) - 2, -1, -1):
             arc += np.linalg.norm(self.track[i + 1][:2] - self.track[i][:2])
             if arc >= self.cfg.flight_track_m:
                 d = now[:2] - self.track[i][:2]
                 if abs(now[2] - self.track[i][2]) > self.cfg.flight_min_dz and np.linalg.norm(d) > 0.5 * arc:
-                    self.flight_dir = d / np.linalg.norm(d)
+                    direction = d / np.linalg.norm(d)
+                    self.flight_dir = self.tread_axis.copy() if self.tread_axis is not None and direction @ self.tread_axis > .85 else direction
                 return
 
     @property
@@ -280,13 +289,19 @@ class StairTargetGenerator:
         if self.cfg.auto_camera_height:
             self._measure_camera_height(points, T_cam_to_world[:3, 3])
 
+    def _control_xy(self, T_cam_to_world):
+        offset = np.array([self.cfg.camera_lateral_offset, 0., self.cfg.camera_forward_offset])
+        return T_cam_to_world[:2, 3] - T_cam_to_world[:2, :3] @ offset
+
     def _update_pitch(self, stamp, T_cam_to_world):
         """The body pitches ~20 deg on a flight and is level on a landing; the camera is fixed to it."""
         cfg = self.cfg
         pitch = np.degrees(np.arcsin(np.clip(T_cam_to_world[2, 2], -1.0, 1.0)))  # camera forward, z component
         self.pitch = 0.7 * self.pitch + 0.3 * pitch  # ~0.5 s at the depth rate, the body rocks on every step
+        if self.finishing:
+            return  # Final-landing rocking is not another flight or a new arrival reference.
         if abs(self.pitch) > cfg.flight_pitch:
-            self.flight_end = T_cam_to_world[:2, 3].copy()
+            self.flight_end = self._control_xy(T_cam_to_world)
             self.pitched_since = self.pitched_since if self.pitched_since is not None else stamp
             if self.flight_done and stamp - self.pitched_since >= cfg.flight_min_s:
                 # on the next flight: arm the landing detection again
@@ -449,7 +464,8 @@ class StairTargetGenerator:
         cfg = self.cfg
         assert direction in ('up', 'down')
         self.finishing = finish_landing
-        cam = T_cam_to_world[:3, 3]
+        cam = T_cam_to_world[:3, 3].copy()
+        cam[:2] = self._control_xy(T_cam_to_world)
         if self.flight_done and not self.on_flight:
             self.tread_axis = self.tread_anchor = None
         points = np.concatenate([p for _, p in self.frames]) if self.frames else np.zeros((0, 3))
@@ -469,6 +485,8 @@ class StairTargetGenerator:
             return out
 
         ground_z = cam[2] - self.camera_height
+        if direction == 'down':
+            free &= height <= ground_z + cfg.max_step
         n = height.shape[0]
         gx, gy = np.meshgrid(np.arange(n), np.arange(n), indexing='ij')
         cell_xy = origin + (np.stack([gx, gy], -1) + 0.5) * cfg.resolution
@@ -493,7 +511,8 @@ class StairTargetGenerator:
         seeds = free & (r_robot < cfg.seed_radius) & (np.abs(np.nan_to_num(height, nan=1e9) - foot_z) < cfg.max_step)
         if not np.any(seeds):
             side = self.turn_side or np.sign(self.well_side)
-            if not finish_landing and side != 0 and (self.flight_dir is not None or self.recovering) and not self.on_flight:
+            if not finish_landing and side != 0 and (self.flight_dir is not None or self.recovering) \
+                    and not self.on_flight and not self.was_on_flight:
                 # level on a landing, facing a wall close up: nothing but the wall is in view and the floor we came
                 # over has left the memory. Stopping would keep it that way; turn in place the U-turn way to look
                 fwd = T_cam_to_world[:2, :3] @ np.array([0.0, 0.0, 1.0])
@@ -505,7 +524,9 @@ class StairTargetGenerator:
             self.last_status, self.search_goal, self.ok_goal = 'no_seed', None, None
             out['status'] = 'no_seed'
             return out
-        sx, sy = np.nonzero(seeds)
+        # Multiple roots can silently start a path on the other side of a railing.
+        seed = np.unravel_index(np.argmin(np.where(seeds, r_robot, np.inf)), seeds.shape)
+        sx, sy = np.array([seed[0]], dtype=np.int64), np.array([seed[1]], dtype=np.int64)
         sign = 1.0 if direction == 'up' else -1.0
         self.direction_sign = sign
         if self.landing_ref_z is None:
@@ -514,6 +535,19 @@ class StairTargetGenerator:
         dist, parent = _dijkstra(np.nan_to_num(height), free, cost, sx.astype(np.int64), sy.astype(np.int64), cfg.max_step, max_drop, cfg.resolution)
         reachable = np.isfinite(dist)
         out['reachable'] = reachable
+        def route(cell):
+            endpoint = cell_xy[cell]
+            line = np.linspace(cell_xy[seed], endpoint, max(2, int(np.linalg.norm(endpoint - cell_xy[seed]) / cfg.resolution * 3) + 1))
+            cells = np.floor((line - origin) / cfg.resolution).astype(int)
+            cells = cells[np.r_[True, np.any(np.diff(cells, axis=0) != 0, axis=1)]]
+            ix = tuple(cells.T)
+            dz = np.diff(height[ix])
+            if np.all(reachable[ix]) and np.all(dz <= cfg.max_step) and np.all(dz >= -max_drop):
+                return np.column_stack([cell_xy[ix], height[ix]])
+            cells = [tuple(cell)]
+            while parent[cells[-1][0], cells[-1][1], 0] >= 0:
+                cells.append(tuple(parent[cells[-1][0], cells[-1][1]]))
+            return np.array([[*cell_xy[c], height[c]] for c in cells[::-1]])
         fwd = T_cam_to_world[:2, :3] @ np.array([0.0, 0.0, 1.0])
         fwd = fwd / (np.linalg.norm(fwd) + 1e-9)
         heading = fwd
@@ -524,7 +558,20 @@ class StairTargetGenerator:
             travel = self.flight_dir
             progress = (cam[:2] - self.flight_end) @ travel
             flat = reachable & observed & (np.abs(height - foot_z) < cfg.min_level_gain_exit)
-            if progress >= cfg.arrival_step_in and abs(self.pitch) < cfg.level_pitch and np.any(flat & (r_robot < cfg.seed_radius)):
+            normal = np.array([-travel[1], travel[0]])
+            relative = cell_xy - self.flight_end
+            wall_d, wall_side = relative @ travel, (cell_xy - cam[:2]) @ normal
+            wall = obstacle & (height > foot_z + .45) & (wall_d > 0.) & (np.abs(wall_side) < .5)
+            required_step = cfg.arrival_step_in
+            if np.any(wall):
+                distance, side = wall_d[wall], wall_side[wall]
+                for d in np.unique(np.floor(distance / .1) * .1):
+                    row = np.abs(distance - d) < .1
+                    if np.ptp(side[row]) >= .6:
+                        available = distance[row].min() - cfg.turn_clearance - cfg.robot_radius
+                        required_step = min(required_step, max(cfg.robot_radius + 2 * cfg.resolution, available))
+                        break
+            if progress >= required_step and abs(self.pitch) < cfg.level_pitch and np.any(flat & (r_robot < cfg.seed_radius)):
                 out.update(status='finished', finished=True)
                 return out
             # Permit a lateral correction onto observed final-landing support.
@@ -535,7 +582,7 @@ class StairTargetGenerator:
                 return out
             aim = cam[:2] + travel * max(cfg.search_reached, cfg.arrival_step_in - progress + cfg.robot_radius)
             cell = np.unravel_index(np.argmin(np.where(cand, np.linalg.norm(cell_xy - aim, axis=-1), np.inf)), height.shape)
-            out.update(status='finishing', target=np.array([*cell_xy[cell], height[cell]]))
+            out.update(status='finishing', target=np.array([*cell_xy[cell], height[cell]]), path=route(cell))
             return out
         self._check_search_progress(cam, heading)
         search_recovery = self.latest_stamp < self.search_recovery_until
@@ -574,17 +621,18 @@ class StairTargetGenerator:
                 if not self.on_flight or sign * (height[gi] - foot_z) > cfg.min_level_gain_exit:
                     held = gi
         step_on = None
-        if held is None and self.on_flight and best < sign * foot_z + gain:
+        if held is None and (self.on_flight or self.was_on_flight) and best < sign * foot_z + gain:
             # front feet on the landing, rear still on the steps (still pitched): walk straight on to get fully onto
             # the landing before turning anywhere
+            advance_dir = travel if travel is not None else fwd
             ahead = reachable & observed & (r_robot > 0.4) & (r_robot < 0.9) & (clearance >= 0.25) \
-                & ((rel_xy @ fwd) > 0.94 * r_robot)  # within ~20 deg of the heading
+                & ((rel_xy @ advance_dir) > 0.98 * r_robot)
             if np.any(ahead):
-                step_on = np.unravel_index(np.argmax(np.where(ahead, rel_xy @ fwd, -np.inf)), ahead.shape)
+                step_on = np.unravel_index(np.argmax(np.where(ahead, rel_xy @ advance_dir, -np.inf)), ahead.shape)
         if held is not None or step_on is not None or best >= sign * foot_z + gain:
             self.uturn_entry, self.uturn_at_entry, self.uturn_crossed = None, False, False
             self.recover_turned = None
-        elif self.recovering and not self.on_flight:
+        elif self.recovering and not self.on_flight and not self.was_on_flight:
             # on a landing after a jump, nothing below ahead: turn in place the U-turn way and look, instead of
             # walking at the wall or railing we happen to face
             yaw = np.degrees(np.arctan2(heading[1], heading[0]))
@@ -636,6 +684,10 @@ class StairTargetGenerator:
                 goal = np.unravel_index(np.argmin(level_dist), dist.shape)
             self.ok_goal = (cell_xy[goal].copy(), self.latest_stamp)
         else:
+            if self.on_flight or self.was_on_flight:
+                self.last_status = 'no_seed'
+                out.update(status='no_seed', reason='flight_exit_support')
+                return out
             # landing: nothing better is visible, explore the frontier on the stairwell side. Sides are taken
             # w.r.t. the last flight, not the camera, which keeps turning on the landing. Targets keep clear of
             # walls, and a chosen one is kept for a while so the target does not jump around.
@@ -650,7 +702,7 @@ class StairTargetGenerator:
             fwd = self.flight_dir if self.flight_dir is not None else fwd
             lateral = lateral_to(fwd)
             side = self.turn_side or np.sign(self.well_side)
-            roomy = reachable & (clearance >= cfg.search_clearance)
+            roomy = reachable & (clearance >= max(cfg.search_clearance, cfg.turn_clearance))
             goal = None
             if self.uturn_side != 0 and self.flight_dir is not None and not search_recovery:
                 # turn side given: the next flight runs back beside the last one, on that side. Walk straight on into
@@ -659,12 +711,26 @@ class StairTargetGenerator:
                 left = np.array([-fwd[1], fwd[0]])
                 start = self.flight_end if self.flight_end is not None else cam[:2]
                 if self.uturn_entry is None:
+                    self.uturn_step_complete = False
+                    self.uturn_step_distance = None
                     self.uturn_entry = self.next_entry if self.next_entry is not None else \
                         start + side * cfg.next_flight_lateral * left - cfg.next_flight_back * fwd
                 # Center the crossing on the observed landing width rather than
                 # assuming every pair of flights has the configured spacing.
                 from_start = cell_xy - start
                 across = side * (from_start @ left)
+                forward_from_start = from_start @ fwd
+                end_wall = obstacle & (np.abs(across) < .5) & (forward_from_start > 0.) & (height > foot_z + .45)
+                step_in = cfg.uturn_step_in
+                if np.any(end_wall):
+                    wall_d, wall_side = forward_from_start[end_wall], across[end_wall]
+                    for d in np.unique(np.floor(wall_d / .1) * .1):
+                        row = np.abs(wall_d - d) < .1
+                        if np.ptp(wall_side[row]) >= .6:
+                            step_in = min(step_in, max(0., wall_d[row].min() - cfg.turn_clearance))
+                            break
+                if self.uturn_step_distance is not None:
+                    step_in = self.uturn_step_distance
                 platform = reachable & observed & (np.abs(height - foot_z) < 0.20) & (across > 0.5) & (across < 3.2) & ((from_start @ fwd) > -0.2) & ((from_start @ fwd) < 1.2)
                 if np.sum(platform) > 20:
                     width = max(cfg.next_flight_lateral, float(np.quantile(across[platform], 0.95)) - cfg.wall_keep)
@@ -674,30 +740,39 @@ class StairTargetGenerator:
                 entry, back = self.uturn_entry, -fwd
                 crossing_width = side * ((entry - start) @ left)
                 in_from_flight, crossed = (cam[:2] - start) @ fwd, side * ((cam[:2] - start) @ left)
+                self.uturn_step_complete |= in_from_flight >= step_in - .1
+                if self.uturn_step_complete:
+                    self.uturn_step_distance = step_in
                 self.uturn_crossed |= crossed >= crossing_width - cfg.uturn_cross_slack
                 if self.uturn_crossed and not self.uturn_at_entry and np.linalg.norm(entry - cam[:2]) <= cfg.search_reached:
                     self.uturn_at_entry = True
-                if not self.uturn_crossed:
-                    aim = start + fwd * cfg.uturn_step_in + side * crossing_width * left
+                if not self.uturn_step_complete:
+                    aim = cam[:2] + fwd * (step_in - in_from_flight)
+                elif not self.uturn_crossed:
+                    aim = start + fwd * step_in + side * crossing_width * left
                 elif not self.uturn_at_entry:
                     aim = entry
                 else:  # keep the aim ahead of us along the next flight
                     aim = entry + back * (max(0.0, (cam[:2] - entry) @ back) + cfg.uturn_ahead)
                 d = aim - cam[:2]
                 bearing = np.degrees(np.arctan2(heading[0] * d[1] - heading[1] * d[0], heading @ d))
-                cand = roomy & (r_robot > 0.3)
-                ahead = reachable & observed & (r_robot > 0.3) & (r_robot < 0.9) & (clearance >= cfg.uturn_step_clearance) \
-                    & ((rel_xy @ fwd) > 0.94 * r_robot)  # within ~20 deg of the last flight's direction
-                if not self.uturn_crossed and in_from_flight < cfg.uturn_step_in and heading @ fwd > 0.7 and np.any(ahead):
-                    # just off the last step, still facing along it: walk straight on into the landing before turning
-                    goal = np.unravel_index(np.argmax(np.where(ahead, rel_xy @ fwd, -np.inf)), ahead.shape)
+                cand = roomy & (r_robot > .05)
+                if not self.uturn_step_complete:
+                    cand &= (np.abs(across - crossed) < .1) & (forward_from_start > in_from_flight + .025) \
+                        & (forward_from_start <= step_in + .05)
                     out['stepping_in'] = True
-                elif abs(bearing) > cfg.uturn_align_deg or not np.any(cand):
+                elif not self.uturn_crossed:
+                    cand &= np.abs(forward_from_start - step_in) < .1
+                if abs(bearing) > cfg.uturn_align_deg:
                     # nearly behind us: turn the U-turn way, not the shorter way across the wall side
                     turn = side if abs(bearing) > 150 or bearing == 0 else np.sign(bearing)
                     self.last_status, self.search_goal = 'search', None
-                    out.update(target=self._turn_in_place(cam, heading, turn, foot_z), turned=True, turn_in_place=True,
+                    angle = turn * min(abs(bearing), cfg.max_target_bearing)
+                    out.update(target=self._turn_in_place(cam, heading, turn, foot_z, angle), turned=True, turn_in_place=True,
                                uturn=True, well_side=self.well_side)
+                    return out
+                elif not np.any(cand):
+                    out.update(status='no_seed', reason='landing_support')
                     return out
                 else:
                     goal = np.unravel_index(np.argmin(np.where(cand, np.linalg.norm(cell_xy - aim, axis=-1), np.inf)), cand.shape)
@@ -754,11 +829,8 @@ class StairTargetGenerator:
                 goal = np.unravel_index(np.argmax(np.where(cand, cos + 0.05 * r_robot, -np.inf)), cand.shape)
                 out['guided'] = True
         out['well_side'] = self.well_side
-        path = [goal]
-        while parent[path[-1][0], path[-1][1], 0] >= 0:
-            path.append((parent[path[-1][0], path[-1][1], 0], parent[path[-1][0], path[-1][1], 1]))
-        path = path[::-1]
-        path_xyz = np.array([[*(origin + (np.array(c) + 0.5) * cfg.resolution), height[c]] for c in path])
+        path_xyz = route(goal)
+        original_goal = path_xyz[-1].copy()
         seg = np.linalg.norm(np.diff(path_xyz[:, :2], axis=0), axis=1)
         arc = np.concatenate([[0.0], np.cumsum(seg)])
         k = min(np.searchsorted(arc, cfg.lookahead), len(path_xyz) - 1)
@@ -771,7 +843,7 @@ class StairTargetGenerator:
             if kept:
                 target = corrected
             out['wall_keep'] = kept
-        if cfg.target_open_radius > 0 and not kept:
+        if cfg.target_open_radius > 0 and not kept and not out.get('uturn'):
             # nudge the target into open space so planning is not pulled along a wall or railing
             near = reachable & (np.linalg.norm(cell_xy - target[:2], axis=-1) <= cfg.target_open_radius)
             if np.any(near):
@@ -821,8 +893,11 @@ class StairTargetGenerator:
                     if self._correction_connected(cam, corrected, inflated, height, origin):
                         target = corrected
                         out['tread_aligned'] = True
+        # Rebuild the route after every target correction, not just its marker.
+        cell = tuple(np.floor((target[:2] - origin) / cfg.resolution).astype(int))
+        path_xyz = route(cell)
         target = self._keep_in_front(target, cam, heading, reachable, observed, clearance, cell_xy, height, rel_xy, r_robot, out)
-        out.update(goal=path_xyz[-1], target=target, path=path_xyz)
+        out.update(goal=original_goal, target=target, path=path_xyz)
         return out
 
     def _correction_connected(self, reference, target, blocked, height, origin):
@@ -867,28 +942,23 @@ class StairTargetGenerator:
         """A target behind the robot makes planning back up or swing round in a stairwell: keep it within
         max_target_bearing of the camera heading, on the same side, at a reachable open cell."""
         cfg = self.cfg
+        if self.direction_sign < 0 and target[2] > cam[2] - self.camera_height + cfg.max_step:
+            out.update(status='no_seed', reason='target_height')
+            return None
         d = target[:2] - cam[:2]
         bearing = np.degrees(np.arctan2(heading[0] * d[1] - heading[1] * d[0], heading @ d))
-        if abs(bearing) <= cfg.max_target_bearing:
+        if abs(bearing) <= cfg.max_move_bearing:
             return target
         side = np.sign(bearing)
         if abs(bearing) > 150 and self.uturn_side != 0:
             side = self.uturn_side  # nearly behind: the U-turn way, the sign of the bearing flips with every step here
-        cell_bearing = np.degrees(np.arctan2(heading[0] * rel_xy[..., 1] - heading[1] * rel_xy[..., 0], rel_xy @ heading))
-        roomy = reachable & observed & (r_robot > 0.3) & (r_robot < 1.2) & (side * cell_bearing > 0) \
-            & (np.abs(cell_bearing) <= cfg.max_target_bearing) & (clearance >= cfg.search_clearance)
         out['turned'] = True
-        if np.any(roomy):
-            # as far round as allowed, i.e. turn toward where the target was, but off walls
-            c = np.unravel_index(np.argmax(np.where(roomy, side * cell_bearing, -np.inf)), roomy.shape)
-            return np.array([*cell_xy[c], height[c]])
-        # no room on that side (a wall right there): a target just beside us makes planning turn in place
-        # rather than walk anywhere; after turning there is something new to see
         out['turn_in_place'] = True
-        return self._turn_in_place(cam, heading, side, target[2])
+        angle = side * min(abs(bearing), cfg.max_target_bearing)
+        return self._turn_in_place(cam, heading, side, cam[2] - self.camera_height, angle)
 
-    def _turn_in_place(self, cam, heading, side, z):
+    def _turn_in_place(self, cam, heading, side, z, bearing=None):
         """A target just beside us, max_target_bearing round to the side (+1 left): planning turns in place."""
-        a = np.radians(side * self.cfg.max_target_bearing)
+        a = np.radians(side * self.cfg.max_target_bearing if bearing is None else bearing)
         v = np.array([heading[0] * np.cos(a) - heading[1] * np.sin(a), heading[0] * np.sin(a) + heading[1] * np.cos(a)])
         return np.array([*(cam[:2] + self.cfg.turn_in_place_dist * v), z])

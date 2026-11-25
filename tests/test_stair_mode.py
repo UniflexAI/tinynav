@@ -338,7 +338,7 @@ def test_final_count_still_steps_onto_observed_flat_landing(node):
     target = node.target_pub.publish.call_args.args[0].pose.pose.position
     assert target.x > .1 and abs(target.y) < .1
     assert 'finishing' in node.status_pub.publish.call_args.args[0].data
-    node.latest_T[0, 3] = .3
+    node.latest_T[0, 3] = .3 + node.gen.cfg.camera_forward_offset
     node.timer_callback()
     assert node.arrived
     assert 'arrived' in node.status_pub.publish.call_args.args[0].data
@@ -361,6 +361,7 @@ def test_final_landing_does_not_request_backtracking_when_facing_away(node):
     node.gen.flight_dir = np.array([1., 0.])
     node.gen.flight_end = np.array([-.2, 0.])
     node.latest_T[:3, :3] = Rotation.from_euler('z', 180., degrees=True).as_matrix() @ node.latest_T[:3, :3]
+    node.latest_T[0, 3] = -node.gen.cfg.camera_forward_offset
     xx, yy = np.meshgrid(np.arange(-.3, 1., .025), np.arange(-.6, .61, .025))
     node.gen.frames.append((0., np.column_stack((xx.ravel(), yy.ravel(), np.zeros(xx.size)))))
     node.timer_callback()
@@ -499,7 +500,8 @@ def test_measured_tread_line_does_not_follow_camera_lateral_sway(direction,sign)
     T[0,3]=.5;T[1,3]=.3;T[2,3]=.4669+sign*.32
     gen.latest_stamp=.5
     second=gen.compute(T,direction)
-    assert second.get('tread_aligned') and second['target'][1]<.2
+    assert second.get('tread_aligned') and second['path'][-1, 1]<.2
+    assert second.get('turn_in_place') or second['target'][1]<.2
     gen.frames.clear()
     assert gen.compute(T,direction)['target'] is None
     gen.invalidate_world()
