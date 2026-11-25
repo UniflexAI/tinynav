@@ -12,10 +12,11 @@ class ObstacleConfig:
     z-band is relative to camera height (T[2, 3]). Taller robots need a wider
     band so hanging obstacles and low walls still count as collisions.
 
-    The values here are this fork's, measured on its rigs, and they are NOT upstream's
-    (which are -0.4/0.4, 0.1, 0.2, 2). They arrived as one global config inside
-    planning_node -- `94e9871` tuned min_wall_span_m to 0.05 and `95ec80a` the
-    occupancy threshold -- and moved here when upstream made the config per-robot.
+    The values here are this fork's, measured on its rigs; min_wall_span_m is the
+    exception -- upstream's 0.2, restored 2026-11-24 after the fork's 0.05 (one voxel)
+    let the lidar raycast's z smear read sloped ground as walls. The rest arrived as
+    one global config inside planning_node -- `95ec80a` tuned the occupancy threshold
+    -- and moved here when upstream made the config per-robot.
     The move is upstream's structure with the fork's numbers. Since 2026-11-12 each
     model's bottom sits FLOOR_CLEARANCE_M above the floor at its standing camera height
     (the configs below say where each height comes from) -- a bottom set for go2's
@@ -31,7 +32,10 @@ class ObstacleConfig:
     #: 0.2 from 2026-11-13).
     robot_z_top: float = 0.08
     occ_threshold: float = 0.05
-    min_wall_span_m: float = 0.05
+    #: The wall/bump span gate, near-ground cells only (floating cells keep the
+    #: single-voxel floor below). Upstream's 0.2: a lidar surface smears across
+    #: 2-3 voxels in z, and at 0.05 -- one voxel -- sloped ground read as walls.
+    min_wall_span_m: float = 0.2
     #: Only cells whose lowest occupied voxel sits within this of robot_z_bottom are
     #: span-filtered: walls span, stair risers and ground bumps do not. Cells starting
     #: above the band are floating obstacles and keep a single-voxel noise floor.
@@ -191,6 +195,10 @@ AS2W_CONFIG = replace(
     # Origin ~0.39 m up ([SPEC] 0.521 less [ROS]'s shell top 0.135) + [CAD] 0.178 =
     # 0.57 m camera height -> -0.50. No documented height.
     obstacle=ObstacleConfig(robot_z_bottom=-0.50),
+    # As go2's, unmeasured on this base: at the defaults the planner asked
+    # 0.1-0.2 rad/s turns the chassis did not execute (031, 2026-11-24).
+    min_angular_vel=0.2,
+    max_angular_vel=1.0,
 )
 
 B2_CONFIG = RobotConfig(
