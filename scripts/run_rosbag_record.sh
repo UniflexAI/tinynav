@@ -22,8 +22,11 @@ else
     mkdir -p "$(dirname "$output_dir")"
 fi
 
+# mcap, like pilot's deploy/record_bag*.sh: one format for every recorded bag. The
+# map build reads the storage id off the bag's metadata.yaml, so it follows.
 ros2 bag record \
     --output "${output_dir}" \
+    --storage mcap \
     --max-cache-size 2147483648 \
     /camera/camera/infra1/camera_info \
     /camera/camera/infra1/image_rect_raw \
