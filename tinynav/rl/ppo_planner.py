@@ -392,7 +392,7 @@ class RLPlanner:
             cap, route_turn = route_guided_command(route, center, yaw, .55, np.nan)
             age = self.semantic_pose_age + monotonic() - assist_started_at
             assist = self.start_assist.forward(center, yaw, (v, w), route_turn,
-                cap, age, esdf, origin, self.edge)
+                cap, age, esdf, origin, self.edge, goal=goal_xy, velocity=self.vel)
             if assist is not None:
                 v, w = assist
                 status = "semantic start assist"

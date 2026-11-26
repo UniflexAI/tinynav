@@ -14,7 +14,8 @@ MAX_POSE_AGE = .50
 
 
 class SemanticStartAssist:
-    def __init__(self):
+    def __init__(self, *, checked_start=False):
+        self.checked_start = checked_start
         self.reset()
 
     def reset(self):
@@ -33,13 +34,21 @@ class SemanticStartAssist:
                 low_since = previous[3]
         self.command = (now, v, w, low_since)
 
-    def forward(self, center, yaw, selected, guide_turn, cap, age, esdf, origin, edge):
+    def forward(self, center, yaw, selected, guide_turn, cap, age, esdf, origin, edge, *, goal=None, velocity=None):
         now = monotonic()
         sample = self.command
-        if sample is None or now - sample[0] > MAX_COMMAND_GAP or not 0 <= age <= MAX_POSE_AGE:
+        max_age = .75 if self.checked_start else MAX_POSE_AGE
+        if sample is None or now - sample[0] > MAX_COMMAND_GAP or not 0 <= age <= max_age:
             self.anchor = None
             self.pulse_until = 0.
             return None
+        if self.checked_start:
+            delta = np.asarray(goal) - center
+            heading = np.angle(np.exp(1j * (np.arctan2(delta[1], delta[0]) - yaw)))
+            if np.linalg.norm(delta) < .75 or abs(heading) > np.deg2rad(20.):
+                self.anchor = None
+                self.pulse_until = 0.
+                return None
         if self.anchor is not None:
             _, position, heading = self.anchor
             moved = (np.linalg.norm(center - position) >= .025
@@ -68,6 +77,20 @@ class SemanticStartAssist:
         elif abs(sample[2]) > .08 or not .08 <= sample[1] <= START_SPEED + .01:
             self.pulse_until = 0.
             return None
+
+        if self.checked_start:
+            from tinynav.rl.semantic_forward_guide import candidate_path, has_clearance
+
+            # Check travel before the new command takes effect as well as the
+            # forward pulse and slow braking after it.
+            pose = np.r_[center, yaw]
+            if not np.isfinite(velocity).all() or not all(
+                has_clearance(candidate_path(pose, prior, 0., delay), esdf, origin, edge)
+                for prior in (sample[1:3], velocity, (0., 0.))
+                for delay in (.32, max(.50, age))
+            ):
+                self.pulse_until = 0.
+                return None
 
         # Use instant full response, controller lease, and slow braking. Never
         # credit the dead zone when checking how far the chassis can travel.

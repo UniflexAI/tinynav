@@ -465,10 +465,12 @@ class PlanningNode(Node):
                 self.rl = RLPlanner(policy, geometry)
                 if self.semantic_bev:
                     self.create_subscription(Twist, "/cmd_vel", self.semantic_actual_cmd, 10)
-                if self.semantic_bev and ROBOT_CONFIG.name == "go2" and os.environ.get("TINYNAV_SEMANTIC_START_ASSIST") == "1":
+                checked_start = os.environ.get("TINYNAV_SEMANTIC_CHECKED_START") == "1"
+                start_assist = os.environ.get("TINYNAV_SEMANTIC_START_ASSIST") == "1"
+                if self.semantic_bev and ROBOT_CONFIG.name == "go2" and (checked_start or start_assist):
                     from tinynav.rl.semantic_start_assist import SemanticStartAssist
-                    self.rl.start_assist = SemanticStartAssist()
-                    self.get_logger().info("Semantic Go2 start assist enabled")
+                    self.rl.start_assist = SemanticStartAssist(checked_start=checked_start)
+                    self.get_logger().info(f"Semantic Go2 start assist enabled, checked start: {checked_start}")
             else:
                 self.rl = RLPlanner(TRTPolicy())
             self.rl_cmd_pub = self.create_publisher(Twist, '/planning/rl_cmd', 10)
