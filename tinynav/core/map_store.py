@@ -1,6 +1,9 @@
 """How a map's keyframe entries are encoded on disk: depth as uint16 millimetres,
 SuperPoint descriptors in FP16 when that is exact. NumPy only, so the offline tools
 can read a map without loading the models."""
+import os
+import shutil
+
 import numpy as np
 
 #: Depth is stored in whole millimetres; 0 means no depth, as `disparity_to_depth` writes it.
@@ -37,3 +40,19 @@ def half_descriptors(features: dict) -> dict:
     if not np.array_equal(half.astype(np.float32), descps):
         return features
     return {**features, 'descps': half}
+
+
+def drop_patch_tokens(map_dir: str) -> int:
+    """Delete DINOv2's patch tokens from a map, whatever files the shelve backend made of
+    them (`patch_tokens.db`, or `.dat`/`.dir`). Returns the bytes freed. The shelf has to
+    be closed; deleting keys would not shrink a Berkeley DB file, so the file goes."""
+    freed = 0
+    for entry in os.scandir(map_dir):
+        if entry.name == 'patch_tokens' or entry.name.startswith('patch_tokens.'):
+            if entry.is_dir(follow_symlinks=False):
+                freed += sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(entry.path) for f in fs)
+                shutil.rmtree(entry.path)
+            else:
+                freed += entry.stat(follow_symlinks=False).st_size
+                os.remove(entry.path)
+    return freed

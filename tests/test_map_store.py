@@ -6,7 +6,9 @@ import tempfile
 
 import numpy as np
 
-from tinynav.core.map_store import decode_depth, encode_depth, half_descriptors
+import pytest
+
+from tinynav.core.map_store import decode_depth, drop_patch_tokens, encode_depth, half_descriptors
 
 TOOL = os.path.join(os.path.dirname(__file__), '..', 'tool', 'slim_map.py')
 
@@ -115,6 +117,50 @@ def test_slim_map_rewrites_a_map_and_keeps_what_it_holds():
 
         assert '0/5 entries to re-encode' in _slim(map_dir)
         assert {f: os.path.getmtime(os.path.join(map_dir, f)) for f in os.listdir(map_dir)} == written
+
+
+def test_drop_patch_tokens_deletes_the_shelf_and_nothing_else():
+    with tempfile.TemporaryDirectory() as map_dir:
+        for name in ('patch_tokens.db', 'patch_tokens', 'patch_tokens.dat', 'patch_tokens.dir',
+                     'features.db', 'patch_tokens_notes.txt'):
+            with open(os.path.join(map_dir, name), 'wb') as f:
+                f.write(b'x' * 10)
+        assert drop_patch_tokens(map_dir) == 40
+        assert sorted(os.listdir(map_dir)) == ['features.db', 'patch_tokens_notes.txt']
+        assert drop_patch_tokens(map_dir) == 0
+
+
+def _db(map_dir, **kwargs):
+    build_map_node = pytest.importorskip('tinynav.core.build_map_node')
+    return build_map_node.TinyNavDB(map_dir, **kwargs)
+
+
+def test_a_map_built_without_rgb_has_no_rgb_video():
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    with tempfile.TemporaryDirectory() as map_dir:
+        stale = os.path.join(map_dir, 'rgb_images_db')
+        os.makedirs(stale)
+        db = _db(map_dir, save_rgb=False)
+        db.set_entry(1, rgb_image=frame, infra1_image=frame[..., 0])
+        db.close()
+        assert not os.path.exists(stale)
+
+
+def test_a_map_built_with_rgb_keeps_it():
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    with tempfile.TemporaryDirectory() as map_dir:
+        db = _db(map_dir, save_rgb=True)
+        db.set_entry(1, rgb_image=frame)
+        db.close()
+        assert os.path.exists(os.path.join(map_dir, 'rgb_images_db', 'video.mp4'))
+
+
+def test_a_map_without_rgb_opens_for_reading():
+    with tempfile.TemporaryDirectory() as map_dir:
+        _db(map_dir, save_rgb=False).close()
+        reader = _db(map_dir, is_scratch=False)
+        assert reader.rgb_video_db.ts_to_idx == {}
+        reader.close()
 
 
 if __name__ == '__main__':
