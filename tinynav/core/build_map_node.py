@@ -2,6 +2,7 @@ import asyncio
 import glob
 import logging
 import os
+import shutil
 import shelve
 import time
 from contextlib import contextmanager
@@ -37,6 +38,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.flexglue import FlexGlueTRT
+from tinynav.core.map_store import decode_depth, drop_patch_tokens, encode_depth, half_descriptors
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
 from tinynav.core.vlad import compute_vlad, train_vocabulary_streaming
@@ -56,6 +58,9 @@ class BuildMapArgs:
     # Mirrors COLMAP IncrementalPipeline::ba_global_frames_ratio (default 1.1).
     global_frames_ratio: float = 1.1
     feature_matcher: Literal["lightglue", "flexglue"] = "lightglue"
+    # Keep the RGB video (rgb_images_db). Nothing a map is navigated with reads it; the colmap/NeRF
+    # export, bundle adjustment and clean_keyframes do.
+    save_rgb: bool = False
 
 
 def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
@@ -313,6 +318,16 @@ class IntKeyShelf:
         self.db.close()
 
 
+class DepthShelf(IntKeyShelf):
+    """Float32 metres in and out, `encode_depth`'s uint16 millimetres on disk."""
+
+    def __getitem__(self, key: int):
+        return decode_depth(super().__getitem__(key))
+
+    def __setitem__(self, key: int, depth):
+        super().__setitem__(key, encode_depth(depth))
+
+
 class OdomPoseRecorder:
     """
     Utility class to record continuous odometry data to disk.
@@ -366,7 +381,7 @@ class OdomPoseRecorder:
 
 
 class TinyNavDB():
-    def __init__(self, map_save_path:str, is_scratch:bool = True):
+    def __init__(self, map_save_path:str, is_scratch:bool = True, save_rgb:bool = True):
         self.map_save_path = map_save_path
         self.is_scratch = is_scratch
         mode = "write" if is_scratch else "read"
@@ -375,11 +390,16 @@ class TinyNavDB():
             mode=mode,
             fps=30,
         )
-        self.rgb_video_db = VideoDB(
-            dir_path=f"{map_save_path}/rgb_images_db",
-            mode=mode,
-            fps=30,
-        )
+        # A writer that keeps no RGB has no rgb_video_db; a reader always has one (empty when the map has none).
+        self.rgb_video_db = None
+        if save_rgb or not is_scratch:
+            self.rgb_video_db = VideoDB(
+                dir_path=f"{map_save_path}/rgb_images_db",
+                mode=mode,
+                fps=30,
+            )
+        else:
+            shutil.rmtree(f"{map_save_path}/rgb_images_db", ignore_errors=True)
         if is_scratch:
             for db_file in glob.glob(f"{map_save_path}/*.db"):
                 os.remove(db_file)
@@ -388,13 +408,13 @@ class TinyNavDB():
         self.semantic_embeddings = IntKeyShelf(f"{map_save_path}/semantic_embeddings")
         self.vlad_descriptors = IntKeyShelf(f"{map_save_path}/vlad_descriptors")
         self.patch_tokens = IntKeyShelf(f"{map_save_path}/patch_tokens")
-        self.depths = IntKeyShelf(f"{map_save_path}/depths")
+        self.depths = DepthShelf(f"{map_save_path}/depths")
         self.metadata = shelve.open(f"{map_save_path}/metadata")
 
     def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None, vlad_descriptor:np.ndarray = None, patch_tokens:np.ndarray = None, infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
             self.infra1_video_db.write(key, infra1_image)
-        if rgb_image is not None:
+        if rgb_image is not None and self.rgb_video_db is not None:
             self.rgb_video_db.write(key, rgb_image)
         if depth is not None:
             self.depths[key] = depth
@@ -403,7 +423,7 @@ class TinyNavDB():
         if semantic_embedding is not None:
             self.semantic_embeddings[key] = semantic_embedding
         if features is not None:
-            self.features[key] = features
+            self.features[key] = half_descriptors(features)
         if vlad_descriptor is not None:
             self.vlad_descriptors[key] = vlad_descriptor
         if patch_tokens is not None:
@@ -412,7 +432,7 @@ class TinyNavDB():
     def get_depth_embedding_features_images(self, key:int):
         key_int = int(key)
         def rgb_loader():
-            if self.is_scratch:
+            if self.is_scratch or self.rgb_video_db is None:
                 return None
             return self.rgb_video_db.read(key_int)
 
@@ -447,7 +467,8 @@ class TinyNavDB():
         self.depths.close()
         self.metadata.close()
         self.infra1_video_db.close()
-        self.rgb_video_db.close()
+        if self.rgb_video_db is not None:
+            self.rgb_video_db.close()
 
 class BagPlayer(Node):
     def __init__(
@@ -602,6 +623,7 @@ class BuildMapNode(Node):
         verbose_timer: bool = True,
         global_frames_ratio: float = 1.1,
         feature_matcher: str = "lightglue",
+        save_rgb: bool = False,
     ):
         super().__init__('build_map_node')
         if global_frames_ratio < 1.0:
@@ -657,7 +679,7 @@ class BuildMapNode(Node):
         self.continuous_odom_recorder = OdomPoseRecorder(map_save_path, "mapping")
 
         os.makedirs(f"{map_save_path}", exist_ok=True)
-        self.db = TinyNavDB(map_save_path)
+        self.db = TinyNavDB(map_save_path, save_rgb=save_rgb)
 
         self.marker_id = 0
 
@@ -948,6 +970,10 @@ class BuildMapNode(Node):
             stage_timer=self.stage_timer,
         )
         occupancy_db.close()
+        # The vocabulary and every VLAD descriptor are done; nothing else reads the tokens, and
+        # opening the shelf above would have recreated the file, so this comes after it.
+        freed = drop_patch_tokens(self.map_save_path)
+        self.get_logger().info(f"patch_tokens dropped: {freed / 2**20:.0f} MB")
         with self.stage_timer.timed("occupancy_save_files"):
             occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
             np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
@@ -1092,6 +1118,7 @@ if __name__ == '__main__':
         verbose_timer=parsed_args.verbose_timer,
         global_frames_ratio=parsed_args.global_frames_ratio,
         feature_matcher=parsed_args.feature_matcher,
+        save_rgb=parsed_args.save_rgb,
     )
     image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)
