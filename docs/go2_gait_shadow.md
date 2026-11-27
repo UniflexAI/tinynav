@@ -40,3 +40,19 @@ There is no motor publisher or change of Unitree motion service state.
 The simulator tests the balance response. Robot-side actuator ownership,
 packet acceptance, stale-feedback behavior and independent physical stop
 remain required before powered handover.
+
+## Go2 low-level handover preflight
+
+The Unitree Go2 low-level example requires closing the active motion service
+and confirming it is released before low-command writes. The preflight makes
+only the read-only CheckMode RPC and subscribes to lowstate. It locally probes
+the SDK CRC support and does not release, select, or activate any service.
+
+Use `python3 -m tool.go2_handover_check --iface <robot-network-interface>`
+with the same SDK environment as the existing robot controller. An unknown
+owner (missing or failed query) must never be treated as released. An SDK
+with missing CRC support cannot produce the intended valid low-command
+packets. The physical stop must be independently verified for the actual
+firmware with the high-level motion service released, including whether it
+still takes effect with the host publisher stalled or disconnected. A
+remote input observed by the host does not establish that property.
