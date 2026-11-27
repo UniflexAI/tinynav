@@ -109,6 +109,11 @@ class RobotConfig:
     #: Whether a residual under that lead is turned with a short burst (0.15 s): a
     #: quadruped's gait answers one with a few degrees, a humanoid's does not.
     face_turn_pulses: bool = True
+    #: How far past the heading that turn aims (deg), away from the side it starts on.
+    #: A base that stops short of its target -- a quadruped's last pulse lands a median
+    #: 4.2 deg short (pilot 67be911e) -- ends around the heading this way; one that turns
+    #: its residual steadily lands on whatever it aims at, so it aims at the heading.
+    face_turn_overshoot_deg: float = 5.0
     #: The reverse gate (planning_node.reverse_armed): the reverse family is armed once
     #: the way forward is this short (m), and stays armed until it opens past the exit.
     reverse_enter_m: float = 0.10
@@ -313,6 +318,10 @@ G1_CONFIG = RobotConfig(
     # asked a second turn; and a 0.15 s burst turned it 0.0-0.7 deg, shaking on the
     # spot (8038, 2026-11-25). Leads by 7, no bursts.
     face_turn_lead_deg=7.0, face_turn_pulses=False,
+    # Turning its residual steadily, it lands on its aim to within 1 deg, so a 5 deg aim
+    # past the heading left it 5 deg past -- the drive that followed turned it back
+    # (8038, 2026-11-27 09:33). Aims at the heading.
+    face_turn_overshoot_deg=0.0,
     # Pelvis 0.78 m up ([RLG] g1_config.py base_height_target; [ROS] FK 0.784 at the
     # default stance) + 0.460 = 1.24 m camera height -> -1.18. The default -0.45 left
     # g1 blind below ~0.79 m. The top: the head's top is 0.092 m over the lens
