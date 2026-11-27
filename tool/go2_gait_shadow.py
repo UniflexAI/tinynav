@@ -94,7 +94,11 @@ def main():
     parser.add_argument("--seconds", type=float, default=15.0)
     parser.add_argument("--internal-zero", action="store_true",
                         help="Use a local zero velocity reference; only subscribe to lowstate")
+    parser.add_argument("--takeover-preview", action="store_true",
+                        help="Preview a stationary takeover and simulated stop in SDK motor order")
     args = parser.parse_args()
+    if args.takeover_preview and not args.internal_zero:
+        parser.error("--takeover-preview requires --internal-zero")
     sys.path.insert(0, str(args.sim_dir.resolve()))
     from sim.policy import PieOnnxPolicy
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
@@ -102,6 +106,14 @@ def main():
 
     onnx = args.sim_dir.resolve() / "assets/policy/go2_blind_v3.onnx"
     gait = ShadowGait(PieOnnxPolicy(onnx, provider="cpu"))
+    takeover = packet = None
+    if args.takeover_preview:
+        from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_
+        from tool.go2_takeover_preview import TakeoverPreview, preview_motor_fields
+        packet = unitree_go_msg_dds__LowCmd_()
+        order = gait.sdk_from_policy
+        kp = np.array(gait.policy.metadata["joint_stiffness"].split(","), dtype=float)[order]
+        kd = np.array(gait.policy.metadata["joint_damping"].split(","), dtype=float)[order]
     ChannelFactoryInitialize(0, args.iface)
     lock = threading.Lock()
     state = command = None
@@ -145,16 +157,26 @@ def main():
             now = time.monotonic()
         if args.internal_zero:
             desired = (now, (0.0, 0.0, 0.0))
-        q_target = None
+        q_target = preview = None
         if sample is not None:
             command_at = desired[0] if desired is not None else None
             if gate.check(now, command_at, sample[0]):
                 q_target = gait.tick(desired[1], *sample[1]).tolist()
                 target_count += 1
+                if packet is not None:
+                    if takeover is None:
+                        takeover = TakeoverPreview(sample[1][0], now)
+                    elapsed = now - takeover.start
+                    pressed = 1.0 <= elapsed < 1.5
+                    target = takeover.step(now, q_target, pressed)
+                    preview_motor_fields(packet, target, kp, kd)
+                    preview = {"elapsed_s": elapsed, "stop_pressed": pressed,
+                               "stop_latched": takeover.latched,
+                               "q_lowcmd_preview_sdk": [m.q for m in packet.motor_cmd[:12]]}
             if started is None or now - started >= 0.20:
                 print(json.dumps({"feedback_age_s": now - sample[0], "q_sdk": sample[1][0],
                                   "dq_sdk": sample[1][1], "q_target_sdk": q_target,
-                                  "fault": gate.reason}), flush=True)
+                                  "fault": gate.reason, "takeover_preview": preview}), flush=True)
                 started = now
         next_tick = max(now, next_tick + PERIOD)
         time.sleep(max(0.0, next_tick - time.monotonic()))
@@ -162,6 +184,8 @@ def main():
         raise SystemExit("No Go2 low-state feedback received")
     if args.internal_zero:
         print(json.dumps({"target_count": target_count, "fault": gate.reason}), flush=True)
+        if args.takeover_preview and (takeover is None or not takeover.latched):
+            raise SystemExit("Capture did not reach the simulated stop")
         if not target_count or gate.reason is not None:
             raise SystemExit("Internal-zero shadow inference did not finish without faults")
 

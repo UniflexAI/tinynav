@@ -29,3 +29,14 @@ For a stationary standing capture without navigation commands, add
 `--internal-zero --seconds 30`. This mode only subscribes to `rt/lowstate`
 and feeds zero velocity directly to the inference loop. It logs the number
 of calculated joint targets and continues to enforce the feedback timeout.
+
+Add `--takeover-preview` to the stationary recording to exercise the 2 s
+handover, beginning from the first measured joint positions. The test
+injects a stop at 1 s and releases it at 1.5 s. The navigation reference
+stays at zero and the gait keeps calculating balance targets with a
+0.4 rad/s target slew limit. The stop remains latched for the capture.
+The logged low-command fields are prepared in a local Unitree SDK object.
+There is no motor publisher or change of Unitree motion service state.
+The simulator tests the balance response. Robot-side actuator ownership,
+packet acceptance, stale-feedback behavior and independent physical stop
+remain required before powered handover.
