@@ -24,3 +24,8 @@ against the existing MuJoCo runtime. It simulates a zero velocity input upon
 the injection of a command timeout, feedback timeout or emergency stop and
 verifies that later packets cannot automatically clear the latch. This branch
 provides shadow mode and does not validate physical motor stop behavior.
+
+For a stationary standing capture without navigation commands, add
+`--internal-zero --seconds 30`. This mode only subscribes to `rt/lowstate`
+and feeds zero velocity directly to the inference loop. It logs the number
+of calculated joint targets and continues to enforce the feedback timeout.

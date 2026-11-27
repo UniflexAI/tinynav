@@ -92,11 +92,12 @@ def main():
     parser.add_argument("--iface", required=True)
     parser.add_argument("--sim-dir", type=Path, required=True, help="Checked-out tinynav-sim/mujoco")
     parser.add_argument("--seconds", type=float, default=15.0)
+    parser.add_argument("--internal-zero", action="store_true",
+                        help="Use a local zero velocity reference; only subscribe to lowstate")
     args = parser.parse_args()
     sys.path.insert(0, str(args.sim_dir.resolve()))
     from sim.policy import PieOnnxPolicy
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
-    from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
     from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
 
     onnx = args.sim_dir.resolve() / "assets/policy/go2_blind_v3.onnx"
@@ -125,24 +126,31 @@ def main():
             command = (time.monotonic(), [message.linear.x, message.linear.y, message.angular.z])
 
     low = ChannelSubscriber("rt/lowstate", LowState_)
-    twist = ChannelSubscriber("rt/cmd_vel", Twist_)
     low.Init(on_state, 1)
-    twist.Init(on_cmd, 1)
+    if not args.internal_zero:
+        from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
+        twist = ChannelSubscriber("rt/cmd_vel", Twist_)
+        twist.Init(on_cmd, 1)
     print(json.dumps({"mode": "read_only", "sdk_order": SDK_JOINTS,
+                      "command_source": "internal_zero" if args.internal_zero else "rt/cmd_vel",
                       "policy_order": gait.contract.joint_names}), flush=True)
     gate = CommandGate()
     started = None
+    target_count = 0
     next_tick = time.monotonic()
     deadline = next_tick + args.seconds
     while next_tick < deadline:
-        now = time.monotonic()
         with lock:
             sample, desired = state, command
+            now = time.monotonic()
+        if args.internal_zero:
+            desired = (now, (0.0, 0.0, 0.0))
         q_target = None
         if sample is not None:
             command_at = desired[0] if desired is not None else None
             if gate.check(now, command_at, sample[0]):
                 q_target = gait.tick(desired[1], *sample[1]).tolist()
+                target_count += 1
             if started is None or now - started >= 0.20:
                 print(json.dumps({"feedback_age_s": now - sample[0], "q_sdk": sample[1][0],
                                   "dq_sdk": sample[1][1], "q_target_sdk": q_target,
@@ -152,6 +160,10 @@ def main():
         time.sleep(max(0.0, next_tick - time.monotonic()))
     if state is None:
         raise SystemExit("No Go2 low-state feedback received")
+    if args.internal_zero:
+        print(json.dumps({"target_count": target_count, "fault": gate.reason}), flush=True)
+        if not target_count or gate.reason is not None:
+            raise SystemExit("Internal-zero shadow inference did not finish without faults")
 
 
 if __name__ == "__main__":
