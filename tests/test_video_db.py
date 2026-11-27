@@ -35,6 +35,46 @@ class GopTest(unittest.TestCase):
         self.assertEqual(n, 40)
         self.assertLessEqual(gap, 15)
 
+    def test_a_colour_video_keeps_x264s_gop_unless_asked(self):
+        colour = [np.stack([f] * 3, axis=-1) for f in _frames(40)]
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(V, 'GOP', 15):
+                db = V.VideoDB(d, 'write')
+                for i, f in enumerate(colour):
+                    db.write(1000 + i, f)
+                db.close()
+            self.assertGreater(keyframe_gaps(os.path.join(d, 'video.mp4'))[1], 15)
+        with tempfile.TemporaryDirectory() as d:
+            db = V.VideoDB(d, 'write', gop=10)
+            for i, f in enumerate(colour):
+                db.write(1000 + i, f)
+            db.close()
+            self.assertLessEqual(keyframe_gaps(os.path.join(d, 'video.mp4'))[1], 10)
+
+    def test_a_setting_that_does_not_read_falls_back(self):
+        with mock.patch.dict(os.environ, {'TINYNAV_VIDEO_GOP': '15ms'}):
+            self.assertEqual(V._env('TINYNAV_VIDEO_GOP', '15', int), 15)
+
+    def test_the_run_after_the_last_keyframe_counts(self):
+        class _Pkt:
+            def __init__(self, key):
+                self.size, self.is_keyframe = 1, key
+
+        class _Container:
+            streams = mock.Mock(video=[None])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def demux(self, _stream):
+                return [_Pkt(i in (0, 12)) for i in range(300)]
+
+        with mock.patch('tool.reencode_video_db.av.open', return_value=_Container()):
+            self.assertEqual(keyframe_gaps('x.mp4')[:2], (300, 288))
+
     def test_gop_0_leaves_it_to_x264(self):
         with tempfile.TemporaryDirectory() as d:
             _write(d, _frames(40), 0)
@@ -145,6 +185,26 @@ class ReencodeTest(unittest.TestCase):
         os.remove(backup_path(self.map, 'infra1_images_db'))
         self.assertEqual(reencode_main([self.map]), 0)
         self.assertFalse(os.path.exists(backup_path(self.map, 'infra1_images_db')))
+
+    def test_a_map_outside_maps_is_refused_before_anything_is_encoded(self):
+        other = os.path.join(self.root.name, 'elsewhere', 'm')
+        _write(os.path.join(other, 'infra1_images_db'), self.frames, 0)
+        self.assertEqual(reencode_main([other]), 1)
+        self.assertEqual(os.listdir(other), ['infra1_images_db'])
+
+    def test_a_backup_of_another_map_by_the_name_is_not_restored(self):
+        self.assertEqual(reencode_main([self.map]), 0)
+        _write(self.sub, _frames(30), 0)          # the map rebuilt under its name
+        self.assertEqual(reencode_main([self.map, '--restore']), 1)
+        self.assertEqual(keyframe_gaps(os.path.join(self.sub, 'video.mp4'))[0], 30)
+        self.assertEqual(reencode_main([self.map]), 1, 'ran over a stale backup')
+
+    def test_it_leaves_the_module_gop_alone_and_refuses_gop_0(self):
+        before = V.GOP
+        self.assertEqual(reencode_main([self.map, '--gop', '5']), 0)
+        self.assertEqual(V.GOP, before)
+        with self.assertRaises(SystemExit):
+            reencode_main([self.map, '--gop', '0'])
 
     def test_a_meta_that_does_not_number_the_frames_is_not_touched(self):
         with open(os.path.join(self.sub, 'meta.json'), 'w') as f:

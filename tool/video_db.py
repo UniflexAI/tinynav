@@ -8,19 +8,29 @@ import av
 import numpy as np
 import decord
 
+def _env(name: str, default: str, cast):
+    """`name` from the environment as `cast` reads it, or `default` when it does not
+    read: a typo in a rig's .env must not keep every map reader from importing."""
+    try:
+        return cast(os.environ.get(name, default))
+    except ValueError:
+        return cast(default)
+
+
 #: MB of decoded frames a reader keeps, the least recently used going first. A
 #: relocalization asks for the same few keyframes solve after solve (its top candidates:
 #: the same ones while the robot stands, neighbours while it walks), and each uncached
 #: read decodes from the GOP's keyframe up to the one asked for -- up to a GOP of frames
 #: for one image. In bytes, not frames: an IR frame is ~0.35 MB, a colour one ~6 MB.
 #: 0 keeps none.
-CACHE_MB = float(os.environ.get("TINYNAV_VIDEO_CACHE_MB", "32"))
+CACHE_MB = _env("TINYNAV_VIDEO_CACHE_MB", "32", float)
 #: libavcodec threads a reader decodes on. decord's default (0) is one per core plus one:
 #: on a board shared with nav they mostly wait on each other, and take the cores nav needs.
-DECODE_THREADS = int(os.environ.get("TINYNAV_VIDEO_DECODE_THREADS", "2"))
-#: Frames from one keyframe to the next in a video written here: a random read decodes at
-#: most this many. x264's default is 250. 0 leaves it to x264.
-GOP = int(os.environ.get("TINYNAV_VIDEO_GOP", "15"))
+DECODE_THREADS = _env("TINYNAV_VIDEO_DECODE_THREADS", "2", int)
+#: Frames from one keyframe to the next in a grey (IR) video written here -- the ones
+#: relocalization reads at random: a random read decodes at most this many. x264's
+#: default is 250, which a colour video keeps unless asked. 0 leaves it to x264.
+GOP = _env("TINYNAV_VIDEO_GOP", "15", int)
 
 
 class VideoDB:
@@ -29,7 +39,10 @@ class VideoDB:
         dir_path: str,
         mode: str,
         fps: int = 30,
+        gop: int | None = None,
     ):
+        """`gop`: frames between keyframes in a video written; None is `GOP` for a grey
+        one and x264's default for a colour one, 0 x264's default."""
         if mode not in {"read", "write"}:
             raise ValueError(f"Invalid mode: {mode}")
         self.dir_path = dir_path
@@ -37,6 +50,7 @@ class VideoDB:
         self.meta_path = os.path.join(dir_path, "meta.json")
         self.mode = mode
         self.fps = fps
+        self.gop = gop
         self.ts_to_idx = {}
         self.frame_count = 0
         self._stream = None
@@ -73,8 +87,9 @@ class VideoDB:
         stream.width = int(w)
         stream.height = int(h)
         stream.pix_fmt = "yuv420p"
+        gop = self.gop if self.gop is not None else (GOP if image.ndim == 2 else 0)
         stream.options = {"preset": "veryfast", "crf": "18", "tune": "zerolatency", "bf": "0",
-                          **({"g": str(GOP)} if GOP > 0 else {})}
+                          **({"g": str(gop)} if gop > 0 else {})}
         self._stream = stream
         return stream
 
@@ -176,9 +191,10 @@ class VideoDB:
         return image
 
     def close(self):
-        self._video_reader = None
-        self._cache.clear()
-        self._cache_bytes = 0
+        with self._read_lock:
+            self._video_reader = None
+            self._cache.clear()
+            self._cache_bytes = 0
         if self.mode == "write":
             if self._stream is not None:
                 for pkt in self._stream.encode(None):
