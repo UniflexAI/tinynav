@@ -5,8 +5,7 @@ Run these commands from the TinyNav checkout inside the container.
 
 ```bash
 git lfs pull --include=tinynav/models/rl_nav_policy_ppo_20261114.onnx
-trtexec --onnx=tinynav/models/rl_nav_policy_ppo_20261114.onnx \
-  --saveEngine=tinynav/models/rl_nav_policy_ppo_20261114.plan --noTF32
+make -C tinynav/models ppo
 export TINYNAV_PLANNER=rl
 export TINYNAV_RL_ROUTE_GUIDANCE=1
 export TINYNAV_RL_ENGINE="$PWD/tinynav/models/rl_nav_policy_ppo_20261114.plan"

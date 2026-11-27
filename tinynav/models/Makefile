@@ -23,6 +23,8 @@ SIGLIP_IMAGE_ONNX := siglip_vit_b_16_webli_image_fp16.onnx
 SIGLIP_TEXT_ONNX  := siglip_vit_b_16_webli_text_fp16.onnx
 # Other RL policies stay in this folder, e.g. make rl_nav RL_NAV_ONNX=rl_nav_policy_v12.onnx
 RL_NAV_ONNX       ?= rl_nav_policy_v7.onnx
+PPO_ONNX          := rl_nav_policy_ppo_20261114.onnx
+PPO_ENGINE        := $(basename $(PPO_ONNX)).plan
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
@@ -43,7 +45,7 @@ FLEX_MATCH := flexglue_matcher_prescale_cuda_$(ARCH).plan
 
 ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) $(RL_NAV_ENGINE)
 
-.PHONY: flexglue help all dinov2 superpoint lightglue retinify foundation_stereo siglip rl_nav clean
+.PHONY: flexglue help all dinov2 superpoint lightglue retinify foundation_stereo siglip rl_nav ppo clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -58,6 +60,7 @@ retinify: $(RETINIFY_ENGINE) ## Build Retinify engine
 foundation_stereo: $(FOUNDATION_STEREO_ENGINE) ## Build FoundationStereo engine
 siglip: $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) ## Build SigLIP image/text engines
 rl_nav: $(RL_NAV_ENGINE) ## Build the RL local-navigation policy engine
+ppo: $(PPO_ENGINE) ## Build the PPO navigation engine
 
 flexglue: $(FLEX_DESC) $(FLEX_MATCH) ## Build both FlexGlue engines
 
@@ -125,6 +128,9 @@ $(SIGLIP_TEXT_ENGINE): $(SIGLIP_TEXT_ONNX)
 # fp32: the policy is tiny (~0.8M params), so fp16 buys nothing and could shift the GRU state
 $(RL_NAV_ENGINE): $(RL_NAV_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@
+
+$(PPO_ENGINE): $(PPO_ONNX)
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --noTF32
 
 clean: ## Remove generated TensorRT plans for this architecture
 	rm -f *_$(ARCH).plan
