@@ -128,3 +128,22 @@ TinyNav supports several key modes to fit different robotics workflows:
      bash scripts/run_navigation.sh
      ```
    - The robot will follow the designated POIs in the order you specify.
+
+## Semantic BEV PPO on Go2
+
+Build both TensorRT engines inside the Jetson deployment container:
+
+```bash
+git lfs pull --include="tinynav/models/semantic_bev/*.onnx"
+make -C tinynav/models semantic_ppo
+```
+
+The target builds `r31-infra1.plan` and `semantic-bev-ppo.plan` together.
+The default mono Infra1 profile is 480 rows by 544 columns. For other sensor
+modes, override `INFRA1_HEIGHT` and `INFRA1_WIDTH` with the actual image size.
+Each invocation rebuilds both plans for the selected profile and local TensorRT.
+
+Start the app with `ROBOT_TYPE=go2`, `TINYNAV_PLANNER=ppo`, and
+`TINYNAV_SEMANTIC_BEV=1`. Keep the existing Unitree controller and measured
+PPO footprint settings. The planning log reports
+`Semantic BEV PPO enabled (R31, device=tensorrt)` after both plans load.

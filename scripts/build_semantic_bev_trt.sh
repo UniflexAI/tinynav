@@ -6,7 +6,7 @@ if [[ $# != 2 || ! $1 =~ ^[1-9][0-9]*$ || ! $2 =~ ^[1-9][0-9]*$ ]]; then
 fi
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 models="$root/tinynav/models/semantic_bev"
-trtexec="$(command -v trtexec || true)"
+trtexec="${TRTEXEC:-$(command -v trtexec || true)}"
 trtexec="${trtexec:-/usr/src/tensorrt/bin/trtexec}"
 shape="infra1:1x1x$1x$2"
 work="$(mktemp -d "$models/.build.XXXXXX")"

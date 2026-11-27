@@ -9,7 +9,9 @@
 .DELETE_ON_ERROR:
 
 ARCH      := $(shell uname -m)
-TRTEXEC   ?= trtexec
+TRTEXEC   ?= $(or $(shell command -v trtexec 2>/dev/null),/usr/src/tensorrt/bin/trtexec)
+INFRA1_HEIGHT ?= 480
+INFRA1_WIDTH  ?= 544
 PYTHON    ?= $(if $(wildcard ../../.venv/bin/python),../../.venv/bin/python,python3)
 SIGLIP_IMAGE_SHAPES ?=
 SIGLIP_TEXT_SHAPES ?=
@@ -43,7 +45,7 @@ FLEX_MATCH := flexglue_matcher_prescale_cuda_$(ARCH).plan
 
 ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) $(RL_NAV_ENGINE)
 
-.PHONY: flexglue help all dinov2 superpoint lightglue retinify foundation_stereo siglip rl_nav clean
+.PHONY: flexglue help all dinov2 superpoint lightglue retinify foundation_stereo siglip rl_nav semantic_ppo clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -58,6 +60,9 @@ retinify: $(RETINIFY_ENGINE) ## Build Retinify engine
 foundation_stereo: $(FOUNDATION_STEREO_ENGINE) ## Build FoundationStereo engine
 siglip: $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) ## Build SigLIP image/text engines
 rl_nav: $(RL_NAV_ENGINE) ## Build the RL local-navigation policy engine
+
+semantic_ppo: ## Build Infra1 scoring and semantic BEV PPO engines
+	TRTEXEC="$(TRTEXEC)" bash ../../scripts/build_semantic_bev_trt.sh "$(INFRA1_HEIGHT)" "$(INFRA1_WIDTH)"
 
 flexglue: $(FLEX_DESC) $(FLEX_MATCH) ## Build both FlexGlue engines
 
